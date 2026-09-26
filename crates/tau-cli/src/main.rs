@@ -85,6 +85,13 @@ struct Cli {
     #[arg(long)]
     mcp_url: Option<String>,
 
+    /// Bearer token handed to the wasm provider inside every request
+    /// payload ({"auth": {"bearer": ...}}). Giving it IS the consent to
+    /// place the token in guest memory; never persisted. Falls back to
+    /// the TAU_PROVIDER_AUTH environment variable.
+    #[arg(long, requires = "provider_wasm")]
+    provider_auth: Option<String>,
+
     /// HTTP origin a wasm provider may reach (repeatable), e.g.
     /// --provider-origin https://api.openai.com — remembered per signing
     /// fingerprint with --remember.
@@ -509,8 +516,12 @@ async fn main() -> Result<()> {
         if !consent.origins.is_empty() {
             eprintln!("[tau] provider http origins: {:?}", consent.origins);
         }
+        let auth = cli
+            .provider_auth
+            .clone()
+            .or_else(|| std::env::var("TAU_PROVIDER_AUTH").ok());
         let model = Box::new(
-            host.load_provider(path, name, consent.origins.clone())
+            host.load_provider(path, name, consent.origins.clone(), auth)
                 .with_context(|| format!("loading provider {}", path.display()))?,
         );
         maybe_remember(cli.remember, &fingerprint, consent)?;

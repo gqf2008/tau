@@ -69,6 +69,22 @@ did not consent to. Both capabilities are always linked but granted empty by
 default, so an unconsented bridge loads fine and fails at call time, not
 instantiation time (sandbox by context, same as the deny-all WasiCtx).
 
+## Provider credential delivery
+
+A wasm provider calling a real LLM gateway needs an API credential. The
+host does not keep secrets for the guest — the user hands a bearer token
+to the host explicitly (`--provider-auth <token>` or the
+`TAU_PROVIDER_AUTH` environment variable), and the host injects it into
+every `run`'s request-json as `"auth": {"bearer": "<token>"}`. **Giving
+it IS the consent** to place the token in guest memory; the token is
+never written to the consent file (origin grants may be remembered with
+`--remember` — secrets may not; what is remembered is only the network
+egress, the credential is re-given every run).
+
+Guest side: read `parsed["auth"]["bearer"]`; no field means none was
+given. See `examples/http-provider` (forwards it as the Authorization
+header and marks the output `[auth]`).
+
 ## Provider network egress
 
 The **provider world imports the same `http` interface**: a wasm provider

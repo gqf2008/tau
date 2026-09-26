@@ -115,11 +115,35 @@ async fn granted_origin_fetches() {
     let server = StaticServer::start(&python);
     let host = ExtensionHost::new();
     let model = host
-        .load_provider(&wasm, "http", [server.origin()].into_iter().collect())
+        .load_provider(&wasm, "http", [server.origin()].into_iter().collect(), None)
         .expect("load provider");
     let (text, error) = run_provider(&model, &server.url()).await;
     assert!(error.is_none(), "unexpected error: {error:?}");
     assert_eq!(text, "STATUS 200: hello from server");
+}
+
+#[tokio::test]
+async fn consented_auth_token_reaches_the_guest() {
+    let (Some(wasm), Some(python)) = (artifact(), python()) else {
+        eprintln!("skipping: http_provider.wasm not built or no python");
+        return;
+    };
+    let server = StaticServer::start(&python);
+    let host = ExtensionHost::new();
+    let model = host
+        .load_provider(
+            &wasm,
+            "http",
+            [server.origin()].into_iter().collect(),
+            Some("tok-secret".into()),
+        )
+        .expect("load provider");
+    let (text, error) = run_provider(&model, &server.url()).await;
+    assert!(error.is_none(), "unexpected error: {error:?}");
+    // The guest saw {"auth": {"bearer": …}} and marked its answer; the
+    // token itself never appears in the output.
+    assert_eq!(text, "STATUS 200 [auth]: hello from server");
+    assert!(!text.contains("tok-secret"));
 }
 
 #[tokio::test]
@@ -132,7 +156,7 @@ async fn ungranted_origin_is_denied_at_call_time() {
     let host = ExtensionHost::new();
     // No consent: empty origin set.
     let model = host
-        .load_provider(&wasm, "http", Default::default())
+        .load_provider(&wasm, "http", Default::default(), None)
         .expect("load provider");
     let (text, error) = run_provider(&model, &server.url()).await;
     assert!(text.is_empty(), "no fetch without consent, got: {text:?}");

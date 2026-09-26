@@ -354,6 +354,9 @@ type SharedProvider = Arc<Mutex<ProviderInstance>>;
 pub struct WasmModel {
     shared: SharedProvider,
     model: String,
+    /// Bearer token injected into every request payload as
+    /// `{"auth": {"bearer": ...}}`; None omits the field entirely.
+    auth: Option<String>,
 }
 
 impl ExtensionHost {
@@ -361,15 +364,20 @@ impl ExtensionHost {
     /// Load a provider component. `origins` is the HTTP egress allowlist
     /// ("scheme://host[:port]") this component may reach — passing it IS
     /// the consent; empty means every http call fails permission-denied.
+    /// `auth`, when given, is handed to the component inside every
+    /// request payload (`{"auth": {"bearer": ...}}`) — passing it IS the
+    /// consent to place the token in guest memory. It is never persisted
+    /// by the host.
     pub fn load_provider(
         &self,
         path: impl AsRef<Path>,
         model: impl Into<String>,
         origins: std::collections::HashSet<String>,
+        auth: Option<String>,
     ) -> Result<WasmModel, ExtError> {
         let path = path.as_ref().to_path_buf();
         let model = model.into();
-        Self::off_runtime(move || self.load_provider_inner(&path, model, origins))
+        Self::off_runtime(move || self.load_provider_inner(&path, model, origins, auth))
     }
 
     fn load_provider_inner(
@@ -377,6 +385,7 @@ impl ExtensionHost {
         path: &Path,
         model: String,
         origins: std::collections::HashSet<String>,
+        auth: Option<String>,
     ) -> Result<WasmModel, ExtError> {
         let bytes = self.read_verified(path)?;
         let component = Component::from_binary(&self.engine, &bytes).map_err(|e| ExtError::Load {
@@ -401,6 +410,7 @@ impl ExtensionHost {
         Ok(WasmModel {
             shared: Arc::new(Mutex::new(ProviderInstance { store, bindings })),
             model,
+            auth,
         })
     }
 }
@@ -433,6 +443,25 @@ impl provider_bindings::tau::extension::http::Host for ProviderState {
     }
 }
 
+/// The payload handed to a provider component's `run`: the documented
+/// wire shape, plus `auth` when the caller consented a token.
+fn request_json(model: &str, req: &tau_core::Request, auth: Option<&str>) -> String {
+    let mut payload = serde_json::json!({
+        "model": model,
+        "system": req.system,
+        "messages": req.messages,
+        "tools": req.tools.iter().map(|t| serde_json::json!({
+            "name": t.name,
+            "description": t.description,
+            "parameters": t.parameters,
+        })).collect::<Vec<_>>(),
+    });
+    if let Some(token) = auth {
+        payload["auth"] = serde_json::json!({ "bearer": token });
+    }
+    payload.to_string()
+}
+
 #[async_trait]
 impl tau_core::Model for WasmModel {
     async fn stream(
@@ -441,17 +470,7 @@ impl tau_core::Model for WasmModel {
     ) -> futures::stream::BoxStream<'static, tau_core::ModelEvent> {
         use tau_core::ModelEvent;
 
-        let request_json = serde_json::json!({
-            "model": self.model,
-            "system": req.system,
-            "messages": req.messages,
-            "tools": req.tools.iter().map(|t| serde_json::json!({
-                "name": t.name,
-                "description": t.description,
-                "parameters": t.parameters,
-            })).collect::<Vec<_>>(),
-        })
-        .to_string();
+        let request_json = request_json(&self.model, req, self.auth.as_deref());
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let shared = self.shared.clone();
@@ -490,5 +509,25 @@ impl tau_core::Model for WasmModel {
             }
         }
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod auth_payload_tests {
+    #[test]
+    fn request_json_carries_auth_only_when_consented() {
+        let req = tau_core::Request {
+            system: None,
+            messages: vec![tau_core::Message::user("hi")],
+            tools: vec![],
+        };
+        let without: serde_json::Value =
+            serde_json::from_str(&super::request_json("m", &req, None)).unwrap();
+        assert!(without.get("auth").is_none());
+
+        let with: serde_json::Value =
+            serde_json::from_str(&super::request_json("m", &req, Some("tok-1"))).unwrap();
+        assert_eq!(with["auth"]["bearer"], "tok-1");
+        assert_eq!(with["model"], "m");
     }
 }

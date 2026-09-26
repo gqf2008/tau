@@ -67,8 +67,11 @@ interface events {
 /// A model provider. Streaming is push-mode: the component calls
 /// `events.emit` per chunk and returns from `stream` when the response is
 /// complete. Provider components typically need scoped network access
-/// (declared in metadata, granted by user consent); auth tokens are
-/// delivered in the request payload by the host.
+/// (declared in metadata, granted by user consent); when the user hands
+/// the host a bearer token (`--provider-auth` / TAU_PROVIDER_AUTH), it
+/// arrives inside the request payload as "auth": {"bearer": token} —
+/// giving the token IS the consent to place it in guest memory, and the
+/// host never persists it.
 interface models {
     record info {
         /// Model id passed in requests (e.g. "gpt-5", "claude-sonnet-4-5").
@@ -83,7 +86,8 @@ interface models {
 
     /// Run one streaming request to completion, pushing events via `emit`.
     /// request-json: {"model": string, "system": string|null,
-    ///   "messages": [...], "tools": [...]} using tau's message wire shape.
+    ///   "messages": [...], "tools": [...],
+    ///   "auth"?: {"bearer": string}} using tau's message wire shape.
     /// Contract (same as the native Model trait): never trap for
     /// request/transport failures; report via an error event followed by
     /// done{stop:"error"}.

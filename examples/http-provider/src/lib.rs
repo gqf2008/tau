@@ -61,7 +61,15 @@ fn fetch(request_json: &str) -> Result<String, String> {
         .trim()
         .to_string();
 
-    let handle = http::request("GET", &url, &[], &[])?;
+    // The host injects a consented bearer token as {"auth": {"bearer": …}};
+    // forward it as the Authorization header.
+    let headers: Vec<(String, String)> = match parsed["auth"]["bearer"].as_str() {
+        Some(token) => vec![("authorization".into(), format!("Bearer {token}"))],
+        None => vec![],
+    };
+    let authed = !headers.is_empty();
+
+    let handle = http::request("GET", &url, &headers, &[])?;
     let status = http::status(handle)?;
     let mut body = String::new();
     loop {
@@ -72,7 +80,8 @@ fn fetch(request_json: &str) -> Result<String, String> {
         }
     }
     http::close(handle);
-    Ok(format!("STATUS {status}: {}", body.trim()))
+    let marker = if authed { " [auth]" } else { "" };
+    Ok(format!("STATUS {status}{marker}: {}", body.trim()))
 }
 
 fn emit(event: &serde_json::Value) {
