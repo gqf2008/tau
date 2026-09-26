@@ -125,3 +125,118 @@ impl ProbeRegistry {
         }
     }
 }
+
+// ---------------------------------------------------------------------------
+// Discovery catalog: `tau probes` renders this; extension authors never
+// guess payload shapes. Lives next to the enum so the two cannot drift —
+// the round-trip test below pins every wired entry to a real variant.
+// ---------------------------------------------------------------------------
+
+/// One catalog entry: a wired probe point, or a reserved one that fires
+/// when its feature lands.
+pub struct PointInfo {
+    /// Present when wired; reserved points have no variant yet.
+    pub point: Option<ProbePoint>,
+    pub name: &'static str,
+    pub wired: bool,
+    /// JSON shape of the payload handed to the probe.
+    pub payload: &'static str,
+    /// What each verdict does at this point.
+    pub verdicts: &'static str,
+}
+
+pub const CATALOG: &[PointInfo] = &[
+    PointInfo {
+        point: Some(ProbePoint::BeforeRun),
+        name: "before_run",
+        wired: true,
+        payload: r#"{"prompt": Message}"#,
+        verdicts: "continue | replace{prompt} | block{reason} — block aborts the run",
+    },
+    PointInfo {
+        point: Some(ProbePoint::TransformContext),
+        name: "transform_context",
+        wired: true,
+        payload: r#"{"messages": [Message], "system": string|null}"#,
+        verdicts: "continue | replace{messages?, system?} — block treated as continue",
+    },
+    PointInfo {
+        point: Some(ProbePoint::BeforeRequest),
+        name: "before_request",
+        wired: true,
+        payload: r#"{"system": string|null, "messages": [Message], "tools": [ToolDef]}"#,
+        verdicts: "continue | replace{system, messages} (tools are registry-owned) | block{reason}",
+    },
+    PointInfo {
+        point: Some(ProbePoint::AfterResponse),
+        name: "after_response",
+        wired: true,
+        payload: r#"{"message": Message, "stop": StopReason}"#,
+        verdicts: "continue | replace{message, stop?} | block{reason}",
+    },
+    PointInfo {
+        point: Some(ProbePoint::BeforeTool),
+        name: "before_tool",
+        wired: true,
+        payload: r#"{"id": string, "name": string, "args": object}"#,
+        verdicts: "continue | replace(args) | block{reason} — block becomes a blocked tool result for the model",
+    },
+    PointInfo {
+        point: Some(ProbePoint::AfterTool),
+        name: "after_tool",
+        wired: true,
+        payload: r#"{"id": string, "name": string, "args": object, "content": string, "isError": bool}"#,
+        verdicts: "continue | replace{content?, isError?} | block treated as continue",
+    },
+    PointInfo {
+        point: Some(ProbePoint::BeforeRunEnd),
+        name: "before_run_end",
+        wired: true,
+        payload: r#"{"messages": [Message], "stop": StopReason}"#,
+        verdicts: "continue | replace{messages} | block{reason}",
+    },
+    PointInfo {
+        point: None,
+        name: "before_compaction",
+        wired: false,
+        payload: r#"{"reason": "manual"|"threshold"|"overflow", "input": [Message]} (reserved — fires when compaction lands)"#,
+        verdicts: "continue | replace{summary} | block{reason}",
+    },
+    PointInfo {
+        point: None,
+        name: "before_navigation",
+        wired: false,
+        payload: r#"{"target": entry-id, "summary": string} (reserved — fires when branch navigation lands)"#,
+        verdicts: "continue | replace{summary} | block{reason}",
+    },
+];
+
+#[cfg(test)]
+mod catalog_tests {
+    use super::*;
+
+    #[test]
+    fn every_wired_entry_names_a_real_point() {
+        for info in CATALOG {
+            assert_eq!(
+                info.wired,
+                info.point.is_some(),
+                "{}: wired flag disagrees with point presence",
+                info.name
+            );
+            if let Some(point) = info.point {
+                assert_eq!(point.name(), info.name, "{}: name drift", info.name);
+                assert_eq!(ProbePoint::from_name(info.name), Some(point));
+            }
+        }
+        // Every enum variant appears in the catalog exactly once.
+        for point in ProbePoint::ALL {
+            assert_eq!(
+                CATALOG.iter().filter(|i| i.point == Some(point)).count(),
+                1,
+                "{:?} missing from catalog",
+                point
+            );
+        }
+    }
+}

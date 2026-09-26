@@ -89,6 +89,12 @@ enum Sub {
         #[arg(long)]
         key: Option<String>,
     },
+    /// List probe points with payload shapes and verdict semantics.
+    Probes {
+        /// Machine-readable output.
+        #[arg(long)]
+        json: bool,
+    },
     /// Trust a base64 ed25519 pubkey (or list trusted keys).
     Trust {
         /// Base64 pubkey to add to ~/.tau/trust.
@@ -101,6 +107,29 @@ enum Sub {
 
 fn run_sub(sub: Sub) -> Result<()> {
     match sub {
+        Sub::Probes { json } => {
+            if json {
+                let entries: Vec<serde_json::Value> = tau_core::probe::CATALOG
+                    .iter()
+                    .map(|info| {
+                        serde_json::json!({
+                            "name": info.name,
+                            "wired": info.wired,
+                            "payload": info.payload,
+                            "verdicts": info.verdicts,
+                        })
+                    })
+                    .collect();
+                println!("{}", serde_json::to_string_pretty(&entries)?);
+            } else {
+                for info in tau_core::probe::CATALOG {
+                    let status = if info.wired { "wired" } else { "reserved" };
+                    println!("{} [{}]", info.name, status);
+                    println!("  payload:  {}", info.payload);
+                    println!("  verdicts: {}", info.verdicts);
+                }
+            }
+        }
         Sub::Keygen => {
             let fp = tau_ext::sign::keygen()?;
             println!("key generated and trusted: {fp}");
