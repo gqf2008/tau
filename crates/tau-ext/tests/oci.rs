@@ -1,0 +1,176 @@
+//! Integration test: pull a component from a mock OCI registry and load it
+//! through the normal path (signature/trust policy unchanged). Skipped
+//! unless the upper.wasm artifact has been built and python is available.
+
+use std::path::PathBuf;
+
+use tau_ext::oci;
+use tau_ext::ExtensionHost;
+
+fn artifact() -> Option<PathBuf> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/upper/target/wasm32-wasip2/release/upper.wasm");
+    path.exists().then_some(path)
+}
+
+fn python() -> Option<String> {
+    for candidate in ["python", "python3", "py"] {
+        if std::process::Command::new(candidate)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return Some(candidate.to_string());
+        }
+    }
+    None
+}
+
+struct MockRegistry {
+    child: std::process::Child,
+    port: u16,
+}
+
+impl MockRegistry {
+    fn start(python: &str, blob: &PathBuf, auth: bool) -> Self {
+        let script = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/mock_oci_registry.py")
+            .canonicalize()
+            .expect("mock registry exists");
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .expect("bind ephemeral port")
+            .local_addr()
+            .expect("local addr")
+            .port();
+        let mut command = std::process::Command::new(python);
+        command
+            .arg(&script)
+            .arg(port.to_string())
+            .arg(blob)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null());
+        if auth {
+            command.arg("--auth");
+        }
+        let child = command.spawn().expect("spawn mock registry");
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+            if std::time::Instant::now() > deadline {
+                panic!("mock registry did not start");
+            }
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+        Self { child, port }
+    }
+}
+
+impl Drop for MockRegistry {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+    }
+}
+
+/// reqwest blocking must not run on a tokio runtime thread — pull on a
+/// blocking thread and join it.
+async fn pull(reference: &str, cache: &std::path::Path) -> Result<oci::Pulled, oci::OciError> {
+    let reference = reference.to_string();
+    let cache = cache.to_path_buf();
+    tokio::task::spawn_blocking(move || oci::pull_into(&reference, &cache))
+        .await
+        .expect("pull task")
+}
+
+fn cache() -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "tau-test-oci-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos()
+    ))
+}
+
+#[tokio::test]
+async fn pulls_loads_and_caches_from_registry() {
+    let (Some(wasm), Some(python)) = (artifact(), python()) else {
+        eprintln!("skipping: upper.wasm not built or no python");
+        return;
+    };
+    let registry = MockRegistry::start(&python, &wasm, false);
+    let cache = cache();
+    let reference = format!("oci://127.0.0.1:{}/test/component:latest", registry.port);
+
+    let pulled = pull(&reference, &cache).await.expect("pull");
+    assert!(pulled.mutable_tag);
+    assert!(pulled.digest.starts_with("sha256:"));
+    // The pulled bytes are exactly the artifact's bytes.
+    assert_eq!(
+        std::fs::read(&pulled.path).unwrap(),
+        std::fs::read(&wasm).unwrap()
+    );
+
+    // Second pull is a cache hit (manifest is re-fetched, blob is not).
+    let pulled_again = pull(&reference, &cache).await.expect("pull cached");
+    assert_eq!(pulled_again.path, pulled.path);
+
+    // The cached file loads and runs through the normal path.
+    let host = ExtensionHost::new();
+    let extension = host.load(&pulled.path).expect("load pulled component");
+    let (tools, _) = extension.into_parts();
+    let out = tools[0].execute(serde_json::json!({ "text": "from oci" })).await;
+    assert_eq!(out.content, "FROM OCI");
+
+    let _ = std::fs::remove_dir_all(&cache);
+}
+
+#[tokio::test]
+async fn pulls_behind_the_bearer_token_dance() {
+    let (Some(wasm), Some(python)) = (artifact(), python()) else {
+        eprintln!("skipping: upper.wasm not built or no python");
+        return;
+    };
+    let registry = MockRegistry::start(&python, &wasm, true);
+    let cache = cache();
+    let reference = format!("oci://127.0.0.1:{}/test/component:latest", registry.port);
+    let pulled = pull(&reference, &cache).await.expect("pull with token");
+    assert_eq!(
+        std::fs::read(&pulled.path).unwrap(),
+        std::fs::read(&wasm).unwrap()
+    );
+    let _ = std::fs::remove_dir_all(&cache);
+}
+
+#[test]
+fn unknown_digest_is_an_error() {
+    let Some(python) = python() else {
+        eprintln!("skipping: no python");
+        return;
+    };
+    // Serve a blob whose digest in the manifest will not match: the mock
+    // computes the digest over the actual bytes, so corrupt in transit is
+    // not possible — instead verify the check fires when the reference
+    // digest and blob disagree by pulling a digest-pinned reference whose
+    // digest does not exist.
+    let wasm = artifact().unwrap_or_else(|| {
+        // Any bytes will do for a 404 check.
+        let path = std::env::temp_dir().join("tau-oci-corrupt.bin");
+        std::fs::write(&path, b"not wasm").unwrap();
+        path
+    });
+    let registry = MockRegistry::start(&python, &wasm, false);
+    let bogus = format!(
+        "oci://127.0.0.1:{}/test/component@sha256:{}",
+        registry.port,
+        "00".repeat(32)
+    );
+    let cache = cache();
+    // Plain sync test: no tokio runtime thread, so reqwest blocking is
+    // fine right here.
+    let result = oci::pull_into(&bogus, &cache);
+    assert!(result.is_err());
+    let _ = std::fs::remove_dir_all(&cache);
+}

@@ -40,6 +40,7 @@ mod bridge_bindings {
 
 pub mod bridge;
 pub mod consent;
+pub mod oci;
 pub mod sign;
 
 #[derive(Debug, Error)]

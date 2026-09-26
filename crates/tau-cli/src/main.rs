@@ -212,6 +212,35 @@ fn default_model() -> String {
         .unwrap_or_else(|_| "gpt-4o-mini".into())
 }
 
+/// Resolve a component argument: `oci://registry/repo:tag` pulls into the
+/// content-addressed cache (signature/trust verification applies to the
+/// cached bytes unchanged); anything else is a local path. Pulls run off
+/// the runtime — reqwest blocking must not run on a tokio thread.
+async fn resolve_component(arg: &std::path::Path) -> Result<PathBuf> {
+    let text = arg.to_string_lossy();
+    if !text.starts_with("oci://") {
+        return Ok(arg.to_path_buf());
+    }
+    let reference = text.into_owned();
+    let pulled = {
+        let reference = reference.clone();
+        tokio::task::spawn_blocking(move || tau_ext::oci::pull(&reference))
+            .await
+            .context("oci pull task")??
+    };
+    eprintln!("[tau] oci: {} -> {} ({})",
+        reference,
+        pulled.digest,
+        pulled.path.display());
+    if pulled.mutable_tag {
+        eprintln!(
+            "[tau] note: mutable tag — pin @{} for reproducible loads",
+            pulled.digest
+        );
+    }
+    Ok(pulled.path)
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -233,6 +262,7 @@ async fn main() -> Result<()> {
         })
     };
     for path in &cli.extensions {
+        let path = &resolve_component(path).await?;
         let extension = host
             .load(path)
             .with_context(|| format!("loading {}", path.display()))?;
@@ -248,6 +278,7 @@ async fn main() -> Result<()> {
     }
 
     if let Some(path) = &cli.mcp_bridge {
+        let path = &resolve_component(path).await?;
         let mut explicit = tau_ext::bridge::BridgeConsent::default();
         if let Some(command_json) = cli.mcp_command.as_deref() {
             let command: Vec<String> = serde_json::from_str(command_json).with_context(|| {
@@ -312,7 +343,8 @@ async fn main() -> Result<()> {
 
     let model: Box<dyn Model> = if cli.demo {
         Box::new(FauxModel::echo())
-    } else if let Some(path) = &cli.provider_wasm {
+    } else if let Some(raw) = &cli.provider_wasm {
+        let path = &resolve_component(raw).await?;
         let name = cli
             .model
             .clone()

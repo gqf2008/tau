@@ -17,6 +17,10 @@ extensible — but extensions are **wasm components**, not in-process scripts.
 - **Signing**: components must carry an embedded ed25519 signature from a
   trusted key (`tau keygen` / `tau sign` / `tau trust`); `--allow-unsigned`
   is the explicit dev escape. See `docs/signing.md`.
+- **Distribution**: components pull from any OCI registry
+  (`oci://ghcr.io/org/ext:tag`), content-addressed cache, digest-verified;
+  signature/trust/consent apply to pulled bytes unchanged. Pull-only —
+  publishing is `oras`/`crane`'s job. See `docs/oci.md`.
 - **Bridges**: no MCP in core. External tool protocols (MCP) are translated
   by bridge components over a consent-gated spawn-with-pipes capability
   (`--mcp-bridge b.wasm --mcp-command '["python","server.py"]'`).
