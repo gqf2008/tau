@@ -38,12 +38,21 @@ impl HttpRegistry {
 
     /// Extract the consent origin ("scheme://host[:port]") from an http(s)
     /// URL; strips userinfo and any path.
+    ///
+    /// The authority ends at the first `/`, `?`, `#`, OR `\` — reqwest
+    /// parses URLs the WHATWG way, where `\` is a path delimiter for
+    /// special schemes and `?`/`#` start the query/fragment. Scanning
+    /// only for `/` (or stripping userinfo past those delimiters) would
+    /// let `http://evil?@consented/` or `http://evil\@consented/`
+    /// compute a consented origin while the request goes to evil —
+    /// the check must see the same host the client will dial.
     pub(crate) fn origin_of(url: &str) -> Option<String> {
         let (scheme, rest) = url.split_once("://")?;
         if scheme != "http" && scheme != "https" {
             return None;
         }
-        let authority = rest.split('/').next()?;
+        let authority_end = rest.find(['/', '?', '#', '\\']).unwrap_or(rest.len());
+        let authority = &rest[..authority_end];
         // Strip any userinfo; host[:port] is what consent covers.
         let host_port = authority.rsplit('@').next()?;
         if host_port.is_empty() {
@@ -163,5 +172,97 @@ impl HttpRegistry {
 
     pub(crate) fn close(&mut self, handle: u64) {
         self.responses.remove(&handle);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn origin(url: &str) -> Option<String> {
+        HttpRegistry::origin_of(url)
+    }
+
+    #[test]
+    fn origin_extraction_strips_userinfo_path_and_case() {
+        assert_eq!(
+            origin("http://127.0.0.1:8402/path?q=1"),
+            Some("http://127.0.0.1:8402".into())
+        );
+        // Userinfo inside the authority is stripped — that is its job.
+        assert_eq!(
+            origin("http://user:pw@127.0.0.1:8402/x"),
+            Some("http://127.0.0.1:8402".into())
+        );
+        assert_eq!(
+            origin("https://EXAMPLE.com/"),
+            Some("https://example.com".into())
+        );
+        // No path at all, and an explicit default port, are fine.
+        assert_eq!(
+            origin("http://example.com"),
+            Some("http://example.com".into())
+        );
+    }
+
+    #[test]
+    fn origin_extraction_refuses_non_http_and_empty_host() {
+        assert_eq!(origin("ftp://example.com/"), None);
+        assert_eq!(origin("HTTP://example.com/"), None);
+        assert_eq!(origin("http://@/x"), None);
+        assert_eq!(origin("http://"), None);
+        assert_eq!(origin("not a url"), None);
+    }
+
+    #[test]
+    fn consent_bypasses_via_delimiters_are_closed() {
+        // Every one of these asks: does the check see the same host the
+        // WHATWG parser in reqwest will dial? The authority ends at the
+        // first of / ? # \ — anything after is not userinfo.
+        let cases = [
+            // `@` inside the query: host is evil, not 127.0.0.1.
+            ("http://evil.test?@127.0.0.1:8402/", "http://evil.test"),
+            // `@` inside the fragment.
+            ("http://evil.test#@127.0.0.1:8402/", "http://evil.test"),
+            // Backslash is a path delimiter for special schemes (WHATWG):
+            // reqwest dials evil.test, so the origin must be evil.test.
+            ("http://evil.test\\@127.0.0.1:8402/", "http://evil.test"),
+            // Suffix lookalikes were never the consented host.
+            (
+                "http://127.0.0.1:8402.evil.test/",
+                "http://127.0.0.1:8402.evil.test",
+            ),
+        ];
+        for (url, want) in cases {
+            assert_eq!(origin(url), Some(want.to_string()), "url: {url}");
+        }
+    }
+
+    #[test]
+    fn request_gate_applies_the_computed_origin() {
+        let mut registry =
+            HttpRegistry::new(["http://127.0.0.1:8402".to_string()].into_iter().collect());
+        // Consented origin passes the gate (the send itself fails —
+        // nothing listens — but the error must not be the allowlist).
+        let err = registry
+            .request("GET", "http://127.0.0.1:8402/", &[], &[])
+            .unwrap_err();
+        assert!(
+            !err.contains("not in consent allowlist"),
+            "consented origin refused: {err}"
+        );
+        // The delimiter tricks must never pass the gate.
+        for url in [
+            "http://evil.test?@127.0.0.1:8402/",
+            "http://evil.test#@127.0.0.1:8402/",
+            "http://evil.test\\@127.0.0.1:8402/",
+            "http://127.0.0.1:8402.evil.test/",
+        ] {
+            let err = registry.request("GET", url, &[], &[]).unwrap_err();
+            assert!(
+                err.contains("not in consent allowlist"),
+                "bypass slipped the gate: {url} → {err}"
+            );
+        }
     }
 }

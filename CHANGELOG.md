@@ -26,13 +26,17 @@ the extension unit instead of in-process scripts.
   continue/replace/block verdicts; a trapped probe degrades to continue
   and the guest instance is rebuilt, so later probes still decide —
   a broken probe never wedges the run and never goes silently dead.
-  Ambient WASI by default, `--deny-wasi` restores the sandbox.- **Signing & consent**: embedded ed25519 signature sections, a trust
+  Ambient WASI by default, `--deny-wasi` restores the sandbox.
+- **Signing & consent**: embedded ed25519 signature sections, a trust
   store, per-fingerprint remembered capability grants (bridge argv,
   HTTP origins, credential delivery, WASI-deny). Secrets are delivered,
   never persisted. `tau trust --from-component` onboards keys from
   verified bytes. `--allow-unsigned` excuses only *absent* signatures —
   a signature section that does not verify is refused under every
-  policy, so the escape hatch cannot launder tampered bytes.
+  policy, so the escape hatch cannot launder tampered bytes. Origin
+  checks parse the way the HTTP client does (authority ends at
+  `/ ? # \`), so userinfo hidden in a query, fragment, or backslash
+  cannot smuggle a request past a consented origin.
 - **Distribution**: push/pull components through any OCI registry;
   digest-addressed cache that verifies hits and re-pulls a corrupted
   entry instead of handing bad bytes to the load path;
@@ -82,7 +86,7 @@ the compacted branch), torn-tail recovery, concurrent access, and
 probe verdicts (block, continue, and a trapped probe degrading without
 going dead), and the WASI sandbox boundary (ambient env visible by
 default, empty under --deny-wasi) — restoring
-the environment exactly afterwards. 108 tests, clippy-clean across all
+the environment exactly afterwards. 112 tests, clippy-clean across all
 workspaces.
 
 Performance baseline (docs/perf.md): extension load 202ms cold → 9ms
