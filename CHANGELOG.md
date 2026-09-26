@@ -57,13 +57,14 @@ full tour.
 ### Validation
 
 `scripts/validate.sh` proves the release the way a first user meets it,
-in nine steps: demo, the signing/trust chain (trusted load; untrusted,
+in ten steps: demo, the signing/trust chain (trusted load; untrusted,
 byte-flipped, signature-stripped, and corrupted-signature rejection),
 all three built-in providers
 against a loopback mock, wasm-provider consent gate, MCP bridge spawn
 gate, remembered-consent lifecycle, OCI push/pull/trust onboarding,
-blob GC, and probe verdicts (block, continue, and a trapped probe
-degrading without going dead) — restoring the environment exactly
+blob GC, compaction (summary entry; originals stay; follow-ups run on
+the compacted branch), and probe verdicts (block, continue, and a
+trapped probe degrading without going dead) — restoring the environment exactly
 afterwards. 99 tests, clippy-clean across all workspaces.
 
 Performance baseline (docs/perf.md): extension load 202ms cold → 9ms

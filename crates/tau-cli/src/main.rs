@@ -745,10 +745,12 @@ async fn main() -> Result<()> {
                 };
                 store.append(entry)?;
                 eprintln!("[tau] compacted session: {}", cli.session.display());
-                if cli.r#continue {
-                    let head = store.head().unwrap().id.clone();
-                    history = store.active_branch(&head)?;
-                }
+                // Whatever follows — a -p prompt or the REPL — runs on
+                // the compacted branch, whether or not --continue was
+                // given: compacting and then ignoring the summary would
+                // defeat the point (and the help text promises it).
+                let head = store.head().unwrap().id.clone();
+                history = store.active_branch(&head)?;
             }
         }
         if cli.print.is_none() && !interactive {

@@ -1,8 +1,10 @@
 #!/usr/bin/env bash
 # First-user validation: prove the release candidate works for someone
-# who just installed tau — demo, the signing/trust chain, a built-in
-# provider against a loopback SSE mock, and the wasm provider consent
-# gate in both directions.
+# who just installed tau, in ten steps — demo, the signing/trust chain
+# (incl. tamper rejection), all three built-in providers against a
+# loopback mock, the wasm provider consent gate, the MCP bridge spawn
+# gate, the remembered-consent lifecycle, OCI distribution, blob GC,
+# compaction, and probe verdicts.
 #
 # Usage: scripts/validate.sh
 #
@@ -63,13 +65,13 @@ mkdir -p "$WORK"
 cd "$WORK"
 
 # --- step 1: demo -----------------------------------------------------
-step "1/9 demo"
+step "1/10 demo"
 OUT="$("$TAU" --demo -p "hello from validation" 2>&1)" || fail "demo exited $?"
 echo "$OUT" | grep -q "tau is alive" || fail "demo answer missing: $OUT"
 echo "ok — faux model answered"
 
 # --- step 2: signing + trust chain ------------------------------------
-step "2/9 signing and trust chain"
+step "2/10 signing and trust chain"
 GEN="$("$TAU" keygen)" || fail "keygen: $GEN"
 THROWAWAY_FP=$(echo "$GEN" | sed -n 's/^key generated and trusted: //p')
 [ -n "$THROWAWAY_FP" ] || fail "no fingerprint in keygen output: $GEN"
@@ -95,7 +97,7 @@ echo "ok — untrusted component rejected"
 
 # Tamper attacks on the signed component: however the bytes were corrupted
 # after signing, the default gate must refuse them.
-step "2b/9 signature tamper rejection"
+step "2b/10 signature tamper rejection"
 
 # Flip one byte mid-module (far outside the trailing signature section):
 # the digest no longer matches the signature.
@@ -165,7 +167,7 @@ grep -q "signature" tampered-sig.err \
 echo "ok — corrupted signature payload refused"
 
 # --- step 3: built-in provider against a loopback SSE mock -------------
-step "3/9 built-in providers (loopback SSE mock)"
+step "3/10 built-in providers (loopback SSE mock)"
 cat > mock.py << 'PYEOF'
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -260,7 +262,7 @@ echo "$OUT" | grep -q "mock anthropic ok" || fail "Anthropic SSE stream did not 
 echo "ok — Anthropic Messages SSE streamed end to end"
 
 # --- step 4: wasm provider consent gate --------------------------------
-step "4/9 wasm provider consent gate"
+step "4/10 wasm provider consent gate"
 if "$TAU" --allow-unsigned \
     --provider-wasm "$HTTP_PROVIDER" --model http-echo \
     -p "http://127.0.0.1:8402/" 2>&1 | grep -q "STATUS 200"; then
@@ -277,7 +279,7 @@ echo "$OUT" | grep -q "STATUS 200: hello from mock origin" \
 echo "ok — with --provider-origin the fetch flows"
 
 # --- step 5: MCP bridge (consent-gated spawn) --------------------------
-step "5/9 MCP bridge (consent-gated spawn)"
+step "5/10 MCP bridge (consent-gated spawn)"
 # Without --mcp-command the bridge has nothing it may spawn: the load
 # must fail, not silently degrade.
 if "$TAU" --allow-unsigned --mcp-bridge "$MCP_BRIDGE" --demo -p hi > /dev/null 2>&1; then
@@ -297,7 +299,7 @@ echo "$OUT" | grep -q "tool ← echo: bridge validation ok" \
 echo "ok — consent-gated spawn served the echo tool through the MCP bridge"
 
 # --- step 6: remembered consent lifecycle ------------------------------
-step "6/9 remembered consent (--remember / --list / --revoke)"
+step "6/10 remembered consent (--remember / --list / --revoke)"
 # Consent is keyed by signing fingerprint, so the provider copy is
 # signed with the throwaway key — the real trust store and any real
 # consent records stay untouched.
@@ -332,7 +334,7 @@ fi
 echo "ok — revoked grant is gone and the gate closes again"
 
 # --- step 7: OCI distribution ------------------------------------------
-step "7/9 OCI distribution (push / pull / trust onboarding)"
+step "7/10 OCI distribution (push / pull / trust onboarding)"
 # ext.wasm from step 2 is signed with the throwaway key: signature and
 # trust must apply to pulled bytes unchanged.
 OCI_REF="oci://127.0.0.1:8403/test/component:v1"
@@ -371,7 +373,7 @@ rm -f "$HOME/.tau/trust/$THROWAWAY_FP.pub.aside"
 echo "ok — trust --from-component onboards the verified key from oci://"
 
 # --- step 8: blob GC ----------------------------------------------------
-step "8/9 blob GC (dry-run reports, --yes deletes, live blobs kept)"
+step "8/10 blob GC (dry-run reports, --yes deletes, live blobs kept)"
 # Seed the real blob store with two blobs only this run could own
 # (random content, unique digests): one referenced by a crafted
 # session, one orphan. A gc bug that eats live blobs would eat real
@@ -419,8 +421,41 @@ echo "ok — --yes frees exactly the orphan; the live blob survives"
 rm -f "$HOME/.tau/blobs/$GC_BLOB"
 GC_BLOB=""
 
-# --- step 9: probe verdicts ---------------------------------------------
-step "9/9 probe verdicts (before_tool block reaches the model)"
+# --- step 9: compaction --------------------------------------------------
+step "9/10 compaction (summary entry; originals stay in the tree)"
+# Seed a small session: two demo exchanges on disk.
+"$TAU" --session session.jsonl --demo -p "first exchange" > /dev/null 2>&1 \
+    || fail "seed run 1"
+"$TAU" --session session.jsonl --demo -p "second exchange" > /dev/null 2>&1 \
+    || fail "seed run 2"
+BEFORE=$(grep -c "" session.jsonl)
+
+OUT="$("$TAU" --session session.jsonl --demo --compact 2>&1)" || fail "compact: $OUT"
+echo "$OUT" | grep -q "compacted session" || fail "compact output: $OUT"
+
+# Exactly one entry appended — the summary — and the originals stay.
+AFTER=$(grep -c "" session.jsonl)
+[ "$AFTER" -eq "$((BEFORE + 1))" ] \
+    || fail "entry count $BEFORE -> $AFTER, expected +1"
+TREE="$("$TAU" tree --session session.jsonl 2>&1)" || fail "tree: $TREE"
+echo "$TREE" | grep -q "\[compaction\]" \
+    || fail "tree hides the compaction entry: $TREE"
+echo "$TREE" | grep -q "first exchange" \
+    || fail "originals vanished from the tree: $TREE"
+echo "ok — summary entry appended, originals intact"
+
+# The compacted branch is the context for what follows: a follow-up run
+# appends under the compaction entry and still answers.
+OUT="$("$TAU" --session session.jsonl --demo -p "after compact" 2>&1)" \
+    || fail "post-compact run: $OUT"
+echo "$OUT" | grep -q "tau is alive" || fail "post-compact answer: $OUT"
+TREE="$("$TAU" tree --session session.jsonl 2>&1)" || fail "tree: $TREE"
+echo "$TREE" | grep -q "after compact" \
+    || fail "follow-up did not land on the compacted branch: $TREE"
+echo "ok — follow-up runs on the compacted branch"
+
+# --- step 10: probe verdicts ---------------------------------------------
+step "10/10 probe verdicts (before_tool block reaches the model)"
 OUT="$("$TAU" --allow-unsigned -e "$UPPER" -e "$GUARD" \
     --demo -p "shout forbidden" 2>&1)" || fail "guard run: $OUT"
 echo "$OUT" | grep -q "probe before_tool: block" \
@@ -447,4 +482,4 @@ echo "$OUT" | grep -q "the guard blew up" \
     || fail "guest panic did not reach stderr: $OUT"
 echo "ok — degrade: trapped probe continues, the call goes through"
 
-step "ALL NINE STEPS PASSED — the release candidate stands"
+step "ALL TEN STEPS PASSED — the release candidate stands"
