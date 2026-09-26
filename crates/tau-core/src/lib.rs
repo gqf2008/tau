@@ -6,6 +6,7 @@
 
 pub mod agent;
 pub mod bus;
+pub mod control;
 pub mod faux;
 pub mod model;
 pub mod probe;
@@ -16,6 +17,7 @@ pub mod types;
 
 pub use agent::{Agent, AgentError, AgentEvent};
 pub use bus::{new_bus, EventBus, EventStream};
+pub use control::{Control, ControlTx};
 pub use model::{Model, ModelEvent, Request, StopReason};
 pub use probe::{ProbeHandler, ProbePoint, ProbeRegistry, Verdict};
 pub use session::{EntryKind, JsonlStore, SessionEntry, SessionError};

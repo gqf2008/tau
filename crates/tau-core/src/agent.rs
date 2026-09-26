@@ -9,6 +9,7 @@ use std::collections::HashMap;
 use thiserror::Error;
 
 use crate::bus::EventBus;
+use crate::control::{Control, ControlRx, ControlTx};
 use crate::model::{Model, ModelEvent, Request, StopReason};
 use crate::probe::{ProbePoint, ProbeRegistry, Verdict};
 use crate::tool::ToolRegistry;
@@ -22,6 +23,12 @@ pub enum AgentEvent {
     ToolCallEnd { id: String, name: String, is_error: bool },
     /// A probe fired; observers see the full decision trail.
     Probe { point: &'static str, action: &'static str },
+    /// A steering message was injected after the current turn's tool results.
+    Steer(Message),
+    /// A queued follow-up became the next prompt in the same run.
+    FollowUp(Message),
+    /// An abort command was honored at a checkpoint.
+    Abort,
     TurnEnd { stop: StopReason },
     RunEnd { stop: StopReason },
     RunError { message: String },
@@ -41,10 +48,13 @@ pub struct Agent {
     system: Option<String>,
     /// Safety bound on consecutive model turns in one run.
     max_turns: usize,
+    control_tx: ControlTx,
+    control_rx: tokio::sync::Mutex<ControlRx>,
 }
 
 impl Agent {
     pub fn new(model: Box<dyn Model>, tools: ToolRegistry) -> Self {
+        let (control_tx, control_rx) = crate::control::channel();
         Self {
             model,
             tools,
@@ -52,12 +62,20 @@ impl Agent {
             bus: crate::bus::new_bus(),
             system: None,
             max_turns: 64,
+            control_tx,
+            control_rx: tokio::sync::Mutex::new(control_rx),
         }
     }
 
     /// Subscribe to the event stream. Call before `run`.
     pub fn events(&self) -> crate::bus::EventStream {
         self.bus.subscribe()
+    }
+
+    /// The control channel into the loop: steer, follow-up, abort.
+    /// Clone freely; safe to use from any task (see `control` module docs).
+    pub fn control(&self) -> ControlTx {
+        self.control_tx.clone()
     }
 
     fn emit(&self, event: AgentEvent) {
@@ -112,21 +130,19 @@ impl Agent {
         self.emit(AgentEvent::RunStart);
         let result = self.run_inner(history, prompt).await;
         match &result {
-            Ok(_) => self.emit(AgentEvent::RunEnd {
-                stop: StopReason::Stop,
-            }),
+            Ok((_, stop)) => self.emit(AgentEvent::RunEnd { stop: *stop }),
             Err(e) => self.emit(AgentEvent::RunError {
                 message: e.to_string(),
             }),
         }
-        result
+        result.map(|(messages, _)| messages)
     }
 
     async fn run_inner(
         &self,
         history: &[Message],
         prompt: Message,
-    ) -> Result<Vec<Message>, AgentError> {
+    ) -> Result<(Vec<Message>, StopReason), AgentError> {
         let prompt = match self
             .probe(
                 ProbePoint::BeforeRun,
@@ -142,6 +158,8 @@ impl Agent {
             Verdict::Continue => prompt,
         };
 
+        let mut control_rx = self.control_rx.lock().await;
+        let mut pending: Vec<Control> = Vec::new();
         let mut produced = vec![prompt];
         for _ in 0..self.max_turns {
             let mut request = Request {
@@ -184,7 +202,15 @@ impl Agent {
                 Verdict::Block { reason } => return Err(AgentError::Model(reason)),
                 Verdict::Continue => request,
             };
-            let (assistant, stop) = self.stream_turn(request).await?;
+            let (assistant, stop) = self
+                .stream_turn(request, &mut control_rx, &mut pending)
+                .await?;
+            if stop == StopReason::Aborted {
+                if !assistant.content.is_empty() {
+                    produced.push(assistant);
+                }
+                return Ok((produced, StopReason::Aborted));
+            }
             let (assistant, stop) = match self
                 .probe(
                     ProbePoint::AfterResponse,
@@ -210,6 +236,20 @@ impl Agent {
             produced.push(assistant);
 
             if calls.is_empty() || stop != StopReason::ToolUse {
+                drain_control(&mut control_rx, &mut pending);
+                if take_abort(&mut pending) {
+                    self.emit(AgentEvent::Abort);
+                    return Ok((produced, StopReason::Aborted));
+                }
+                // Follow-ups continue the same run: one trail, one RunEnd.
+                let followups = take_followups(&mut pending);
+                if !followups.is_empty() {
+                    for message in &followups {
+                        self.emit(AgentEvent::FollowUp(message.clone()));
+                    }
+                    produced.extend(followups);
+                    continue;
+                }
                 let produced = match self
                     .probe(
                         ProbePoint::BeforeRunEnd,
@@ -224,7 +264,7 @@ impl Agent {
                     Verdict::Block { reason } => return Err(AgentError::Model(reason)),
                     Verdict::Continue => produced,
                 };
-                return Ok(produced);
+                return Ok((produced, stop));
             }
 
             let mut results = Vec::with_capacity(calls.len());
@@ -297,6 +337,17 @@ impl Agent {
                 role: Role::Tool,
                 content: results,
             });
+            // Steer lands here — after the turn's tool results, never
+            // between a tool_use and its tool_result.
+            drain_control(&mut control_rx, &mut pending);
+            if take_abort(&mut pending) {
+                self.emit(AgentEvent::Abort);
+                return Ok((produced, StopReason::Aborted));
+            }
+            for message in take_steers(&mut pending) {
+                self.emit(AgentEvent::Steer(message.clone()));
+                produced.push(message);
+            }
         }
         Err(AgentError::Model(format!(
             "exceeded max turns ({})",
@@ -305,7 +356,15 @@ impl Agent {
     }
 
     /// Stream one assistant response, reassembling tool-call deltas.
-    async fn stream_turn(&self, request: Request) -> Result<(Message, StopReason), AgentError> {
+    /// Drains the control channel per model event: an Abort stops
+    /// consumption immediately — partial tool-call deltas are dropped
+    /// (their arguments are by definition incomplete), text is kept.
+    async fn stream_turn(
+        &self,
+        request: Request,
+        control_rx: &mut ControlRx,
+        pending: &mut Vec<Control>,
+    ) -> Result<(Message, StopReason), AgentError> {
         use futures::StreamExt;
 
         let mut stream = self.model.stream(&request).await;
@@ -315,6 +374,22 @@ impl Agent {
         let mut stop = StopReason::Stop;
 
         while let Some(event) = stream.next().await {
+            drain_control(control_rx, pending);
+            if take_abort(pending) {
+                self.emit(AgentEvent::Abort);
+                let content = if text.is_empty() {
+                    Vec::new()
+                } else {
+                    vec![Content::Text { text }]
+                };
+                return Ok((
+                    Message {
+                        role: Role::Assistant,
+                        content,
+                    },
+                    StopReason::Aborted,
+                ));
+            }
             match event {
                 ModelEvent::TextDelta { text: delta } => {
                     text.push_str(&delta);
@@ -374,4 +449,46 @@ impl Agent {
             stop,
         ))
     }
+}
+
+/// Move every queued control command into `pending` without blocking.
+fn drain_control(rx: &mut ControlRx, pending: &mut Vec<Control>) {
+    while let Ok(control) = rx.try_recv() {
+        pending.push(control);
+    }
+}
+
+fn take_abort(pending: &mut Vec<Control>) -> bool {
+    if let Some(pos) = pending.iter().position(|c| matches!(c, Control::Abort)) {
+        pending.remove(pos);
+        true
+    } else {
+        false
+    }
+}
+
+fn take_steers(pending: &mut Vec<Control>) -> Vec<Message> {
+    let mut taken = Vec::new();
+    let mut rest = Vec::with_capacity(pending.len());
+    for control in pending.drain(..) {
+        match control {
+            Control::Steer(m) => taken.push(m),
+            other => rest.push(other),
+        }
+    }
+    *pending = rest;
+    taken
+}
+
+fn take_followups(pending: &mut Vec<Control>) -> Vec<Message> {
+    let mut taken = Vec::new();
+    let mut rest = Vec::with_capacity(pending.len());
+    for control in pending.drain(..) {
+        match control {
+            Control::FollowUp(m) => taken.push(m),
+            other => rest.push(other),
+        }
+    }
+    *pending = rest;
+    taken
 }

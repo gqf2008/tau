@@ -33,6 +33,12 @@ Subscribers cannot wedge the harness: the bus is bounded
    registers a probe at the matching point.
 3. High-volume points (text deltas, tool progress) are events only; probes
    on those paths would put wasm round-trips between the model and the user.
-4. Commands (steering, abort, follow-up injection) will arrive as a control
-   channel into the loop — same event-driven shape, opposite direction.
-   Not wired in v0.
+4. Commands (steer, follow-up, abort) arrive on the **control channel**
+   (`tau_core::control`) — same event-driven shape, opposite direction:
+   an unbounded mpsc the loop drains at checkpoints (stream events, turn
+   and run boundaries), never blocking the model path. Steer lands after
+   the current turn's tool results (never between tool_use and
+   tool_result); follow-ups continue the same run at its natural end;
+   abort stops at the next checkpoint with `StopReason::Aborted`. Applied
+   commands are published on the bus (`AgentEvent::Steer` / `FollowUp` /
+   `Abort`), so the trail never diverges.

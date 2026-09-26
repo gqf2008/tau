@@ -307,6 +307,13 @@ async fn main() -> Result<()> {
                 Ok(AgentEvent::Probe { point, action }) => {
                     eprintln!("[tau] probe {point}: {action}")
                 }
+                Ok(AgentEvent::Steer(message)) => {
+                    eprintln!("[tau] steer: {}", message.text())
+                }
+                Ok(AgentEvent::FollowUp(message)) => {
+                    eprintln!("[tau] follow-up: {}", message.text())
+                }
+                Ok(AgentEvent::Abort) => eprintln!("[tau] aborted"),
                 Ok(AgentEvent::RunEnd { .. } | AgentEvent::RunError { .. }) => break,
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
@@ -317,7 +324,16 @@ async fn main() -> Result<()> {
         }
     });
 
+    // Ctrl-C aborts through the control channel — the same path any
+    // embedder (TUI, RPC) uses, not a signal hack.
+    let control = agent.control();
+    let ctrl_c = tokio::spawn(async move {
+        let _ = tokio::signal::ctrl_c().await;
+        let _ = control.send(tau_core::Control::Abort);
+    });
+
     let produced = agent.run(&history, Message::user(prompt_text)).await;
+    ctrl_c.abort();
     let produced = produced?;
     let _ = renderer.await;
     println!();

@@ -377,3 +377,167 @@ mod probe_point_tests {
         assert_eq!(produced[1].text(), "rewritten by probe");
     }
 }
+
+#[cfg(test)]
+mod control_tests {
+    use super::FauxModel;
+    use crate::model::{ModelEvent, StopReason};
+    use crate::tool::{Tool, ToolOutput, ToolRegistry};
+    use crate::types::{Content, Role};
+    use crate::{Agent, AgentEvent, Control, Message};
+    use async_trait::async_trait;
+
+    fn text_round(text: &str) -> Vec<ModelEvent> {
+        vec![
+            ModelEvent::TextDelta { text: text.into() },
+            ModelEvent::Done {
+                stop: StopReason::Stop,
+            },
+        ]
+    }
+
+    fn tool_call_round() -> Vec<ModelEvent> {
+        vec![
+            ModelEvent::ToolCallDelta {
+                index: 0,
+                id: Some("c1".into()),
+                name: Some("noop".into()),
+                arguments_delta: "{}".into(),
+            },
+            ModelEvent::Done {
+                stop: StopReason::ToolUse,
+            },
+        ]
+    }
+
+    struct Noop;
+
+    #[async_trait]
+    impl Tool for Noop {
+        fn def(&self) -> crate::tool::ToolDef {
+            crate::tool::ToolDef {
+                name: "noop".into(),
+                description: "does nothing".into(),
+                parameters: serde_json::json!({"type": "object"}),
+            }
+        }
+
+        async fn execute(&self, _arguments: serde_json::Value) -> ToolOutput {
+            ToolOutput {
+                content: "done".into(),
+                is_error: false,
+            }
+        }
+    }
+
+    /// A model that yields to the executor between deltas, so a concurrent
+    /// task's Abort can actually land mid-stream (stream::iter never yields).
+    struct SlowModel;
+
+    #[async_trait]
+    impl crate::model::Model for SlowModel {
+        async fn stream(
+            &self,
+            _req: &crate::model::Request,
+        ) -> futures::stream::BoxStream<'static, ModelEvent> {
+            use futures::StreamExt;
+            async_stream::stream! {
+                for piece in ["first ", "second ", "third"] {
+                    tokio::task::yield_now().await;
+                    yield ModelEvent::TextDelta { text: piece.into() };
+                }
+                yield ModelEvent::Done { stop: StopReason::Stop };
+            }
+            .boxed()
+        }
+    }
+
+    #[tokio::test]
+    async fn abort_mid_stream_keeps_partial_text_and_stops() {
+        let model = SlowModel;
+        let agent = Agent::new(Box::new(model), ToolRegistry::new());
+        let control = agent.control();
+        let mut events = agent.events();
+        // Abort as soon as the first delta is out.
+        let run = tokio::spawn(async move {
+            while let Ok(event) = events.recv().await {
+                if matches!(event, AgentEvent::TextDelta(_)) {
+                    control.send(Control::Abort).unwrap();
+                    break;
+                }
+            }
+        });
+        let produced = agent.run(&[], Message::user("x")).await.unwrap();
+        run.await.unwrap();
+        let assistant = &produced[1];
+        assert_eq!(assistant.role, Role::Assistant);
+        // Partial text kept, stream cut short.
+        let text = assistant.text();
+        assert!(text.starts_with("first"));
+        assert!(!text.contains("third"));
+        assert_eq!(produced.len(), 2); // prompt + partial assistant, nothing else
+    }
+
+    #[tokio::test]
+    async fn abort_during_stream_reports_aborted_on_the_bus() {
+        let model = FauxModel::scripted(vec![vec![
+            ModelEvent::TextDelta { text: "x".into() },
+            ModelEvent::Done {
+                stop: StopReason::Stop,
+            },
+        ]]);
+        let agent = Agent::new(Box::new(model), ToolRegistry::new());
+        agent.control().send(Control::Abort).unwrap();
+        let mut events = agent.events();
+        agent.run(&[], Message::user("x")).await.unwrap();
+        let mut saw_abort = false;
+        let mut saw_run_end_aborted = false;
+        while let Ok(event) = events.try_recv() {
+            saw_abort |= matches!(event, AgentEvent::Abort);
+            saw_run_end_aborted |=
+                matches!(event, AgentEvent::RunEnd { stop } if stop == StopReason::Aborted);
+        }
+        assert!(saw_abort && saw_run_end_aborted);
+    }
+
+    #[tokio::test]
+    async fn steer_lands_after_tool_results_never_between() {
+        let model = FauxModel::scripted(vec![tool_call_round(), text_round("after steer")]);
+        let mut tools = ToolRegistry::new();
+        tools.register(Box::new(Noop));
+        let agent = Agent::new(Box::new(model), tools);
+        agent
+            .control()
+            .send(Control::Steer(Message::user("steer message")))
+            .unwrap();
+        let produced = agent.run(&[], Message::user("start")).await.unwrap();
+        // prompt, assistant(tool_call), tool result, steer, assistant(text)
+        assert_eq!(produced.len(), 5);
+        assert!(matches!(
+            produced[1].content[0],
+            Content::ToolCall { .. }
+        ));
+        assert!(matches!(
+            produced[2].content[0],
+            Content::ToolResult { .. }
+        ));
+        assert_eq!(produced[3].text(), "steer message");
+        assert_eq!(produced[3].role, Role::User);
+        assert_eq!(produced[4].text(), "after steer");
+    }
+
+    #[tokio::test]
+    async fn followup_continues_the_same_run() {
+        let model = FauxModel::scripted(vec![text_round("answer one"), text_round("answer two")]);
+        let agent = Agent::new(Box::new(model), ToolRegistry::new());
+        agent
+            .control()
+            .send(Control::FollowUp(Message::user("follow-up question")))
+            .unwrap();
+        let produced = agent.run(&[], Message::user("first question")).await.unwrap();
+        assert_eq!(produced.len(), 4);
+        assert_eq!(produced[1].text(), "answer one");
+        assert_eq!(produced[2].text(), "follow-up question");
+        assert_eq!(produced[3].text(), "answer two");
+    }
+}
