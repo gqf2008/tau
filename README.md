@@ -8,7 +8,9 @@ extensible — but extensions are **wasm components**, not in-process scripts.
   branch supplies model history; fork = continue from an earlier entry.
 - **Agent loop**: prompt → model stream → tool calls → results → repeat.
   Steering/compaction/navigation: see `docs/probes.md` (v0 wires the
-  run-critical probes).
+  run-critical probes). Compaction condenses the branch into a summary
+  entry (`--compact`, `/compact` in the interactive REPL); the originals
+  stay in the tree, pi-style.
 - **Extensions**: drop a `.wasm` in. Components implement the
   `tau:extension` WIT world (`wit/tau.wit`): `tools` (contribute agent
   tools) and `hooks` (probes that observe and influence the run).

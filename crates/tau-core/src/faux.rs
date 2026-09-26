@@ -661,3 +661,124 @@ mod blob_edge_tests {
         assert_eq!(kinds.len(), 1);
     }
 }
+
+#[cfg(test)]
+mod compaction_tests {
+    use crate::model::{Model, ModelEvent, Request, StopReason};
+    use crate::probe::{ProbeHandler, ProbePoint, Verdict};
+    use crate::{Agent, Message, ToolRegistry};
+    use async_trait::async_trait;
+
+    /// Answers with a fixed summary; records the request it saw.
+    struct Summarizer(std::sync::Mutex<Option<Request>>);
+
+    #[async_trait]
+    impl Model for Summarizer {
+        async fn stream(
+            &self,
+            req: &Request,
+        ) -> futures::stream::BoxStream<'static, ModelEvent> {
+            use futures::StreamExt;
+            *self.0.lock().unwrap() = Some(Request {
+                system: req.system.clone(),
+                messages: req.messages.clone(),
+                tools: vec![],
+            });
+            futures::stream::iter([
+                ModelEvent::TextDelta {
+                    text: "goal: demo; open: nothing".into(),
+                },
+                ModelEvent::Done {
+                    stop: StopReason::Stop,
+                },
+            ])
+            .boxed()
+        }
+    }
+
+    struct Shared(std::sync::Arc<Summarizer>);
+    #[async_trait]
+    impl Model for Shared {
+        async fn stream(
+            &self,
+            req: &Request,
+        ) -> futures::stream::BoxStream<'static, ModelEvent> {
+            self.0.stream(req).await
+        }
+    }
+
+    fn agent() -> (Agent, std::sync::Arc<Summarizer>) {
+        let model = std::sync::Arc::new(Summarizer(std::sync::Mutex::new(None)));
+        (
+            Agent::new(Box::new(Shared(model.clone())), ToolRegistry::new()),
+            model,
+        )
+    }
+
+    #[tokio::test]
+    async fn compact_returns_summary_message() {
+        let (agent, model) = agent();
+        let history = vec![Message::user("hello"), Message::user("hi")];
+        let summary = agent.compact(&history).await.unwrap();
+        assert!(summary.text().contains("[summary of the earlier conversation]"));
+        assert!(summary.text().contains("goal: demo"));
+        // The summarization request carried the history plus the ask.
+        let request = model.0.lock().unwrap().take().unwrap();
+        assert_eq!(request.messages.len(), 3);
+        assert!(request.system.is_some());
+        assert!(request.tools.is_empty());
+    }
+
+    #[tokio::test]
+    async fn before_compaction_block_vetoes() {
+        struct Veto;
+        #[async_trait]
+        impl ProbeHandler for Veto {
+            fn points(&self) -> &[ProbePoint] {
+                &[ProbePoint::BeforeCompaction]
+            }
+            async fn probe(&self, _point: ProbePoint, _payload: serde_json::Value) -> Verdict {
+                Verdict::Block {
+                    reason: "not now".into(),
+                }
+            }
+        }
+        let (agent, _model) = agent();
+        let mut probes = crate::ProbeRegistry::new();
+        probes.register(Box::new(Veto));
+        let agent = agent.probes(probes);
+        let err = agent
+            .compact(&[Message::user("hello")])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("not now"));
+    }
+
+    #[tokio::test]
+    async fn before_compaction_replace_substitutes_the_message_set() {
+        struct Replace;
+        #[async_trait]
+        impl ProbeHandler for Replace {
+            fn points(&self) -> &[ProbePoint] {
+                &[ProbePoint::BeforeCompaction]
+            }
+            async fn probe(&self, _point: ProbePoint, _payload: serde_json::Value) -> Verdict {
+                Verdict::Replace(serde_json::json!({
+                    "messages": [Message::user("only this")]
+                }))
+            }
+        }
+        let (agent, model) = agent();
+        let mut probes = crate::ProbeRegistry::new();
+        probes.register(Box::new(Replace));
+        let agent = agent.probes(probes);
+        agent
+            .compact(&[Message::user("hello"), Message::user("hi")])
+            .await
+            .unwrap();
+        let request = model.0.lock().unwrap().take().unwrap();
+        // Replaced set + the summarization ask = 2 messages.
+        assert_eq!(request.messages.len(), 2);
+        assert_eq!(request.messages[0].text(), "only this");
+    }
+}

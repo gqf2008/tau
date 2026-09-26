@@ -149,6 +149,65 @@ impl Agent {
         result.map(|(messages, _)| messages)
     }
 
+    /// Summarize `history` into one replacement message (pi-style
+    /// compaction): the caller appends it as a `Compaction` entry and
+    /// future branch walks yield it instead of the covered messages;
+    /// originals stay in the session tree. The `before_compaction` probe
+    /// may substitute the message set or veto the compaction.
+    pub async fn compact(&self, history: &[Message]) -> Result<Message, AgentError> {
+        use futures::StreamExt;
+
+        let messages = match self
+            .probe(
+                ProbePoint::BeforeCompaction,
+                serde_json::json!({ "reason": "manual", "messages": history }),
+            )
+            .await
+        {
+            Verdict::Replace(payload) => serde_json::from_value(payload["messages"].clone())
+                .map_err(|e| AgentError::Model(format!("bad before_compaction payload: {e}")))?,
+            Verdict::Block { reason } => return Err(AgentError::Model(reason)),
+            Verdict::Continue => history.to_vec(),
+        };
+
+        let request = Request {
+            system: Some(
+                "You condense conversation history into a compact continuation brief."
+                    .into(),
+            ),
+            messages: [
+                messages,
+                vec![Message::user(concat!(
+                    "Summarize the conversation so far for continuation: ",
+                    "the goal, decisions made, open tasks, and key facts. ",
+                    "Terse, plain text, no preamble."
+                ))],
+            ]
+            .concat(),
+            tools: vec![],
+        };
+        let mut stream = self.model.stream(&request).await;
+        let mut text = String::new();
+        while let Some(event) = stream.next().await {
+            match event {
+                ModelEvent::TextDelta { text: delta } => text.push_str(&delta),
+                ModelEvent::Error { message } => return Err(AgentError::Model(message)),
+                ModelEvent::Done { .. } => break,
+                _ => {}
+            }
+        }
+        let summary = text.trim();
+        if summary.is_empty() {
+            return Err(AgentError::Model(
+                "compaction produced an empty summary".into(),
+            ));
+        }
+        Ok(Message::user(format!(
+            "[summary of the earlier conversation]
+{summary}"
+        )))
+    }
+
     async fn run_inner(
         &self,
         history: &[Message],

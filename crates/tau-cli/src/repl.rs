@@ -172,6 +172,10 @@ pub(crate) async fn drive(
                         continue;
                     }
                     if running {
+                        if text.starts_with('/') {
+                            print("commands only when idle — mid-run: !text steers, text follows up");
+                            continue;
+                        }
                         let control = agent.control();
                         if let Some(steer) = text.strip_prefix('!') {
                             let _ = control.send(Control::Steer(Message::user(steer.trim())));
@@ -183,8 +187,32 @@ pub(crate) async fn drive(
                     match text {
                         "/quit" | "/exit" => break,
                         "/help" => {
-                            print("commands: /help /quit /exit");
+                            print("commands: /help /compact /quit /exit");
                             print("  !<text> while running: steer; plain text while running: follow-up");
+                            continue;
+                        }
+                        "/compact" => {
+                            if history.is_empty() {
+                                print("nothing to compact");
+                                continue;
+                            }
+                            print("[tau] compacting…");
+                            match agent.compact(&history).await {
+                                Ok(summary) => {
+                                    let entry = tau_core::SessionEntry {
+                                        id: tau_core::session::new_id(),
+                                        parent,
+                                        kind: tau_core::session::EntryKind::Compaction {
+                                            summary: summary.clone(),
+                                        },
+                                    };
+                                    parent = Some(entry.id.clone());
+                                    store.append(entry)?;
+                                    history = vec![summary];
+                                    print("[tau] compacted — the summary now stands in for earlier turns");
+                                }
+                                Err(e) => print(&format!("[tau] compaction failed: {e}")),
+                            }
                             continue;
                         }
                         _ if text.starts_with('/') => {
@@ -422,6 +450,62 @@ mod tests {
         // Steers land before follow-ups at the natural end; one run, one
         // trail of five messages.
         assert_eq!(branch, vec!["start", "first", "now", "queued", "again"]);
+    }
+
+    #[tokio::test]
+    async fn compact_replaces_context_with_summary_entry() {
+        let (_dir, store) = store();
+        let agent = Arc::new(Agent::new(Box::new(StaticModel), ToolRegistry::new()));
+        let capture = Arc::new(Capture {
+            lines: Mutex::new(Vec::new()),
+            ready: Notify::new(),
+        });
+        let (tx, rx) = unbounded_channel();
+        let task = tokio::spawn(drive(
+            agent,
+            store,
+            Vec::new(),
+            rx,
+            capture.printer(),
+        ));
+        tx.send(LineEvent::Line("one".into())).unwrap();
+        capture.ready.notified().await;
+        tx.send(LineEvent::Line("/compact".into())).unwrap();
+        // Wait for the compaction to complete, then run another turn.
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if capture.text().contains("compacted") {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("compaction completes");
+        tx.send(LineEvent::Line("two".into())).unwrap();
+        capture.ready.notified().await;
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        // Session: one, answer, compaction summary, two, answer — and the
+        // current branch starts at the summary.
+        let store = JsonlStore::open(_dir.path().join("session.jsonl")).unwrap();
+        let head = store.head().unwrap().id.clone();
+        let branch: Vec<String> = store
+            .active_branch(&head)
+            .unwrap()
+            .iter()
+            .map(|m| m.text())
+            .collect();
+        assert_eq!(branch.len(), 3, "branch: {branch:?}");
+        assert!(
+            branch[0].contains("[summary of the earlier conversation]"),
+            "branch: {branch:?}"
+        );
+        assert_eq!(branch[1], "two");
+
+        let text = capture.text();
+        assert!(text.contains("compacted"), "output: {text}");
     }
 
     #[tokio::test]

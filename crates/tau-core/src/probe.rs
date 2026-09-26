@@ -1,7 +1,7 @@
 //! Probes: lifecycle points where extensions observe and influence a run.
-//! See docs/probes.md for the full map. Seven points are wired; the two
-//! reserved ones (before_compaction, before_navigation) fire when those
-//! features land — a probe cannot probe what does not exist.
+//! See docs/probes.md for the full map. Eight points are wired;
+//! before_navigation fires when branch navigation lands — a probe cannot
+//! probe what does not exist.
 
 use async_trait::async_trait;
 use serde_json::Value as Json;
@@ -18,6 +18,9 @@ pub enum ProbePoint {
     AfterTool,
     /// Natural run end, before the produced messages are returned.
     BeforeRunEnd,
+    /// About to compact: the message set to be summarized, before the
+    /// summarization request.
+    BeforeCompaction,
 }
 
 impl ProbePoint {
@@ -30,6 +33,7 @@ impl ProbePoint {
             Self::BeforeTool => "before_tool",
             Self::AfterTool => "after_tool",
             Self::BeforeRunEnd => "before_run_end",
+            Self::BeforeCompaction => "before_compaction",
         }
     }
 
@@ -42,11 +46,12 @@ impl ProbePoint {
             "before_tool" => Some(Self::BeforeTool),
             "after_tool" => Some(Self::AfterTool),
             "before_run_end" => Some(Self::BeforeRunEnd),
+            "before_compaction" => Some(Self::BeforeCompaction),
             _ => None,
         }
     }
 
-    pub const ALL: [ProbePoint; 7] = [
+    pub const ALL: [ProbePoint; 8] = [
         Self::BeforeRun,
         Self::TransformContext,
         Self::BeforeRequest,
@@ -54,6 +59,7 @@ impl ProbePoint {
         Self::BeforeTool,
         Self::AfterTool,
         Self::BeforeRunEnd,
+        Self::BeforeCompaction,
     ];
 }
 
@@ -196,11 +202,11 @@ pub const CATALOG: &[PointInfo] = &[
         verdicts: "continue | replace{messages} | block{reason}",
     },
     PointInfo {
-        point: None,
+        point: Some(ProbePoint::BeforeCompaction),
         name: "before_compaction",
-        wired: false,
-        payload: r#"{"reason": "manual"|"threshold"|"overflow", "input": [Message]} (reserved — fires when compaction lands)"#,
-        verdicts: "continue | replace{summary} | block{reason}",
+        wired: true,
+        payload: r#"{"reason": "manual", "messages": [Message]}"#,
+        verdicts: "continue | replace{messages} | block{reason} — block vetoes the compaction",
     },
     PointInfo {
         point: None,

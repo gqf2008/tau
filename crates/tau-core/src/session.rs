@@ -28,6 +28,10 @@ pub struct SessionEntry {
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum EntryKind {
     Message { message: Message },
+    /// A compaction: future branch walks yield `summary` instead of
+    /// everything before this entry. The original messages stay in the
+    /// tree — older branches still walk through them.
+    Compaction { summary: Message },
 }
 
 #[derive(Debug, Error)]
@@ -139,6 +143,12 @@ impl JsonlStore {
             let entry = self.get(&id).ok_or_else(|| SessionError::NotFound(id.clone()))?;
             match &entry.kind {
                 EntryKind::Message { message } => messages.push(message.clone()),
+                // Compaction boundary: the summary stands in for everything
+                // before it; stop walking.
+                EntryKind::Compaction { summary } => {
+                    messages.push(summary.clone());
+                    break;
+                }
             }
             current = entry.parent.clone();
         }
@@ -184,6 +194,45 @@ mod tests {
     }
 
     #[test]
+    fn branch_stops_at_compaction_but_older_branches_are_intact() {
+        let path = temp_path("compact.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let mut store = JsonlStore::open(&path).unwrap();
+        store.append(entry("a", None, "one")).unwrap();
+        store.append(entry("b", Some("a"), "two")).unwrap();
+        store.append(entry("c", Some("b"), "three")).unwrap();
+        store
+            .append(SessionEntry {
+                id: "k".into(),
+                parent: Some("c".into()),
+                kind: EntryKind::Compaction {
+                    summary: Message::user("[summary] one two three"),
+                },
+            })
+            .unwrap();
+        store.append(entry("d", Some("k"), "four")).unwrap();
+
+        // The current branch sees the summary, not the covered messages.
+        let branch: Vec<String> = store
+            .active_branch("d")
+            .unwrap()
+            .iter()
+            .map(|m| m.text())
+            .collect();
+        assert_eq!(branch, vec!["[summary] one two three", "four"]);
+
+        // An older head still walks the originals — nothing was deleted.
+        let old: Vec<String> = store
+            .active_branch("c")
+            .unwrap()
+            .iter()
+            .map(|m| m.text())
+            .collect();
+        assert_eq!(old, vec!["one", "two", "three"]);
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
     fn append_externalizes_large_media_and_reload_reads_blob() {
         let path = temp_path("blobs.jsonl");
         let blob_dir = temp_path("blobs-store");
@@ -193,9 +242,7 @@ mod tests {
             .unwrap()
             .with_blobs(crate::blobs::BlobStore::new(&blob_dir));
         let mut media_entry = entry("a", None, "look");
-        #[allow(irrefutable_let_patterns)] // EntryKind grows beyond Message later
-        let EntryKind::Message { message } = &mut media_entry.kind
-        else {
+        let EntryKind::Message { message } = &mut media_entry.kind else {
             unreachable!()
         };
         message.content.push(crate::types::Content::Image {

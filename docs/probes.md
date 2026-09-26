@@ -16,11 +16,10 @@ Model (derived from pi's `HookMap`, packages/agent/src/harness/agent-harness.ts)
 
 ## Run lifecycle
 
-Wired: 1–7 and 9 (verdicts `continue` / `replace` / `block`; block aborts
+Wired: 1–8 (verdicts `continue` / `replace` / `block`; block aborts
 with the reason as the run error, except `before_tool` where it becomes a
-blocked tool result handed back to the model). Reserved: 8 and the
-compaction half of 3's payload — they fire when compaction/navigation land;
-a probe cannot probe what does not exist.
+blocked tool result handed back to the model). Reserved: 9 — it fires when
+branch navigation lands; a probe cannot probe what does not exist.
 
 | # | point | payload (in) | verdicts | jev use case |
 |---|-------|--------------|----------|--------------|
@@ -31,7 +30,7 @@ a probe cannot probe what does not exist.
 | 5 | `before_tool` | tool id + name + args | continue / replace args / block{reason} | bool "destructive?" → block or escalate to user; classify risk tier for policy |
 | 6 | `after_tool` | id, name, args, result content, is_error | replace result / continue | truncate or sanitize result; score usefulness → decide run ends early |
 | 7 | `before_run_end` | produced messages + stop reason | replace messages / block | chain runs: score "task done?" → enqueue next step |
-| 8 | `before_compaction` *(reserved)* | reason (manual/threshold/overflow), prepared summary input | decline / replace with custom summary | custom summarizer; veto compaction during critical phase |
+| 8 | `before_compaction` | `{"reason": "manual", "messages": [Message]}` | continue / replace{messages} / block{reason} | custom summarizer (replace the message set the summarizer sees); veto compaction during a critical phase |
 | 9 | `before_navigation` *(reserved)* | branch target, prepared branch summary | decline / replace summary | custom branch summarizer |
 
 ## Session lifecycle (observe-only in v0)

@@ -23,6 +23,12 @@ struct Cli {
     #[arg(short, long)]
     print: Option<String>,
 
+    /// Compact the session at --session (summarize the active branch into
+    /// one entry; originals stay in the tree). With -p, compact first,
+    /// then run the prompt on the compacted history.
+    #[arg(long)]
+    compact: bool,
+
     /// Continue the session at --session from its head.
     #[arg(long)]
     r#continue: bool,
@@ -433,7 +439,7 @@ async fn main() -> Result<()> {
     let mut store = JsonlStore::open(&cli.session)
         .with_context(|| format!("opening {}", cli.session.display()))?
         .with_blobs(tau_core::BlobStore::new(tau_core::BlobStore::default_dir()));
-    let history = if cli.r#continue {
+    let mut history = if cli.r#continue {
         match store.head() {
             Some(head) => store.active_branch(&head.id)?,
             None => Vec::new(),
@@ -447,6 +453,31 @@ async fn main() -> Result<()> {
         .blobs(tau_core::BlobStore::new(tau_core::BlobStore::default_dir()));
     if let Some(system) = cli.system {
         agent = agent.system(system);
+    }
+
+    if cli.compact {
+        let head = store.head().map(|h| h.id.clone());
+        match head {
+            None => eprintln!("[tau] nothing to compact"),
+            Some(head) => {
+                let branch = store.active_branch(&head)?;
+                let summary = agent.compact(&branch).await?;
+                let entry = SessionEntry {
+                    id: new_id(),
+                    parent: Some(head),
+                    kind: EntryKind::Compaction { summary },
+                };
+                store.append(entry)?;
+                eprintln!("[tau] compacted session: {}", cli.session.display());
+                if cli.r#continue {
+                    let head = store.head().unwrap().id.clone();
+                    history = store.active_branch(&head)?;
+                }
+            }
+        }
+        if cli.print.is_none() && !interactive {
+            return Ok(());
+        }
     }
 
     if interactive {
