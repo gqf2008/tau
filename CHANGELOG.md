@@ -36,6 +36,9 @@ the extension unit instead of in-process scripts.
   digest-addressed cache that verifies hits and re-pulls a corrupted
   entry instead of handing bad bytes to the load path;
   signature/trust/consent apply to pulled bytes unchanged.
+  The dist zip ships the example components unsigned (`release.sh`
+  strips any local dev signature), so a first user meets the
+  documented sign-and-trust onboarding, not a foreign key.
 - **Models**: built-in OpenAI chat completions, OpenAI Responses, and
   Anthropic Messages providers; wasm provider components with push-mode
   streaming and consent-gated HTTP egress — a trapped provider fails

@@ -18,7 +18,7 @@ cargo clippy --all-targets                # 0 warnings
 cargo clippy --manifest-path examples/mcp-bridge/Cargo.toml --target wasm32-wasip2
 cargo build --manifest-path examples/<each>/Cargo.toml --target wasm32-wasip2 --release
 git status                                # clean tree
-scripts/validate.sh                       # first-user validation, 9 steps
+scripts/validate.sh                       # first-user validation, 10 steps
 SKIP_TESTS=1 scripts/release.sh           # dist zip assembles; smoke the
                                           # packaged binary + examples once
 ```
