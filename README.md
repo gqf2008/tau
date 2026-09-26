@@ -85,8 +85,11 @@ tau is alive. The tool answered: SHOUT HELLO TAU. (faux model — …)
 
 ## Releases
 
-`scripts/release.sh` runs the full suite, rebuilds the wasm examples,
-builds the release binary (lto + strip), and assembles
+`scripts/validate.sh` proves the release candidate the way a first
+user meets it (demo, signing/trust chain, built-in provider against a
+loopback mock, wasm-provider consent gate) and restores the environment
+afterwards. `scripts/release.sh` runs the full suite, rebuilds the wasm
+examples, builds the release binary (lto + strip), and assembles
 `dist/tau-<version>-<target>.zip` with the binary, README, LICENSE, docs/,
 and prebuilt (unsigned) example components.
 
