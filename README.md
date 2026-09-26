@@ -16,7 +16,8 @@ extensible — but extensions are **wasm components**, not in-process scripts.
   `tau:extension` WIT world (`wit/tau.wit`): `tools` (contribute agent
   tools) and `hooks` (probes that observe and influence the run).
   Ambient WASI (fs/env/stdio/network) is granted by default;
-  `--deny-wasi` restores the deny-all sandbox. Scoped capabilities
+  `--deny-wasi` restores the deny-all sandbox (remembered per fingerprint
+  with `--remember`, sticky until `tau consent --revoke`). Scoped capabilities
   (bridge process/http, provider origins) stay consent-gated.
 - **Signing**: components must carry an embedded ed25519 signature from a
   trusted key (`tau keygen` / `tau sign` / `tau trust`); `--allow-unsigned`
@@ -38,8 +39,10 @@ extensible — but extensions are **wasm components**, not in-process scripts.
   (`--provider anthropic`); plus wasm provider components
   (`--provider-wasm x.wasm --model id`) pushing stream events through the
   `events.emit` host channel, with consent-gated HTTP egress
-  (`--provider-origin`, remembered with `--remember`) and explicit bearer
-  credential delivery (`--provider-auth`, never persisted). Messages are
+  (`--provider-origin`, remembered with `--remember`) and bearer
+  credential delivery (`--provider-auth`; the token is never persisted,
+  the delivery grant can be — then `TAU_PROVIDER_AUTH` flows without the
+  flag). Messages are
   multimodal: text, image, audio, video, and file blocks, mapped per API
   (or degraded to placeholders where the API has no equivalent block).
 

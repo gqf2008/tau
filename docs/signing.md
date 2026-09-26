@@ -58,6 +58,12 @@ proves authorship, trusting is a separate decision.
   consent — capability grants are recorded per fingerprint
   (`~/.tau/consent/<fingerprint>.json`): pass `--remember` once, later runs
   recall the grants without the flags (`tau consent --list` / `--revoke`).
+  The record covers transport consent (bridge command/url, egress origins)
+  and two capability grants: `auth_delivery` (the provider credential may
+  flow from `TAU_PROVIDER_AUTH`) and `wasi_deny` (the component loads under
+  `--deny-wasi` semantics). Grants merge across runs — origins union,
+  booleans sticky-on; `--remember` never revokes, only `--revoke` does.
+  Secrets are never recorded, only grants.
   Explicit flags still win per field, and unsigned components can never be
   remembered — no fingerprint, no memory.
 - **Does not**: replace the sandbox. A trusted component still gets no

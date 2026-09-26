@@ -87,8 +87,11 @@ struct Cli {
 
     /// Bearer token handed to the wasm provider inside every request
     /// payload ({"auth": {"bearer": ...}}). Giving it IS the consent to
-    /// place the token in guest memory; never persisted. Falls back to
-    /// the TAU_PROVIDER_AUTH environment variable.
+    /// place the token in guest memory. The token is never persisted;
+    /// the delivery grant can be, per signing fingerprint, with
+    /// --remember — a remembered grant lets TAU_PROVIDER_AUTH flow
+    /// without the flag. Without flag or remembered grant the env var
+    /// alone does NOT reach the component.
     #[arg(long, requires = "provider_wasm")]
     provider_auth: Option<String>,
 
@@ -101,7 +104,9 @@ struct Cli {
     /// Deny ambient WASI capabilities (fs/env/stdio/args/network) to all
     /// components — the pre-allow-all sandbox. Consent-gated custom
     /// capabilities (bridge process/http, provider origins) are
-    /// unaffected.
+    /// unaffected. With --remember the deny is persisted per signing
+    /// fingerprint and applies to that component on later runs without
+    /// the flag (sticky — lift it with `tau consent --revoke`).
     #[arg(long)]
     deny_wasi: bool,
 
@@ -110,8 +115,10 @@ struct Cli {
     #[arg(long)]
     allow_unsigned: bool,
 
-    /// Persist this run's bridge consent under the component's signing
-    /// fingerprint; later runs recall it without the flags.
+    /// Persist this run's capability grants — bridge command/url/origins,
+    /// provider credential delivery, WASI deny — under each loaded
+    /// component's signing fingerprint; later runs recall them without
+    /// the flags. Secrets are never persisted, only grants.
     #[arg(long)]
     remember: bool,
 }
@@ -202,6 +209,12 @@ async fn run_sub(sub: Sub) -> Result<()> {
                         }
                         for origin in &consent.origins {
                             println!("  origin: {origin}");
+                        }
+                        if consent.auth_delivery {
+                            println!("  auth_delivery: true");
+                        }
+                        if consent.wasi_deny {
+                            println!("  wasi_deny: true");
                         }
                     }
                 }
@@ -374,18 +387,24 @@ async fn resolve_component(arg: &std::path::Path) -> Result<PathBuf> {
     Ok(pulled.path)
 }
 
-/// Recalled-consent flow shared by bridge and provider loads: fingerprints
-/// from the component bytes, recall per fingerprint, explicit flags win
-/// per field and origins union. Returns the merged consent and the
-/// fingerprint (None for unsigned components — no recall, no remembering).
+/// Recalled-consent flow shared by extension, bridge and provider loads:
+/// fingerprints from the component bytes, recall per fingerprint,
+/// explicit flags win per field and origins union. Returns the merged
+/// transport consent, the fingerprint (None for unsigned components — no
+/// recall, no remembering) and the raw remembered record (capability
+/// grants live there, not in the transport shape).
 fn recall_consent(
     bytes: &[u8],
     explicit: tau_ext::bridge::BridgeConsent,
-) -> (tau_ext::bridge::BridgeConsent, Option<String>) {
+) -> (
+    tau_ext::bridge::BridgeConsent,
+    Option<String>,
+    tau_ext::consent::RememberedConsent,
+) {
     let fingerprints = tau_ext::consent::component_fingerprints(bytes).unwrap_or_default();
     let fingerprint = fingerprints.first().cloned();
     let store = tau_ext::consent::ConsentStore::default();
-    let remembered = fingerprint
+    let remembered: tau_ext::consent::RememberedConsent = fingerprint
         .as_deref()
         .and_then(|fp| store.load(fp))
         .unwrap_or_default();
@@ -395,14 +414,62 @@ fn recall_consent(
             fingerprint.as_deref().unwrap_or("?")
         );
     }
-    (tau_ext::consent::merge(explicit, remembered), fingerprint)
+    if remembered.wasi_deny {
+        eprintln!("[tau] wasi deny recalled for this fingerprint");
+    }
+    (
+        tau_ext::consent::merge(explicit, remembered.clone()),
+        fingerprint,
+        remembered,
+    )
 }
 
-/// Save consent on --remember; unsigned components cannot carry it.
+/// WASI posture for one load: the host-wide flag or a remembered
+/// per-fingerprint deny. Deny is sticky — once remembered it applies to
+/// every later load of that fingerprint until `tau consent --revoke`.
+fn effective_wasi(
+    deny_flag: bool,
+    remembered: &tau_ext::consent::RememberedConsent,
+) -> tau_ext::WasiPolicy {
+    if deny_flag || remembered.wasi_deny {
+        tau_ext::WasiPolicy::DenyAll
+    } else {
+        tau_ext::WasiPolicy::AllowAll
+    }
+}
+
+/// Provider credential delivery: the explicit flag grants AND carries
+/// the token. Without it, TAU_PROVIDER_AUTH flows only when the
+/// component's remembered consent carries the auth-delivery grant — the
+/// secret is re-given via the environment each run, never persisted.
+fn resolve_provider_auth(flag: Option<String>, remembered_grant: bool) -> Option<String> {
+    if flag.is_some() {
+        return flag;
+    }
+    if remembered_grant {
+        let token = std::env::var("TAU_PROVIDER_AUTH").ok();
+        if token.is_some() {
+            eprintln!("[tau] provider auth: recalled delivery grant, token from TAU_PROVIDER_AUTH");
+        }
+        token
+    } else {
+        if std::env::var("TAU_PROVIDER_AUTH").is_ok() {
+            eprintln!(
+                "[tau] note: TAU_PROVIDER_AUTH is set but this component has no \
+                 auth-delivery grant — pass --provider-auth once with --remember"
+            );
+        }
+        None
+    }
+}
+
+/// Save this run's grants on --remember, merged into whatever the
+/// fingerprint already carries (origins union, boolean grants sticky-on;
+/// `--remember` never revokes). Unsigned components cannot carry it.
 fn maybe_remember(
     remember: bool,
     fingerprint: &Option<String>,
-    consent: tau_ext::bridge::BridgeConsent,
+    grant: tau_ext::consent::RememberedConsent,
 ) -> Result<()> {
     if !remember {
         return Ok(());
@@ -412,8 +479,15 @@ fn maybe_remember(
             "--remember requires a signed component: unsigned components cannot carry remembered consent"
         );
     };
-    tau_ext::consent::ConsentStore::default()
-        .save(fp, &tau_ext::consent::RememberedConsent::from(consent))?;
+    let store = tau_ext::consent::ConsentStore::default();
+    let merged = match store.load(fp) {
+        Some(existing) => tau_ext::consent::remember_into(existing, grant),
+        None => grant,
+    };
+    if merged.is_empty() {
+        return Ok(());
+    }
+    store.save(fp, &merged)?;
     eprintln!("[tau] remembered consent for {fp}");
     Ok(())
 }
@@ -445,14 +519,15 @@ async fn main() -> Result<()> {
             trust_dir: tau_ext::sign::trust_dir(),
         })
     };
-    let host = if cli.deny_wasi {
-        host.with_wasi(tau_ext::WasiPolicy::DenyAll)
-    } else {
-        host
-    };
     for path in &cli.extensions {
         let path = &resolve_component(path).await?;
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let (_, fingerprint, remembered) =
+            recall_consent(&bytes, tau_ext::bridge::BridgeConsent::default());
+        let wasi = effective_wasi(cli.deny_wasi, &remembered);
         let extension = host
+            .with_wasi_policy(wasi)
             .load(path)
             .with_context(|| format!("loading {}", path.display()))?;
         eprintln!("[tau] loaded extension: {}", extension.name);
@@ -464,6 +539,14 @@ async fn main() -> Result<()> {
         for probe in ext_probes {
             probes.register(probe);
         }
+        maybe_remember(
+            cli.remember,
+            &fingerprint,
+            tau_ext::consent::RememberedConsent {
+                wasi_deny: wasi == tau_ext::WasiPolicy::DenyAll,
+                ..Default::default()
+            },
+        )?;
     }
 
     if let Some(path) = &cli.mcp_bridge {
@@ -489,7 +572,7 @@ async fn main() -> Result<()> {
         // fingerprint — no recall, no remembering.
         let bytes = std::fs::read(path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let (consent, fingerprint) = recall_consent(&bytes, explicit);
+        let (consent, fingerprint, remembered) = recall_consent(&bytes, explicit);
         anyhow::ensure!(
             consent.command.is_some() || consent.mcp_url.is_some(),
             concat!(
@@ -497,7 +580,9 @@ async fn main() -> Result<()> {
                 "or remembered consent (sign the component and pass --remember once)"
             )
         );
+        let wasi = effective_wasi(cli.deny_wasi, &remembered);
         let bridge_tools = host
+            .with_wasi_policy(wasi)
             .load_bridge(path, consent.clone())
             .with_context(|| format!("loading mcp bridge {}", path.display()))?;
         for tool in bridge_tools {
@@ -505,7 +590,14 @@ async fn main() -> Result<()> {
             tools.register(tool);
         }
 
-        maybe_remember(cli.remember, &fingerprint, consent)?;
+        maybe_remember(
+            cli.remember,
+            &fingerprint,
+            tau_ext::consent::RememberedConsent {
+                wasi_deny: wasi == tau_ext::WasiPolicy::DenyAll,
+                ..tau_ext::consent::RememberedConsent::from(consent)
+            },
+        )?;
     }
 
     let model: Box<dyn Model> = if cli.demo {
@@ -524,19 +616,26 @@ async fn main() -> Result<()> {
         }
         let bytes = std::fs::read(path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let (consent, fingerprint) = recall_consent(&bytes, explicit);
+        let (consent, fingerprint, remembered) = recall_consent(&bytes, explicit);
         if !consent.origins.is_empty() {
             eprintln!("[tau] provider http origins: {:?}", consent.origins);
         }
-        let auth = cli
-            .provider_auth
-            .clone()
-            .or_else(|| std::env::var("TAU_PROVIDER_AUTH").ok());
+        let auth = resolve_provider_auth(cli.provider_auth.clone(), remembered.auth_delivery);
+        let wasi = effective_wasi(cli.deny_wasi, &remembered);
         let model = Box::new(
-            host.load_provider(path, name, consent.origins.clone(), auth)
+            host.with_wasi_policy(wasi)
+                .load_provider(path, name, consent.origins.clone(), auth)
                 .with_context(|| format!("loading provider {}", path.display()))?,
         );
-        maybe_remember(cli.remember, &fingerprint, consent)?;
+        maybe_remember(
+            cli.remember,
+            &fingerprint,
+            tau_ext::consent::RememberedConsent {
+                auth_delivery: cli.provider_auth.is_some(),
+                wasi_deny: wasi == tau_ext::WasiPolicy::DenyAll,
+                ..tau_ext::consent::RememberedConsent::from(consent)
+            },
+        )?;
         model
     } else {
         let provider = cli.provider.clone().unwrap_or_else(|| {
@@ -695,4 +794,55 @@ async fn main() -> Result<()> {
     }
     eprintln!("[tau] session: {}", cli.session.display());
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wasi_deny_from_flag_or_recall() {
+        let remembered = tau_ext::consent::RememberedConsent::default();
+        assert_eq!(
+            effective_wasi(false, &remembered),
+            tau_ext::WasiPolicy::AllowAll
+        );
+        assert_eq!(
+            effective_wasi(true, &remembered),
+            tau_ext::WasiPolicy::DenyAll
+        );
+        let remembered = tau_ext::consent::RememberedConsent {
+            wasi_deny: true,
+            ..Default::default()
+        };
+        // Sticky: recalled deny applies without the flag.
+        assert_eq!(
+            effective_wasi(false, &remembered),
+            tau_ext::WasiPolicy::DenyAll
+        );
+    }
+
+    #[test]
+    fn provider_auth_requires_flag_or_remembered_grant() {
+        unsafe {
+            std::env::set_var("TAU_PROVIDER_AUTH", "env-token");
+        }
+        // Env alone is not consent: no flag, no grant → no delivery.
+        assert_eq!(resolve_provider_auth(None, false), None);
+        // A remembered grant lets the env token flow.
+        assert_eq!(
+            resolve_provider_auth(None, true),
+            Some("env-token".to_string())
+        );
+        // The explicit flag always wins, grant or not.
+        assert_eq!(
+            resolve_provider_auth(Some("flag-token".into()), false),
+            Some("flag-token".to_string())
+        );
+        unsafe {
+            std::env::remove_var("TAU_PROVIDER_AUTH");
+        }
+        // Grant without a token source delivers nothing.
+        assert_eq!(resolve_provider_auth(None, true), None);
+    }
 }

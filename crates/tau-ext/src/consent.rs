@@ -22,13 +22,27 @@ pub struct RememberedConsent {
     pub command: Option<Vec<String>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_url: Option<String>,
-    #[serde(default)]
+    #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub origins: HashSet<String>,
+    /// Grant to deliver the provider credential (`TAU_PROVIDER_AUTH`)
+    /// into this component's memory. The grant is remembered; the secret
+    /// never is — it is re-given via the environment each run.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub auth_delivery: bool,
+    /// Remembered WASI sandbox: this component loads under
+    /// [`crate::WasiPolicy::DenyAll`] even without `--deny-wasi`. Sticky —
+    /// the only way back is `tau consent --revoke`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub wasi_deny: bool,
 }
 
 impl RememberedConsent {
     pub fn is_empty(&self) -> bool {
-        self.command.is_none() && self.mcp_url.is_none() && self.origins.is_empty()
+        self.command.is_none()
+            && self.mcp_url.is_none()
+            && self.origins.is_empty()
+            && !self.auth_delivery
+            && !self.wasi_deny
     }
 }
 
@@ -38,6 +52,8 @@ impl From<BridgeConsent> for RememberedConsent {
             command: consent.command,
             mcp_url: consent.mcp_url,
             origins: consent.origins,
+            auth_delivery: false,
+            wasi_deny: false,
         }
     }
 }
@@ -49,6 +65,21 @@ impl From<RememberedConsent> for BridgeConsent {
             mcp_url: remembered.mcp_url,
             origins: remembered.origins,
         }
+    }
+}
+
+/// Merge a run's grants into the persisted record: present fields win,
+/// absent fields keep what was stored, origins union, boolean grants are
+/// sticky-on (`--remember` never revokes — that is what `--revoke` is for).
+pub fn remember_into(existing: RememberedConsent, grant: RememberedConsent) -> RememberedConsent {
+    let mut origins = existing.origins;
+    origins.extend(grant.origins);
+    RememberedConsent {
+        command: grant.command.or(existing.command),
+        mcp_url: grant.mcp_url.or(existing.mcp_url),
+        origins,
+        auth_delivery: existing.auth_delivery || grant.auth_delivery,
+        wasi_deny: existing.wasi_deny || grant.wasi_deny,
     }
 }
 
@@ -148,6 +179,8 @@ mod tests {
             command: Some(vec!["python".into(), "server.py".into()]),
             mcp_url: None,
             origins: ["https://api.example.com".into()].into_iter().collect(),
+            auth_delivery: true,
+            wasi_deny: false,
         };
         store.save("abc123", &consent).unwrap();
         assert_eq!(store.load("abc123"), Some(consent));
@@ -156,6 +189,51 @@ mod tests {
         assert!(!store.revoke("abc123").unwrap());
         assert_eq!(store.load("abc123"), None);
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn files_without_capability_grants_still_load() {
+        // Written before auth_delivery/wasi_deny existed: serde defaults
+        // fill them, and the record reads as transport-consent-only.
+        let (dir, store) = store();
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(
+            dir.join("old.json"),
+            r#"{"command":["python","server.py"],"origins":["https://a.example"]}"#,
+        )
+        .unwrap();
+        let loaded = store.load("old").unwrap();
+        assert!(!loaded.auth_delivery);
+        assert!(!loaded.wasi_deny);
+        assert!(loaded.command.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn remember_into_is_sticky_and_keeps_absent_fields() {
+        let existing = RememberedConsent {
+            command: Some(vec!["old".into()]),
+            mcp_url: None,
+            origins: ["https://a.example".into()].into_iter().collect(),
+            auth_delivery: true,
+            wasi_deny: false,
+        };
+        let grant = RememberedConsent {
+            command: None,
+            mcp_url: Some("https://b.example/mcp".into()),
+            origins: ["https://b.example".into()].into_iter().collect(),
+            auth_delivery: false,
+            wasi_deny: true,
+        };
+        let merged = remember_into(existing, grant);
+        assert_eq!(merged.command, Some(vec!["old".into()]));
+        assert_eq!(merged.mcp_url, Some("https://b.example/mcp".into()));
+        assert!(merged.origins.contains("https://a.example"));
+        assert!(merged.origins.contains("https://b.example"));
+        // Sticky-on in both directions: a run without the grant never
+        // erases it, a run with it never loses what was stored.
+        assert!(merged.auth_delivery);
+        assert!(merged.wasi_deny);
     }
 
     #[test]
@@ -169,6 +247,8 @@ mod tests {
             command: Some(vec!["remembered".into()]),
             mcp_url: Some("https://a.example/mcp".into()),
             origins: ["https://a.example".into()].into_iter().collect(),
+            auth_delivery: false,
+            wasi_deny: false,
         };
         let merged = merge(explicit, remembered);
         assert_eq!(merged.command, Some(vec!["explicit".into()]));

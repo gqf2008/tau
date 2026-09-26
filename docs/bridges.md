@@ -75,13 +75,15 @@ withdrawn with `--deny-wasi`.)
 
 A wasm provider calling a real LLM gateway needs an API credential. The
 host does not keep secrets for the guest — the user hands a bearer token
-to the host explicitly (`--provider-auth <token>` or the
-`TAU_PROVIDER_AUTH` environment variable), and the host injects it into
-every `run`'s request-json as `"auth": {"bearer": "<token>"}`. **Giving
-it IS the consent** to place the token in guest memory; the token is
-never written to the consent file (origin grants may be remembered with
-`--remember` — secrets may not; what is remembered is only the network
-egress, the credential is re-given every run).
+to the host explicitly (`--provider-auth <token>`), and the host injects
+it into every `run`'s request-json as `"auth": {"bearer": "<token>"}`.
+**Giving it IS the consent** to place the token in guest memory. The
+token is never written to the consent file; the *delivery grant* can be
+(`--provider-auth ... --remember` once). A remembered grant lets the
+`TAU_PROVIDER_AUTH` environment variable flow on later runs without the
+flag — the secret is re-given every run, only the grant is remembered.
+Without flag or remembered grant, `TAU_PROVIDER_AUTH` alone does **not**
+reach the component (a note on stderr says so).
 
 Guest side: read `parsed["auth"]["bearer"]`; no field means none was
 given. See `examples/http-provider` (forwards it as the Authorization

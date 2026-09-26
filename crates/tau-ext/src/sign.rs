@@ -36,6 +36,7 @@ pub enum SignError {
 }
 
 /// Load-time policy for component signatures.
+#[derive(Clone)]
 pub enum TrustPolicy {
     /// Load anything. Library default; the CLI product defaults to
     /// RequireTrusted and exposes this as --allow-unsigned.

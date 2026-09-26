@@ -180,6 +180,19 @@ impl ExtensionHost {
         self
     }
 
+    /// Per-load WASI override: a host sharing this one's engine and
+    /// trust policy but instantiating components under `policy`. Engine
+    /// clones are cheap (Arc internals); use this for per-fingerprint
+    /// remembered posture (a recalled deny tightens one component's load
+    /// without touching the host default).
+    pub fn with_wasi_policy(&self, policy: WasiPolicy) -> Self {
+        Self {
+            engine: self.engine.clone(),
+            policy: self.policy.clone(),
+            wasi: policy,
+        }
+    }
+
     /// Read a component file and enforce the trust policy on its bytes.
     fn read_verified(&self, path: &Path) -> Result<Vec<u8>, ExtError> {
         // Windows virus scanners briefly lock freshly-written files; a
