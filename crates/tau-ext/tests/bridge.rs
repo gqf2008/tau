@@ -6,6 +6,7 @@
 
 use std::path::PathBuf;
 
+use tau_ext::bridge::BridgeConsent;
 use tau_ext::ExtensionHost;
 
 fn artifact() -> Option<PathBuf> {
@@ -43,7 +44,12 @@ async fn bridge_exposes_mcp_tools() {
     let command = vec![python, server.to_string_lossy().into_owned()];
 
     let host = ExtensionHost::new();
-    let tools = host.load_bridge(&path, &command).expect("load bridge");
+    let tools = host
+        .load_bridge(&path, BridgeConsent {
+            command: Some(command),
+            ..BridgeConsent::default()
+        })
+        .expect("load bridge");
     let names: Vec<String> = tools.iter().map(|t| t.def().name).collect();
     assert_eq!(names, ["echo", "fail"]);
 
@@ -71,6 +77,113 @@ async fn bridge_rejects_missing_command() {
     };
     let host = ExtensionHost::new();
     // A command that does not exist must fail at handshake, not silently.
-    let result = host.load_bridge(&path, &["definitely-not-a-real-program-xyz".into()]);
+    let result = host.load_bridge(&path, BridgeConsent {
+        command: Some(vec!["definitely-not-a-real-program-xyz".into()]),
+        ..BridgeConsent::default()
+    });
     assert!(result.is_err());
+}
+
+fn free_port() -> u16 {
+    std::net::TcpListener::bind("127.0.0.1:0")
+        .expect("bind ephemeral port")
+        .local_addr()
+        .expect("local addr")
+        .port()
+}
+
+#[tokio::test]
+async fn bridge_exposes_mcp_tools_over_http() {
+    let (Some(path), Some(python)) = (artifact(), python()) else {
+        eprintln!("skipping: mcp_bridge.wasm not built or no python");
+        return;
+    };
+    let server = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/mcp-bridge/mock_http_server.py")
+        .canonicalize()
+        .expect("mock http server exists");
+    let port = free_port();
+    let mut child = std::process::Command::new(&python)
+        .arg(&server)
+        .arg(port.to_string())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .expect("spawn mock http server");
+    // Wait for the server to accept connections (it binds synchronously but
+    // python startup takes a moment).
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
+        if std::time::Instant::now() > deadline {
+            let _ = child.kill();
+            panic!("mock http server did not start");
+        }
+        std::thread::sleep(std::time::Duration::from_millis(50));
+    }
+
+    let url = format!("http://127.0.0.1:{port}/mcp");
+    let origin = tau_ext::bridge::origin_of(&url).expect("origin");
+    let host = ExtensionHost::new();
+    let tools = host.load_bridge(&path, BridgeConsent {
+        mcp_url: Some(url),
+        origins: [origin].into_iter().collect(),
+        ..BridgeConsent::default()
+    });
+    let tools = match tools {
+        Ok(tools) => tools,
+        Err(e) => {
+            let _ = child.kill();
+            panic!("load bridge over http: {e}");
+        }
+    };
+    let names: Vec<String> = tools.iter().map(|t| t.def().name).collect();
+    assert_eq!(names, ["echo", "fail"]);
+
+    let out = tools[0]
+        .execute(serde_json::json!({ "text": "hello over http" }))
+        .await;
+    assert!(!out.is_error);
+    assert_eq!(out.content, "hello over http");
+
+    let out = tools[1].execute(serde_json::json!({})).await;
+    assert!(out.is_error);
+
+    let _ = child.kill();
+}
+
+#[tokio::test]
+async fn http_origin_outside_allowlist_is_denied() {
+    let Some(path) = artifact() else {
+        eprintln!("skipping: mcp_bridge.wasm not built");
+        return;
+    };
+    let host = ExtensionHost::new();
+    // mcp_url is granted (so the bridge knows where to POST) but the origins
+    // allowlist is EMPTY: every http request must fail, so the handshake
+    // fails and the load errors out. A bridge can never reach an origin the
+    // user did not consent to.
+    let result = host.load_bridge(&path, BridgeConsent {
+        mcp_url: Some("http://127.0.0.1:9/mcp".into()),
+        ..BridgeConsent::default()
+    });
+    assert!(result.is_err());
+}
+
+#[test]
+fn origin_of_parses_schemes_hosts_ports() {
+    use tau_ext::bridge::origin_of;
+    assert_eq!(
+        origin_of("https://api.example.com/mcp"),
+        Some("https://api.example.com".into())
+    );
+    assert_eq!(
+        origin_of("http://127.0.0.1:8080/mcp?x=1"),
+        Some("http://127.0.0.1:8080".into())
+    );
+    assert_eq!(
+        origin_of("http://user:pw@example.com/mcp"),
+        Some("http://example.com".into())
+    );
+    assert_eq!(origin_of("ftp://example.com/x"), None);
+    assert_eq!(origin_of("not a url"), None);
 }

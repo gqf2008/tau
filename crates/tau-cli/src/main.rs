@@ -51,15 +51,22 @@ struct Cli {
     #[arg(long)]
     demo: bool,
 
-    /// MCP bridge component; requires --mcp-command. Granting the command
-    /// IS the consent: the bridge may spawn exactly this argv.
-    #[arg(long, requires = "mcp_command")]
+    /// MCP bridge component; requires --mcp-command and/or --mcp-url.
+    /// Granting them IS the consent: the bridge may spawn exactly this
+    /// argv and/or reach exactly this origin.
+    #[arg(long)]
     mcp_bridge: Option<PathBuf>,
 
     /// External MCP server argv as a JSON array, e.g.
     /// --mcp-command '["python", "server.py"]'
     #[arg(long)]
     mcp_command: Option<String>,
+
+    /// Remote MCP server URL (streamable HTTP). Its origin becomes the
+    /// bridge's HTTP consent allowlist — the bridge can reach exactly this
+    /// origin and nothing else.
+    #[arg(long)]
+    mcp_url: Option<String>,
 }
 
 fn default_model() -> String {
@@ -95,12 +102,27 @@ async fn main() -> Result<()> {
     }
 
     if let Some(path) = &cli.mcp_bridge {
-        let command_json = cli.mcp_command.as_deref().unwrap_or("[]");
-        let command: Vec<String> = serde_json::from_str(command_json)
-            .with_context(|| format!("--mcp-command must be a JSON argv array, got: {command_json}"))?;
-        eprintln!("[tau] mcp bridge: {} (command: {})", path.display(), command_json);
+        anyhow::ensure!(
+            cli.mcp_command.is_some() || cli.mcp_url.is_some(),
+            "--mcp-bridge requires --mcp-command and/or --mcp-url (each granted capability is a consent)"
+        );
+        let mut consent = tau_ext::bridge::BridgeConsent::default();
+        if let Some(command_json) = cli.mcp_command.as_deref() {
+            let command: Vec<String> = serde_json::from_str(command_json).with_context(|| {
+                format!("--mcp-command must be a JSON argv array, got: {command_json}")
+            })?;
+            eprintln!("[tau] mcp bridge: {} (command: {})", path.display(), command_json);
+            consent.command = Some(command);
+        }
+        if let Some(url) = cli.mcp_url.as_deref() {
+            let origin = tau_ext::bridge::origin_of(url)
+                .with_context(|| format!("--mcp-url is not a valid http(s) url: {url}"))?;
+            eprintln!("[tau] mcp bridge: {} (url: {}, origin: {})", path.display(), url, origin);
+            consent.origins.insert(origin);
+            consent.mcp_url = Some(url.to_string());
+        }
         let bridge_tools = host
-            .load_bridge(path, &command)
+            .load_bridge(path, consent)
             .with_context(|| format!("loading mcp bridge {}", path.display()))?;
         for tool in bridge_tools {
             eprintln!("[tau]   mcp tool: {}", tool.def().name);

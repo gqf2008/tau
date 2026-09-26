@@ -125,10 +125,39 @@ interface process {
     kill: func(handle: u64);
 }
 
+/// HTTP requests: a scoped network capability for bridge components. The
+/// host holds an origin allowlist built from explicit user consent; every
+/// request's origin (scheme + host + port) is checked against it before
+/// sending, and redirects are never followed. Plain data, handle-based,
+/// same shape as `process` — no wasi:http dependency.
+interface http {
+    /// Start a request. Fails if the url's origin is not in the consent
+    /// allowlist. Returns a response handle.
+    request: func(method: string, url: string, headers: list<tuple<string, string>>, body: list<u8>) -> result<u64, string>;
+
+    /// HTTP status code of a started response.
+    status: func(handle: u64) -> result<u16, string>;
+
+    /// One response header value (e.g. content-type, mcp-session-id).
+    header: func(handle: u64, name: string) -> result<option<string>, string>;
+
+    /// Read up to `max` bytes of the response body. Returns as soon as at
+    /// least one byte is available or the stream ends (eof = true) — the
+    /// same contract as process.read-stdout, so SSE streams can be
+    /// consumed incrementally and closed early.
+    read-body: func(handle: u64, max: u32) -> result<tuple<list<u8>, bool>, string>;
+
+    /// Close the response and release the handle.
+    close: func(handle: u64);
+}
+
 /// Bridge components translate an external tool protocol (MCP today) into
 /// tau tools. The host knows nothing about that protocol; it only grants
 /// the capabilities the bridge declares (process spawn, scoped http).
+/// Both capabilities are always linked but granted empty by default: with
+/// no consent they fail at call time, not instantiation time.
 world bridge {
     import process;
+    import http;
     export tools;
 }

@@ -55,8 +55,28 @@ delivery story as every other tau extension.
 
 ## HTTP transports
 
-Remote MCP servers (streamable HTTP) need network, not `process`. The plan is
-scoped `wasi:http`: the host links the HTTP interfaces for a bridge only with
-a per-origin allowlist, so a bridge asking for `https://api.example.com` can
-reach exactly that origin and nothing else. Stdio proved the pattern; HTTP
-adds origin-scoped consent on the same host-side gate.
+Remote MCP servers (streamable HTTP) need network, not `process`. The bridge
+world also imports `tau:extension/http`: a plain-data, handle-based interface
+(`request` / `status` / `header` / `read-body` / `close`), deliberately the
+same shape as `process` rather than `wasi:http` — the guest never touches
+pollables, and SSE responses are consumed incrementally and closed early once
+the JSON-RPC response arrives (the server may legally hold the stream open).
+
+The host enforces the consent: an origin allowlist (`scheme://host[:port]`).
+Every request's origin is checked before sending; **redirects are never
+followed** — a redirect would silently move the request to an origin the user
+did not consent to. Both capabilities are always linked but granted empty by
+default, so an unconsented bridge loads fine and fails at call time, not
+instantiation time (sandbox by context, same as the deny-all WasiCtx).
+
+CLI:
+
+```
+tau --mcp-bridge mcp_bridge.wasm \
+    --mcp-url https://api.example.com/mcp \
+    -p "use the echo tool"
+```
+
+The URL's origin becomes the allowlist; the bridge learns the endpoint via
+`TAU_MCP_URL`. Stdio and HTTP consents are independent — pass either or both;
+the bridge prefers `TAU_MCP_URL` when both are present.
