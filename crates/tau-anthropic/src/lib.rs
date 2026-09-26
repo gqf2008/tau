@@ -1,7 +1,8 @@
 //! Anthropic Messages API (`POST /v1/messages`) with SSE streaming.
 //!
-//! Configuration by environment: `ANTHROPIC_API_KEY` (required),
-//! `ANTHROPIC_BASE_URL` (default `https://api.anthropic.com`).
+//! Configuration by environment: `ANTHROPIC_API_KEY` (sent as `x-api-key`),
+//! or `ANTHROPIC_AUTH_TOKEN` (sent as `Authorization: Bearer`, the proxy
+//! convention); `ANTHROPIC_BASE_URL` (default `https://api.anthropic.com`).
 
 mod wire;
 
@@ -12,10 +13,17 @@ use futures::{StreamExt, TryStreamExt};
 use tau_core::model::{Model, ModelEvent, Request, StopReason};
 use tau_core::sse;
 
+/// How the request authenticates: the official API key header, or a
+/// bearer token (Claude Code style proxies).
+enum Auth {
+    ApiKey(String),
+    Bearer(String),
+}
+
 pub struct AnthropicModel {
     client: reqwest::Client,
     base_url: String,
-    api_key: String,
+    auth: Auth,
     model: String,
     /// Required by the API; bounds one response.
     max_tokens: u32,
@@ -23,10 +31,15 @@ pub struct AnthropicModel {
 
 impl AnthropicModel {
     pub fn from_env(model: impl Into<String>) -> Result<Self, std::env::VarError> {
-        let api_key = std::env::var("ANTHROPIC_API_KEY")?;
         let base_url = std::env::var("ANTHROPIC_BASE_URL")
             .unwrap_or_else(|_| "https://api.anthropic.com".into());
-        Ok(Self::new(base_url, api_key, model))
+        match std::env::var("ANTHROPIC_API_KEY") {
+            Ok(key) => Ok(Self::new(base_url, key, model)),
+            Err(_) => {
+                let token = std::env::var("ANTHROPIC_AUTH_TOKEN")?;
+                Ok(Self::bearer(base_url, token, model))
+            }
+        }
     }
 
     pub fn new(
@@ -37,10 +50,21 @@ impl AnthropicModel {
         Self {
             client: reqwest::Client::new(),
             base_url: base_url.into().trim_end_matches('/').to_string(),
-            api_key: api_key.into(),
+            auth: Auth::ApiKey(api_key.into()),
             model: model.into(),
             max_tokens: 8192,
         }
+    }
+
+    /// Authenticate with `Authorization: Bearer` instead of `x-api-key`.
+    pub fn bearer(
+        base_url: impl Into<String>,
+        token: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        let mut this = Self::new(base_url, "", model);
+        this.auth = Auth::Bearer(token.into());
+        this
     }
 
     pub fn max_tokens(mut self, max_tokens: u32) -> Self {
@@ -53,10 +77,14 @@ impl AnthropicModel {
 impl Model for AnthropicModel {
     async fn stream(&self, req: &Request) -> BoxStream<'static, ModelEvent> {
         let body = wire::request_body(&self.model, self.max_tokens, req);
-        let response = self
+        let request = self
             .client
-            .post(format!("{}/v1/messages", self.base_url))
-            .header("x-api-key", &self.api_key)
+            .post(format!("{}/v1/messages", self.base_url));
+        let request = match &self.auth {
+            Auth::ApiKey(key) => request.header("x-api-key", key),
+            Auth::Bearer(token) => request.bearer_auth(token),
+        };
+        let response = request
             .header("anthropic-version", "2023-06-01")
             .json(&body)
             .send()

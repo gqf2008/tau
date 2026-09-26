@@ -62,6 +62,13 @@ cargo run -p tau-cli -- -e examples/upper/target/wasm32-wasip2/release/upper.was
 | `examples/upper` | example wasm extension (tool) |
 | `examples/echo-provider` | example wasm provider (push-mode streaming) |
 
+## Testing
+
+`cargo test --workspace` is fully offline. Real-provider smoke tests are
+opt-in: `TAU_SMOKE=1 cargo test -p tau-anthropic --test smoke` (needs
+`ANTHROPIC_API_KEY` or `ANTHROPIC_AUTH_TOKEN`; `TAU_MODEL` to pick the
+model) and likewise `-p tau-openai` with `OPENAI_API_KEY`.
+
 ## Contracts worth reading first
 
 - `crates/tau-core/src/model.rs` — the `Model` trait: never panic, errors
