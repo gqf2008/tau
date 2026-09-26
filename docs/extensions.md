@@ -1,0 +1,194 @@
+# Writing a tau extension
+
+End-to-end: from an empty crate to a signed, distributed component. The
+contract is `wit/tau.wit` (versioned, `tau:extension@0.1.0`); this guide
+walks the three worlds — `extension` (tools + probes), `provider`
+(models), `bridge` (external protocols) — using the shipped examples as
+reference implementations.
+
+Prerequisites: a Rust toolchain with the component target —
+
+```bash
+rustup target add wasm32-wasip2
+```
+
+## 1. Scaffold
+
+A component is a `cdylib` crate in its own workspace (components build
+standalone; the examples use an empty `[workspace]` table to opt out of
+the host workspace):
+
+```toml
+# Cargo.toml
+[package]
+name = "my-ext"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.46"
+serde_json = "1"
+
+[workspace]
+```
+
+```rust
+// src/lib.rs
+wit_bindgen::generate!({
+    path: "path/to/tau/wit/tau.wit",   // vendored copy recommended
+    world: "extension",
+});
+export!(MyExt);
+```
+
+**Vendor the WIT file into your repo.** The path is resolved at compile
+time against your crate; tracking a specific `tau:extension` version
+keeps your build reproducible when the contract evolves.
+
+## 2. Tools (world `extension`)
+
+Implement `exports::tau::extension::tools::Guest`:
+
+- `definitions()` — called **once at load time**. Each definition is a
+  name, a description the model reads when deciding to call, and a JSON
+  Schema (serialized) for the arguments.
+- `execute(name, arguments-json)` — called per tool call. Return
+  `ToolResult { content, is_error }`; the content string goes back to
+  the model as the tool result. Never panic: a trap kills the load, but
+  an `is_error` result is just a tool failure the model can react to.
+
+Reference: `examples/upper/src/lib.rs` (an `upper` tool, ~60 lines
+including a no-op hooks impl). Build and load:
+
+```bash
+cargo build --target wasm32-wasip2 --release
+tau --allow-unsigned -e target/wasm32-wasip2/release/my_ext.wasm \
+  --demo -p "try the tool"
+```
+
+The transcript shows the loop closing: `tool → my_tool`, then
+`tool ← my_tool: <output>`, then the answer. Iterate with `--demo`
+(no API key needed); switch to a real provider when the tool behaves.
+
+## 3. Probes (same world, interface `hooks`)
+
+Probes observe and influence the run at nine wired points —
+`before_run`, `transform_context`, `before_request`, `after_response`,
+`before_tool`, `after_tool`, `before_run_end`, `before_compaction`,
+`before_navigation`. `tau probes` prints the catalog with payload
+shapes; `docs/probes.md` has the full table and verdict semantics.
+
+- `points()` — called once at load; return the wire names you handle
+  (`["before_tool"]`). Empty = observe nothing.
+- `probe(point, payload-json)` — synchronous; the harness **pauses**
+  until the verdict returns. Keep hot-path handlers fast; a slow probe
+  slows every run.
+- Verdicts: `continue` (no opinion), `replace` (+ `payload-json`,
+  point-specific), `block` (+ `reason`; vetoes the action — at
+  `before_tool` the reason goes back to the model as the tool result).
+
+Handlers fold in load order: each sees the previous handler's
+replacement; first `block` wins. A trapping handler degrades to
+`continue` — a broken extension must not wedge the harness.
+
+## 4. Providers (world `provider`)
+
+A provider component serves models. Streaming is **push-mode**: you
+call `events.emit(json)` per chunk and return from `run` when done.
+
+- `list-models()` — ids the user can select with `--model`.
+- `run(request-json)` — the request uses tau's wire shape
+  (`{"model", "system", "messages", "tools", "auth"?}`). Emit
+  `text-delta` / `audio-delta` / `tool-call-delta` events, then exactly
+  one `done` with a stop reason. **Contract:** never trap on
+  request/transport failures — emit an `error` event followed by
+  `done {"stop":"error"}`.
+
+Network access is consent-gated: the `http` import is always linked
+but granted empty, so calls fail at call time until the user allows
+your origins (`--provider-origin https://api.example.com`, remembered
+per fingerprint with `--remember`). When the user hands the host a
+bearer token, it arrives inside the request as `"auth": {"bearer": …}` —
+never persisted by the host.
+
+References: `examples/echo-provider` (no network, word-by-word echo —
+start here), `examples/http-provider` (real consent-gated HTTPS + SSE).
+
+Load with:
+
+```bash
+tau --provider-wasm target/wasm32-wasip2/release/my_provider.wasm \
+  --model my-model --provider-origin https://api.example.com -p "hi"
+```
+
+## 5. Bridges (world `bridge`)
+
+Bridges translate an external tool protocol into tau tools — the host
+stays protocol-agnostic and only grants capabilities: `process`
+(spawn-with-pipes) and `http` (origin allowlist). Both are always
+linked, granted empty, checked at call time; the user's consent UX
+shows the exact argv / origin.
+
+Reference: `examples/mcp-bridge` (MCP stdio + streamable HTTP, with
+protocol-version negotiation). `docs/bridges.md` has the capability
+model and the walgit worked example.
+
+## 6. WASI: ambient by default
+
+Components run with ambient WASI — fs/env/stdio/args/network — unless
+the user passes `--deny-wasi` (or remembered it for your fingerprint).
+Design for both: read env vars defensively, treat filesystem access as
+a bonus not a requirement. `examples/echo-provider`'s `env NAME`
+prompt demos the difference live.
+
+## 7. Sign and distribute
+
+Unsigned components need `--allow-unsigned` on every load — fine for
+development, wrong for distribution. Signing embeds an ed25519
+signature section (`tau-signature`) carrying the pubkey:
+
+```bash
+# once per author machine:
+tau keygen                       # → fingerprint, key in ~/.tau/keys
+
+# after every build:
+tau sign target/wasm32-wasip2/release/my_ext.wasm
+
+# distribute via any OCI registry:
+tau push target/wasm32-wasip2/release/my_ext.wasm \
+  oci://ghcr.io/you/my-ext:0.1.0
+```
+
+The receiver onboards your key **from the signed bytes** — the
+signature section embeds the pubkey, and only keys whose signature
+verifies are trusted:
+
+```bash
+tau trust --from-component oci://ghcr.io/you/my-ext:0.1.0
+# prints your fingerprint — the receiver MUST verify it out-of-band
+# (your README, a signed git tag, a tweet) before trusting
+tau -e oci://ghcr.io/you/my-ext:0.1.0 -p "..."
+```
+
+Publish the fingerprint next to the download link. Re-sign after every
+rebuild (the signature covers the exact bytes); tags are mutable —
+receivers who want immutability pull by digest
+(`oci://ghcr.io/you/my-ext@sha256:…`).
+
+Consent (bridge argv, HTTP origins, credential delivery, WASI-deny) is
+remembered per **signing fingerprint**, not per file — your users keep
+their grants across your releases as long as you sign with the same
+key. `tau consent --list` / `tau consent --revoke <fingerprint>` is
+their escape hatch.
+
+## 8. Checklist
+
+- [ ] `definitions()`/`list-models()` return fast — they run at load
+- [ ] no panics on bad input; `is_error` / `error` events instead
+- [ ] probes are fast (the harness waits) and degrade gracefully
+- [ ] works under `--deny-wasi` or documents why it cannot
+- [ ] signed after the final build; fingerprint published out-of-band
+- [ ] pushed by tag for convenience, by digest for the cautious

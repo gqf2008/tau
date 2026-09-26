@@ -19,6 +19,7 @@ extensible — but extensions are **wasm components**, not in-process scripts.
   `--deny-wasi` restores the deny-all sandbox (remembered per fingerprint
   with `--remember`, sticky until `tau consent --revoke`). Scoped capabilities
   (bridge process/http, provider origins) stay consent-gated.
+  **Writing one? `docs/extensions.md` walks scaffold → WIT → sign → OCI.**
 - **Signing**: components must carry an embedded ed25519 signature from a
   trusted key (`tau keygen` / `tau sign` / `tau trust`); `--allow-unsigned`
   is the explicit dev escape. See `docs/signing.md`.
@@ -99,7 +100,7 @@ and prebuilt (unsigned) example components.
 | `crates/tau-ext` | wasmtime component host (WASI open by default) |
 | `crates/tau-cli` | `tau` binary (print + interactive modes) |
 | `wit/tau.wit` | the extension contract, versioned |
-| `docs/` | probes, events, bridges, signing, oci, media, release, perf |
+| `docs/` | extensions (author guide), probes, events, bridges, signing, oci, media, release, perf |
 | `examples/upper` | example wasm extension (tool) |
 | `examples/echo-provider` | example wasm provider (push-mode streaming) |
 | `examples/http-provider` | example wasm provider (consent-gated http) |
