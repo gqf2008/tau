@@ -50,6 +50,22 @@ cargo publish -p tau-cli
 git tag v$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
 ```
 
+Post-publish, verify as a stranger would (README's install line must
+work verbatim) and push the tag:
+
+```bash
+cargo install tau-cli --locked
+scripts/validate.sh
+git push origin main --tags
+```
+
+If the machine replaces the crates-io source with a mirror (e.g.
+`rsproxy-sparse` in `~/.cargo/config.toml`), `cargo publish` refuses
+with "crates-io is replaced with non-remote-registry source" — publish
+uploads must go to the real registry, so append `--registry crates-io`
+to every publish command (and to the `--dry-run` checks). Installing
+through a mirror is fine; only publishing is.
+
 Name availability was checked 2026-09-26: all five names were free on
 crates.io. If one is taken by publish time, rename is a workspace-wide
 change (crate names appear in path deps and doc links) — do not publish
