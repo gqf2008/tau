@@ -32,6 +32,12 @@ impl Guest for HttpProvider {
     }
 
     fn run(request_json: String) {
+        // Test hook, mirroring the guard example's "crash": a trapped
+        // provider must fail this run — and the host must rebuild the
+        // instance so the NEXT run still reaches a working guest.
+        if request_json.contains("crash") {
+            panic!("the provider blew up");
+        }
         match fetch(&request_json) {
             Ok(text) => {
                 emit(&serde_json::json!({ "kind": "text-delta", "text": text }));

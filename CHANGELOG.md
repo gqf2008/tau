@@ -34,7 +34,9 @@ the extension unit instead of in-process scripts.
   unchanged.
 - **Models**: built-in OpenAI chat completions, OpenAI Responses, and
   Anthropic Messages providers; wasm provider components with push-mode
-  streaming and consent-gated HTTP egress. Multimodal messages (text,
+  streaming and consent-gated HTTP egress — a trapped provider fails
+  its run and the instance is rebuilt, so one crash never fails the
+  rest of the session. Multimodal messages (text,
   image, audio, video, file), media >256KB externalized to a
   content-addressed blob store with `tau gc`.
 - **MCP without MCP in core**: external protocols are translated by
@@ -65,7 +67,7 @@ gate, remembered-consent lifecycle, OCI push/pull/trust onboarding,
 blob GC, compaction (summary entry; originals stay; follow-ups run on
 the compacted branch), and probe verdicts (block, continue, and a
 trapped probe degrading without going dead) — restoring the environment exactly
-afterwards. 99 tests, clippy-clean across all workspaces.
+afterwards. 100 tests, clippy-clean across all workspaces.
 
 Performance baseline (docs/perf.md): extension load 202ms cold → 9ms
 warm (wasmtime compile cache); 10k-entry session opens in 66ms.

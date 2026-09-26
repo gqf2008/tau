@@ -581,7 +581,50 @@ struct ProviderInstance {
     bindings: provider_bindings::Provider,
 }
 
-type SharedProvider = Arc<Mutex<ProviderInstance>>;
+/// Everything needed to (re)create a provider instance. A trapped guest
+/// poisons its instance; the CLI reuses one provider across every run of
+/// a REPL session, so without a rebuild one crash would fail every later
+/// prompt until restart.
+struct ProviderFactory {
+    engine: Engine,
+    component: Component,
+    linker: Linker<ProviderState>,
+    wasi: WasiPolicy,
+    origins: std::collections::HashSet<String>,
+}
+
+impl ProviderFactory {
+    fn instantiate(&self) -> Result<ProviderInstance, wasmtime::Error> {
+        let state = ProviderState {
+            ctx: self.wasi.ctx_builder().build(),
+            table: ResourceTable::new(),
+            event_tx: None,
+            http: http::HttpRegistry::new(self.origins.clone()),
+        };
+        let mut store = Store::new(&self.engine, state);
+        let bindings =
+            provider_bindings::Provider::instantiate(&mut store, &self.component, &self.linker)?;
+        Ok(ProviderInstance { store, bindings })
+    }
+}
+
+struct SharedProviderInstance {
+    instance: ProviderInstance,
+    factory: ProviderFactory,
+}
+
+impl SharedProviderInstance {
+    /// Drop a poisoned instance and build a fresh one. Best-effort: if
+    /// re-instantiation somehow fails, the poisoned instance stays and
+    /// runs keep surfacing the trap.
+    fn revive(&mut self) {
+        if let Ok(fresh) = self.factory.instantiate() {
+            self.instance = fresh;
+        }
+    }
+}
+
+type SharedProvider = Arc<Mutex<SharedProviderInstance>>;
 
 /// A model served by a wasm provider component. Events arrive push-mode:
 /// the component calls the imported `events.emit` per chunk; `stream`
@@ -631,20 +674,19 @@ impl ExtensionHost {
         let mut linker: Linker<ProviderState> = Linker::new(&self.engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         provider_bindings::Provider::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
-        let state = ProviderState {
-            ctx: self.wasi.ctx_builder().build(),
-            table: ResourceTable::new(),
-            event_tx: None,
-            http: http::HttpRegistry::new(origins),
+        let factory = ProviderFactory {
+            engine: self.engine.clone(),
+            component,
+            linker,
+            wasi: self.wasi,
+            origins,
         };
-        let mut store = Store::new(&self.engine, state);
-        let bindings = provider_bindings::Provider::instantiate(&mut store, &component, &linker)
-            .map_err(|e| ExtError::Load {
-                path: path.display().to_string(),
-                reason: format!("provider instantiation failed: {e}"),
-            })?;
+        let instance = factory.instantiate().map_err(|e| ExtError::Load {
+            path: path.display().to_string(),
+            reason: format!("provider instantiation failed: {e}"),
+        })?;
         Ok(WasmModel {
-            shared: Arc::new(Mutex::new(ProviderInstance { store, bindings })),
+            shared: Arc::new(Mutex::new(SharedProviderInstance { instance, factory })),
             model,
             auth,
         })
@@ -714,13 +756,19 @@ impl tau_core::Model for WasmModel {
             let mut guard = shared
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let instance = &mut *guard;
+            let instance = &mut guard.instance;
             instance.store.data_mut().event_tx = Some(tx);
             let result = instance
                 .bindings
                 .tau_extension_models()
                 .call_run(&mut instance.store, &request_json);
             instance.store.data_mut().event_tx = None;
+            if result.is_err() {
+                // The trap poisoned the guest; rebuild so the next run
+                // reaches a fresh provider instead of trapping for the
+                // rest of the REPL session.
+                guard.revive();
+            }
             result
         });
 
