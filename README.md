@@ -30,7 +30,9 @@ extensible — but extensions are **wasm components**, not in-process scripts.
   See `docs/bridges.md`.
 - **Models**: three built-in APIs — OpenAI chat completions (`--provider openai`),
   OpenAI Responses (`--provider responses`), Anthropic Messages
-  (`--provider anthropic`); plus wasm provider components
+  (`--provider anthropic`); plus wasm provider components whose HTTP egress
+  is consent-gated per signing fingerprint (`--provider-origin`, remembered
+  with `--remember`)
   (`--provider-wasm x.wasm --model id`) pushing stream events through the
   `events.emit` host channel. Messages are multimodal: text, image, audio,
   video, and file blocks, mapped per API (or degraded to placeholders where

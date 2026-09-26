@@ -1,0 +1,14 @@
+[package]
+name = "http-provider"
+version = "0.1.0"
+edition = "2024"
+description = "Example tau wasm provider: fetches a URL over consent-gated http"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.46"
+serde_json = "1"
+
+[workspace]

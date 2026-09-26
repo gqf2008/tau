@@ -69,6 +69,18 @@ did not consent to. Both capabilities are always linked but granted empty by
 default, so an unconsented bridge loads fine and fails at call time, not
 instantiation time (sandbox by context, same as the deny-all WasiCtx).
 
+## Provider network egress
+
+The **provider world imports the same `http` interface**: a wasm provider
+reaches its model API over exactly this consent-gated channel (same origin
+allowlist, same no-redirects rule, same shared host implementation in
+`tau-ext/src/http.rs`). Grant origins with `--provider-origin
+https://api.openai.com` (repeatable); like bridge consent, grants are
+remembered per signing fingerprint with `--remember` and recalled on later
+runs. Without consent the provider loads but every http call fails at call
+time — a well-behaved provider reports that as an error event, never a trap
+(see `examples/http-provider`).
+
 CLI:
 
 ```

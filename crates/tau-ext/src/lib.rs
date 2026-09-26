@@ -39,6 +39,7 @@ mod bridge_bindings {
 }
 
 pub mod bridge;
+mod http;
 pub mod consent;
 pub mod oci;
 pub mod sign;
@@ -299,6 +300,8 @@ struct ProviderState {
     ctx: WasiCtx,
     table: ResourceTable,
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    /// Origin-allowlisted HTTP egress, granted by per-fingerprint consent.
+    http: http::HttpRegistry,
 }
 
 impl WasiView for ProviderState {
@@ -335,17 +338,26 @@ pub struct WasmModel {
 
 impl ExtensionHost {
     /// Load a provider component and select one of its models by id.
+    /// Load a provider component. `origins` is the HTTP egress allowlist
+    /// ("scheme://host[:port]") this component may reach — passing it IS
+    /// the consent; empty means every http call fails permission-denied.
     pub fn load_provider(
         &self,
         path: impl AsRef<Path>,
         model: impl Into<String>,
+        origins: std::collections::HashSet<String>,
     ) -> Result<WasmModel, ExtError> {
         let path = path.as_ref().to_path_buf();
         let model = model.into();
-        Self::off_runtime(move || self.load_provider_inner(&path, model))
+        Self::off_runtime(move || self.load_provider_inner(&path, model, origins))
     }
 
-    fn load_provider_inner(&self, path: &Path, model: String) -> Result<WasmModel, ExtError> {
+    fn load_provider_inner(
+        &self,
+        path: &Path,
+        model: String,
+        origins: std::collections::HashSet<String>,
+    ) -> Result<WasmModel, ExtError> {
         let bytes = self.read_verified(path)?;
         let component = Component::from_binary(&self.engine, &bytes).map_err(|e| ExtError::Load {
             path: path.display().to_string(),
@@ -358,6 +370,7 @@ impl ExtensionHost {
             ctx: WasiCtxBuilder::new().build(),
             table: ResourceTable::new(),
             event_tx: None,
+            http: http::HttpRegistry::new(origins),
         };
         let mut store = Store::new(&self.engine, state);
         let bindings = provider_bindings::Provider::instantiate(&mut store, &component, &linker)
@@ -369,6 +382,34 @@ impl ExtensionHost {
             shared: Arc::new(Mutex::new(ProviderInstance { store, bindings })),
             model,
         })
+    }
+}
+
+impl provider_bindings::tau::extension::http::Host for ProviderState {
+    fn request(
+        &mut self,
+        method: String,
+        url: String,
+        headers: Vec<(String, String)>,
+        body: Vec<u8>,
+    ) -> Result<u64, String> {
+        self.http.request(&method, &url, &headers, &body)
+    }
+
+    fn status(&mut self, handle: u64) -> Result<u16, String> {
+        self.http.status(handle)
+    }
+
+    fn header(&mut self, handle: u64, name: String) -> Result<Option<String>, String> {
+        self.http.header(handle, &name)
+    }
+
+    fn read_body(&mut self, handle: u64, max: u32) -> Result<(Vec<u8>, bool), String> {
+        self.http.read_body(handle, max)
+    }
+
+    fn close(&mut self, handle: u64) {
+        self.http.close(handle);
     }
 }
 

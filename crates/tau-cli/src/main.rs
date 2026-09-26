@@ -71,6 +71,12 @@ struct Cli {
     #[arg(long)]
     mcp_url: Option<String>,
 
+    /// HTTP origin a wasm provider may reach (repeatable), e.g.
+    /// --provider-origin https://api.openai.com — remembered per signing
+    /// fingerprint with --remember.
+    #[arg(long = "provider-origin")]
+    provider_origin: Vec<String>,
+
     /// Load unsigned components. By default every extension, provider, and
     /// bridge must carry a valid signature from a key in ~/.tau/trust.
     #[arg(long)]
@@ -241,6 +247,50 @@ async fn resolve_component(arg: &std::path::Path) -> Result<PathBuf> {
     Ok(pulled.path)
 }
 
+/// Recalled-consent flow shared by bridge and provider loads: fingerprints
+/// from the component bytes, recall per fingerprint, explicit flags win
+/// per field and origins union. Returns the merged consent and the
+/// fingerprint (None for unsigned components — no recall, no remembering).
+fn recall_consent(
+    bytes: &[u8],
+    explicit: tau_ext::bridge::BridgeConsent,
+) -> (tau_ext::bridge::BridgeConsent, Option<String>) {
+    let fingerprints = tau_ext::consent::component_fingerprints(bytes).unwrap_or_default();
+    let fingerprint = fingerprints.first().cloned();
+    let store = tau_ext::consent::ConsentStore::default();
+    let remembered = fingerprint
+        .as_deref()
+        .and_then(|fp| store.load(fp))
+        .unwrap_or_default();
+    if !remembered.is_empty() {
+        eprintln!(
+            "[tau] recalled consent for {}",
+            fingerprint.as_deref().unwrap_or("?")
+        );
+    }
+    (tau_ext::consent::merge(explicit, remembered), fingerprint)
+}
+
+/// Save consent on --remember; unsigned components cannot carry it.
+fn maybe_remember(
+    remember: bool,
+    fingerprint: &Option<String>,
+    consent: tau_ext::bridge::BridgeConsent,
+) -> Result<()> {
+    if !remember {
+        return Ok(());
+    }
+    let Some(fp) = fingerprint else {
+        anyhow::bail!(
+            "--remember requires a signed component: unsigned components cannot carry remembered consent"
+        );
+    };
+    tau_ext::consent::ConsentStore::default()
+        .save(fp, &tau_ext::consent::RememberedConsent::from(consent))?;
+    eprintln!("[tau] remembered consent for {fp}");
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -300,21 +350,7 @@ async fn main() -> Result<()> {
         // fingerprint — no recall, no remembering.
         let bytes = std::fs::read(path)
             .with_context(|| format!("reading {}", path.display()))?;
-        let fingerprints = tau_ext::consent::component_fingerprints(&bytes)
-            .unwrap_or_default();
-        let fingerprint = fingerprints.first().cloned();
-        let store = tau_ext::consent::ConsentStore::default();
-        let remembered = fingerprint
-            .as_deref()
-            .and_then(|fp| store.load(fp))
-            .unwrap_or_default();
-        if !remembered.is_empty() {
-            eprintln!(
-                "[tau] recalled consent for {}",
-                fingerprint.as_deref().unwrap_or("?")
-            );
-        }
-        let consent = tau_ext::consent::merge(explicit, remembered);
+        let (consent, fingerprint) = recall_consent(&bytes, explicit);
         anyhow::ensure!(
             consent.command.is_some() || consent.mcp_url.is_some(),
             concat!(
@@ -330,15 +366,7 @@ async fn main() -> Result<()> {
             tools.register(tool);
         }
 
-        if cli.remember {
-            let Some(fp) = fingerprint else {
-                anyhow::bail!(
-                    "--remember requires a signed component: unsigned components                      cannot carry remembered consent"
-                );
-            };
-            store.save(&fp, &tau_ext::consent::RememberedConsent::from(consent))?;
-            eprintln!("[tau] remembered consent for {fp}");
-        }
+        maybe_remember(cli.remember, &fingerprint, consent)?;
     }
 
     let model: Box<dyn Model> = if cli.demo {
@@ -349,10 +377,24 @@ async fn main() -> Result<()> {
             .model
             .clone()
             .context("--provider-wasm needs --model to select a model id")?;
-        Box::new(
-            host.load_provider(path, name)
+        let mut explicit = tau_ext::bridge::BridgeConsent::default();
+        for url in &cli.provider_origin {
+            let origin = tau_ext::bridge::origin_of(url)
+                .with_context(|| format!("--provider-origin is not a valid http(s) url: {url}"))?;
+            explicit.origins.insert(origin);
+        }
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let (consent, fingerprint) = recall_consent(&bytes, explicit);
+        if !consent.origins.is_empty() {
+            eprintln!("[tau] provider http origins: {:?}", consent.origins);
+        }
+        let model = Box::new(
+            host.load_provider(path, name, consent.origins.clone())
                 .with_context(|| format!("loading provider {}", path.display()))?,
-        )
+        );
+        maybe_remember(cli.remember, &fingerprint, consent)?;
+        model
     } else {
         let provider = cli.provider.clone().unwrap_or_else(|| {
             if std::env::var("ANTHROPIC_API_KEY").is_ok()

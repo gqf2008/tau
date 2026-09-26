@@ -98,10 +98,14 @@ world extension {
     export hooks;
 }
 
-/// Model provider extension. `events.emit` is the push channel; network
-/// access is granted per-component by capability consent, not by this world.
+/// Model provider extension. `events.emit` is the push channel. Network
+/// access comes from the same consent-gated `http` capability bridges
+/// use: always linked, granted empty by default, every request's origin
+/// checked against the per-component allowlist (remembered per signing
+/// fingerprint). With no consent, calls fail at call time.
 world provider {
     import events;
+    import http;
     export models;
 }
 

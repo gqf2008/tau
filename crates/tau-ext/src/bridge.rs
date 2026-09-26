@@ -17,6 +17,7 @@ use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::Store;
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
+use crate::http::HttpRegistry;
 use crate::{bridge_bindings, ExtError, ExtensionHost};
 
 struct BridgeState {
@@ -128,119 +129,7 @@ pub struct BridgeConsent {
 /// Extract the consent origin ("scheme://host[:port]") from an http(s) URL.
 /// Public so the CLI can build a consent allowlist from --mcp-url.
 pub fn origin_of(url: &str) -> Option<String> {
-    HttpRegistry::origin_of(url)
-}
-
-/// One in-flight HTTP response: headers already received, body drained by a
-/// reader thread into a channel — same shape as ChildProcess, so SSE
-/// streams can be consumed incrementally and closed early.
-struct HttpResponse {
-    status: u16,
-    headers: Vec<(String, String)>,
-    rx: std::sync::mpsc::Receiver<Result<Vec<u8>, String>>,
-    pending: VecDeque<u8>,
-    eof: bool,
-}
-
-#[derive(Default)]
-struct HttpRegistry {
-    next: u64,
-    responses: HashMap<u64, HttpResponse>,
-    /// Consented origins: "scheme://host[:port]". Empty = deny all.
-    origins: HashSet<String>,
-}
-
-impl HttpRegistry {
-    fn origin_of(url: &str) -> Option<String> {
-        let (scheme, rest) = url.split_once("://")?;
-        if scheme != "http" && scheme != "https" {
-            return None;
-        }
-        let authority = rest.split('/').next()?;
-        // Strip any userinfo; host[:port] is what consent covers.
-        let host_port = authority.rsplit('@').next()?;
-        if host_port.is_empty() {
-            return None;
-        }
-        Some(format!("{scheme}://{}", host_port.to_ascii_lowercase()))
-    }
-
-    fn request(
-        &mut self,
-        method: &str,
-        url: &str,
-        headers: &[(String, String)],
-        body: &[u8],
-    ) -> Result<u64, String> {
-        let origin = Self::origin_of(url).ok_or_else(|| format!("bad url: {url}"))?;
-        if !self.origins.contains(&origin) {
-            return Err(format!(
-                "http: origin {origin} not in consent allowlist ({} granted)",
-                self.origins.len()
-            ));
-        }
-        // Redirects are never followed: a redirect would silently move the
-        // request to an origin the user did not consent to.
-        let client = reqwest::blocking::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .build()
-            .map_err(|e| format!("http client: {e}"))?;
-        let method = reqwest::Method::from_bytes(method.as_bytes())
-            .map_err(|e| format!("bad method {method}: {e}"))?;
-        let mut request = client.request(method, url).body(body.to_vec());
-        for (name, value) in headers {
-            request = request.header(name, value);
-        }
-        let mut response = request.send().map_err(|e| format!("http {url}: {e}"))?;
-        let status = response.status().as_u16();
-        let response_headers: Vec<(String, String)> = response
-            .headers()
-            .iter()
-            .map(|(n, v)| {
-                (
-                    n.as_str().to_string(),
-                    v.to_str().unwrap_or_default().to_string(),
-                )
-            })
-            .collect();
-        let (tx, rx) = std::sync::mpsc::channel();
-        std::thread::spawn(move || {
-            let mut buf = [0u8; 8192];
-            loop {
-                match response.read(&mut buf) {
-                    Ok(0) => break,
-                    Ok(n) => {
-                        if tx.send(Ok(buf[..n].to_vec())).is_err() {
-                            break;
-                        }
-                    }
-                    Err(e) => {
-                        let _ = tx.send(Err(format!("read body: {e}")));
-                        break;
-                    }
-                }
-            }
-        });
-        let handle = self.next;
-        self.next += 1;
-        self.responses.insert(
-            handle,
-            HttpResponse {
-                status,
-                headers: response_headers,
-                rx,
-                pending: VecDeque::new(),
-                eof: false,
-            },
-        );
-        Ok(handle)
-    }
-
-    fn get(&mut self, handle: u64) -> Result<&mut HttpResponse, String> {
-        self.responses
-            .get_mut(&handle)
-            .ok_or_else(|| format!("unknown http handle {handle}"))
-    }
+    crate::http::HttpRegistry::origin_of(url)
 }
 
 impl bridge_bindings::tau::extension::http::Host for BridgeState {
@@ -255,37 +144,19 @@ impl bridge_bindings::tau::extension::http::Host for BridgeState {
     }
 
     fn status(&mut self, handle: u64) -> Result<u16, String> {
-        Ok(self.http.get(handle)?.status)
+        self.http.status(handle)
     }
 
     fn header(&mut self, handle: u64, name: String) -> Result<Option<String>, String> {
-        let response = self.http.get(handle)?;
-        let name = name.to_ascii_lowercase();
-        Ok(response
-            .headers
-            .iter()
-            .find(|(n, _)| n.to_ascii_lowercase() == name)
-            .map(|(_, v)| v.clone()))
+        self.http.header(handle, &name)
     }
 
     fn read_body(&mut self, handle: u64, max: u32) -> Result<(Vec<u8>, bool), String> {
-        let response = self.http.get(handle)?;
-        let max = max.max(1) as usize;
-        // Same contract as read_stdout: block only until SOMETHING arrives.
-        if response.pending.is_empty() && !response.eof {
-            match response.rx.recv() {
-                Ok(Ok(chunk)) => response.pending.extend(chunk),
-                Ok(Err(e)) => return Err(e),
-                Err(_) => response.eof = true,
-            }
-        }
-        let take = response.pending.len().min(max);
-        let bytes: Vec<u8> = response.pending.drain(..take).collect();
-        Ok((bytes, response.eof && response.pending.is_empty()))
+        self.http.read_body(handle, max)
     }
 
     fn close(&mut self, handle: u64) {
-        self.http.responses.remove(&handle);
+        self.http.close(handle);
     }
 }
 
@@ -376,10 +247,7 @@ impl ExtensionHost {
             ctx: ctx.build(),
             table: ResourceTable::new(),
             processes: ProcessRegistry::default(),
-            http: HttpRegistry {
-                origins: consent.origins,
-                ..HttpRegistry::default()
-            },
+            http: HttpRegistry::new(consent.origins),
         };
         let mut store = Store::new(&self.engine, state);
         let bindings = bridge_bindings::Bridge::instantiate(&mut store, &component, &linker)
