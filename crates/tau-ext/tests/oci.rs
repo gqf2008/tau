@@ -144,6 +144,52 @@ async fn pulls_behind_the_bearer_token_dance() {
     let _ = std::fs::remove_dir_all(&cache);
 }
 
+/// Push a component, then pull it back through the normal path: the
+/// round trip must return byte-identical content, with and without the
+/// bearer-token dance.
+fn push_pull_round_trip(auth: bool) {
+    let (Some(wasm), Some(python)) = (artifact(), python()) else {
+        eprintln!("skipping: upper.wasm not built or no python");
+        return;
+    };
+    let registry = MockRegistry::start(&python, &wasm, auth);
+    let reference = format!("oci://127.0.0.1:{}/test/component:pushed", registry.port);
+
+    let pushed = oci::push(&reference, &wasm).expect("push");
+    assert!(pushed.digest.starts_with("sha256:"));
+    assert_eq!(pushed.reference, reference);
+
+    let cache = cache();
+    let pulled = oci::pull_into(&reference, &cache).expect("pull pushed component");
+    assert_eq!(pulled.digest, pushed.digest);
+    assert_eq!(
+        std::fs::read(&pulled.path).unwrap(),
+        std::fs::read(&wasm).unwrap()
+    );
+    let _ = std::fs::remove_dir_all(&cache);
+}
+
+#[test]
+fn push_pull_round_trip_anonymous() {
+    push_pull_round_trip(false);
+}
+
+#[test]
+fn push_pull_round_trip_behind_the_token_dance() {
+    push_pull_round_trip(true);
+}
+
+#[test]
+fn push_to_a_digest_reference_is_an_error() {
+    let wasm = std::env::temp_dir().join("tau-oci-push-digest.wasm");
+    std::fs::write(&wasm, b"wasm").unwrap();
+    let result = oci::push(
+        &format!("oci://127.0.0.1:1/test/component@sha256:{}", "00".repeat(32)),
+        &wasm,
+    );
+    assert!(matches!(result, Err(oci::OciError::BadReference(_))));
+}
+
 #[test]
 fn unknown_digest_is_an_error() {
     let Some(python) = python() else {

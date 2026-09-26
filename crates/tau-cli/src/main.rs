@@ -136,6 +136,13 @@ enum Sub {
         #[arg(long)]
         yes: bool,
     },
+    /// Push a wasm component to an OCI registry (oci://registry/repo:tag).
+    Push {
+        /// Component file to push.
+        wasm: PathBuf,
+        /// Target reference; must name a tag, not a digest.
+        reference: String,
+    },
     /// Trust a base64 ed25519 pubkey (or list trusted keys).
     Trust {
         /// Base64 pubkey to add to ~/.tau/trust.
@@ -146,7 +153,7 @@ enum Sub {
     },
 }
 
-fn run_sub(sub: Sub) -> Result<()> {
+async fn run_sub(sub: Sub) -> Result<()> {
     match sub {
         Sub::Consent { list, revoke } => {
             let store = tau_ext::consent::ConsentStore::default();
@@ -228,6 +235,21 @@ fn run_sub(sub: Sub) -> Result<()> {
             if !yes && report.removed > 0 {
                 println!("dry run — re-run with --yes to delete");
             }
+        }
+        Sub::Push { wasm, reference } => {
+            let bytes = std::fs::read(&wasm)
+                .with_context(|| format!("reading {}", wasm.display()))?;
+            if tau_ext::sign::verify(&bytes).map(|keys| keys.is_empty()).unwrap_or(true) {
+                eprintln!(
+                    "[tau] warning: {} is unsigned — consumers will need --allow-unsigned",
+                    wasm.display()
+                );
+            }
+            // reqwest blocking must not run on a runtime thread.
+            let pushed = tokio::task::spawn_blocking(move || tau_ext::oci::push(&reference, &wasm))
+                .await
+                .expect("push task")?;
+            println!("pushed {} ({})", pushed.reference, pushed.digest);
         }
         Sub::Keygen => {
             let fp = tau_ext::sign::keygen()?;
@@ -345,7 +367,7 @@ fn maybe_remember(
 async fn main() -> Result<()> {
     let cli = Cli::parse();
     if let Some(sub) = cli.command {
-        return run_sub(sub);
+        return run_sub(sub).await;
     }
     let interactive = match &cli.print {
         Some(_) => false,
