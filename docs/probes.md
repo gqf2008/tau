@@ -16,17 +16,23 @@ Model (derived from pi's `HookMap`, packages/agent/src/harness/agent-harness.ts)
 
 ## Run lifecycle
 
+Wired: 1–7 and 9 (verdicts `continue` / `replace` / `block`; block aborts
+with the reason as the run error, except `before_tool` where it becomes a
+blocked tool result handed back to the model). Reserved: 8 and the
+compaction half of 3's payload — they fire when compaction/navigation land;
+a probe cannot probe what does not exist.
+
 | # | point | payload (in) | verdicts | jev use case |
 |---|-------|--------------|----------|--------------|
-| 1 | `before_run` | prompt messages, resources | replace messages / continue | classify intent → route to model, inject skill, reject out-of-scope prompts |
+| 1 | `before_run` | prompt message | replace prompt / block | classify intent → route to model, inject skill, reject out-of-scope prompts |
 | 2 | `transform_context` | assembled messages + system prompt | replace either / continue | trim or re-rank context; inject retrieved memory |
-| 3 | `before_request` | model, step (assistant/compaction/...), attempt, stream options | patch options / continue | bool "transient?" → retry with backoff; classify error → fail over to another model |
-| 4 | `after_response` | settled assistant message (+status/headers) | replace message / continue | score quality → accept or regenerate; redact secrets |
-| 5 | `before_tool` | tool name + args (validated) | continue / replace args / block{reason} | bool "destructive?" → block or escalate to user; classify risk tier for policy |
-| 6 | `after_tool` | name, args, result content, is_error | replace result / terminate run | truncate or sanitize result; score usefulness → decide run ends early |
-| 7 | `before_compaction` | reason (manual/threshold/overflow), prepared summary input | decline / replace with custom summary | custom summarizer; veto compaction during critical phase |
-| 8 | `before_navigation` | branch target, prepared branch summary | decline / replace summary | custom branch summarizer |
-| 9 | `before_run_end` | run id, all messages | follow-up prompt / none | chain runs: score "task done?" → enqueue next step |
+| 3 | `before_request` | final request: messages + system + tools | replace messages/system / block | bool "transient?" → retry with backoff; classify error → fail over to another model |
+| 4 | `after_response` | assembled assistant message + stop reason | replace message / block | score quality → accept or regenerate; redact secrets |
+| 5 | `before_tool` | tool id + name + args | continue / replace args / block{reason} | bool "destructive?" → block or escalate to user; classify risk tier for policy |
+| 6 | `after_tool` | id, name, args, result content, is_error | replace result / continue | truncate or sanitize result; score usefulness → decide run ends early |
+| 7 | `before_run_end` | produced messages + stop reason | replace messages / block | chain runs: score "task done?" → enqueue next step |
+| 8 | `before_compaction` *(reserved)* | reason (manual/threshold/overflow), prepared summary input | decline / replace with custom summary | custom summarizer; veto compaction during critical phase |
+| 9 | `before_navigation` *(reserved)* | branch target, prepared branch summary | decline / replace summary | custom branch summarizer |
 
 ## Session lifecycle (observe-only in v0)
 

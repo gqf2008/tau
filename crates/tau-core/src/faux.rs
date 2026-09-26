@@ -250,3 +250,130 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod probe_point_tests {
+    #![allow(clippy::module_inception)]
+    use crate::model::{Model, ModelEvent, Request, StopReason};
+    use crate::probe::{ProbeHandler, ProbePoint, ProbeRegistry, Verdict};
+    use crate::{Agent, Message, ToolRegistry};
+    use async_trait::async_trait;
+
+    /// A real echo: answers with the last user message's text, so tests can
+    /// observe what actually reached the model.
+    struct EchoLast;
+
+    #[async_trait]
+    impl Model for EchoLast {
+        async fn stream(
+            &self,
+            req: &Request,
+        ) -> futures::stream::BoxStream<'static, ModelEvent> {
+            use futures::StreamExt;
+            let text = req
+                .messages
+                .iter()
+                .rev()
+                .find(|m| m.role == crate::types::Role::User)
+                .map(|m| m.text())
+                .unwrap_or_default();
+            futures::stream::iter([
+                ModelEvent::TextDelta { text },
+                ModelEvent::Done {
+                    stop: StopReason::Stop,
+                },
+            ])
+            .boxed()
+        }
+    }
+
+    /// Records every probe firing (point + payload) for assertion.
+    struct Recorder(std::sync::Mutex<Vec<(ProbePoint, serde_json::Value)>>);
+
+    #[async_trait]
+    impl ProbeHandler for Recorder {
+        fn points(&self) -> &[ProbePoint] {
+            &[
+                ProbePoint::BeforeRequest,
+                ProbePoint::AfterResponse,
+                ProbePoint::BeforeRunEnd,
+            ]
+        }
+
+        async fn probe(&self, point: ProbePoint, payload: serde_json::Value) -> Verdict {
+            self.0.lock().unwrap().push((point, payload));
+            Verdict::Continue
+        }
+    }
+
+    #[tokio::test]
+    async fn request_response_and_run_end_probes_fire_in_order() {
+        let model = EchoLast;
+        let recorder = std::sync::Arc::new(Recorder(std::sync::Mutex::new(Vec::new())));
+        struct Shared(std::sync::Arc<Recorder>);
+        #[async_trait]
+        impl ProbeHandler for Shared {
+            fn points(&self) -> &[ProbePoint] {
+                self.0.points()
+            }
+            async fn probe(&self, point: ProbePoint, payload: serde_json::Value) -> Verdict {
+                self.0.probe(point, payload).await
+            }
+        }
+        let mut probes = ProbeRegistry::new();
+        probes.register(Box::new(Shared(recorder.clone())));
+        let agent = Agent::new(Box::new(model), ToolRegistry::new()).probes(probes);
+        agent.run(&[], Message::user("hello probes")).await.unwrap();
+
+        let fired = recorder.0.lock().unwrap();
+        let points: Vec<ProbePoint> = fired.iter().map(|(p, _)| *p).collect();
+        assert_eq!(
+            points,
+            [
+                ProbePoint::BeforeRequest,
+                ProbePoint::AfterResponse,
+                ProbePoint::BeforeRunEnd
+            ]
+        );
+        // before_request sees the final request incl. the user message.
+        assert!(fired[0].1["messages"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|m| m["content"][0]["text"] == "hello probes"));
+        // after_response sees the assembled assistant message.
+        assert!(fired[1].1["message"]["content"][0]["text"]
+            .as_str()
+            .unwrap()
+            .contains("hello probes"));
+        // before_run_end sees everything the run produced.
+        assert!(fired[2].1["messages"].as_array().unwrap().len() >= 2);
+    }
+
+    struct RewriteRequest;
+
+    #[async_trait]
+    impl ProbeHandler for RewriteRequest {
+        fn points(&self) -> &[ProbePoint] {
+            &[ProbePoint::BeforeRequest]
+        }
+
+        async fn probe(&self, _point: ProbePoint, mut payload: serde_json::Value) -> Verdict {
+            // Rewrite the user text before it reaches the model.
+            payload["messages"][0]["content"][0]["text"] =
+                serde_json::Value::String("rewritten by probe".into());
+            Verdict::Replace(payload)
+        }
+    }
+
+    #[tokio::test]
+    async fn before_request_can_rewrite_the_wire_request() {
+        let model = EchoLast;
+        let mut probes = ProbeRegistry::new();
+        probes.register(Box::new(RewriteRequest));
+        let agent = Agent::new(Box::new(model), ToolRegistry::new()).probes(probes);
+        let produced = agent.run(&[], Message::user("original")).await.unwrap();
+        // The echo model answers with what it saw: the rewritten request.
+        assert_eq!(produced[1].text(), "rewritten by probe");
+    }
+}

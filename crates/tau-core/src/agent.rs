@@ -168,7 +168,39 @@ impl Agent {
                         .map_err(|e| AgentError::Model(format!("bad context payload: {e}")))?;
                 }
             }
+            let request_json = serde_json::json!({
+                "system": request.system,
+                "messages": request.messages,
+                "tools": request.tools,
+            });
+            let request = match self.probe(ProbePoint::BeforeRequest, request_json).await {
+                Verdict::Replace(payload) => Request {
+                    system: serde_json::from_value(payload["system"].clone())
+                        .map_err(|e| AgentError::Model(format!("bad before_request payload: {e}")))?,
+                    messages: serde_json::from_value(payload["messages"].clone())
+                        .map_err(|e| AgentError::Model(format!("bad before_request payload: {e}")))?,
+                    tools: request.tools, // tools are registry-owned; not replaceable here
+                },
+                Verdict::Block { reason } => return Err(AgentError::Model(reason)),
+                Verdict::Continue => request,
+            };
             let (assistant, stop) = self.stream_turn(request).await?;
+            let (assistant, stop) = match self
+                .probe(
+                    ProbePoint::AfterResponse,
+                    serde_json::json!({ "message": assistant, "stop": stop }),
+                )
+                .await
+            {
+                Verdict::Replace(payload) => {
+                    let message = serde_json::from_value(payload["message"].clone())
+                        .map_err(|e| AgentError::Model(format!("bad after_response payload: {e}")))?;
+                    let stop = serde_json::from_value(payload["stop"].clone()).unwrap_or(stop);
+                    (message, stop)
+                }
+                Verdict::Block { reason } => return Err(AgentError::Model(reason)),
+                Verdict::Continue => (assistant, stop),
+            };
             self.emit(AgentEvent::TurnEnd { stop });
 
             let calls: Vec<(String, String, serde_json::Value)> = assistant
@@ -178,6 +210,20 @@ impl Agent {
             produced.push(assistant);
 
             if calls.is_empty() || stop != StopReason::ToolUse {
+                let produced = match self
+                    .probe(
+                        ProbePoint::BeforeRunEnd,
+                        serde_json::json!({ "messages": produced, "stop": stop }),
+                    )
+                    .await
+                {
+                    Verdict::Replace(payload) => {
+                        serde_json::from_value(payload["messages"].clone())
+                            .map_err(|e| AgentError::Model(format!("bad before_run_end payload: {e}")))?
+                    }
+                    Verdict::Block { reason } => return Err(AgentError::Model(reason)),
+                    Verdict::Continue => produced,
+                };
                 return Ok(produced);
             }
 

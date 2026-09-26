@@ -4,7 +4,7 @@ use async_trait::async_trait;
 use serde_json::Value as Json;
 
 /// A tool the model may call, described with a JSON Schema parameter object.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ToolDef {
     pub name: String,
     pub description: String,

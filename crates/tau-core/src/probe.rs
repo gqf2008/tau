@@ -1,5 +1,7 @@
 //! Probes: lifecycle points where extensions observe and influence a run.
-//! See docs/probes.md for the full map; v0 wires the run-critical four.
+//! See docs/probes.md for the full map. Seven points are wired; the two
+//! reserved ones (before_compaction, before_navigation) fire when those
+//! features land — a probe cannot probe what does not exist.
 
 use async_trait::async_trait;
 use serde_json::Value as Json;
@@ -8,8 +10,14 @@ use serde_json::Value as Json;
 pub enum ProbePoint {
     BeforeRun,
     TransformContext,
+    /// The final request (messages + system + tools) before it hits the wire.
+    BeforeRequest,
+    /// One assistant response just assembled, before tool execution.
+    AfterResponse,
     BeforeTool,
     AfterTool,
+    /// Natural run end, before the produced messages are returned.
+    BeforeRunEnd,
 }
 
 impl ProbePoint {
@@ -17,8 +25,11 @@ impl ProbePoint {
         match self {
             Self::BeforeRun => "before_run",
             Self::TransformContext => "transform_context",
+            Self::BeforeRequest => "before_request",
+            Self::AfterResponse => "after_response",
             Self::BeforeTool => "before_tool",
             Self::AfterTool => "after_tool",
+            Self::BeforeRunEnd => "before_run_end",
         }
     }
 
@@ -26,17 +37,23 @@ impl ProbePoint {
         match name {
             "before_run" => Some(Self::BeforeRun),
             "transform_context" => Some(Self::TransformContext),
+            "before_request" => Some(Self::BeforeRequest),
+            "after_response" => Some(Self::AfterResponse),
             "before_tool" => Some(Self::BeforeTool),
             "after_tool" => Some(Self::AfterTool),
+            "before_run_end" => Some(Self::BeforeRunEnd),
             _ => None,
         }
     }
 
-    pub const ALL: [ProbePoint; 4] = [
+    pub const ALL: [ProbePoint; 7] = [
         Self::BeforeRun,
         Self::TransformContext,
+        Self::BeforeRequest,
+        Self::AfterResponse,
         Self::BeforeTool,
         Self::AfterTool,
+        Self::BeforeRunEnd,
     ];
 }
 
