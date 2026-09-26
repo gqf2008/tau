@@ -47,11 +47,23 @@ cargo run -p tau-cli -- --demo -p "hello"
 export OPENAI_API_KEY=... OPENAI_BASE_URL=... TAU_MODEL=...
 cargo run -p tau-cli -- -p "hello"
 
-# build the example extension, then use it:
+# interactive mode (terminal, no -p):
+cargo run -p tau-cli -- --demo
+
+# build the example extension, then use it (unsigned -> dev escape, or sign
+# it: `tau keygen` once, then `tau sign <file>.wasm`):
 cargo build --manifest-path examples/upper/Cargo.toml --target wasm32-wasip2 --release
-cargo run -p tau-cli -- -e examples/upper/target/wasm32-wasip2/release/upper.wasm \
+cargo run -p tau-cli -- --allow-unsigned \
+  -e examples/upper/target/wasm32-wasip2/release/upper.wasm \
   -p "shout 'hello tau' using the upper tool"
 ```
+
+## Releases
+
+`scripts/release.sh` runs the full suite, rebuilds the wasm examples,
+builds the release binary (lto + strip), and assembles
+`dist/tau-<version>-<target>.zip` with the binary, README, LICENSE, docs/,
+and prebuilt (unsigned) example components.
 
 ## Layout
 
@@ -63,9 +75,11 @@ cargo run -p tau-cli -- -e examples/upper/target/wasm32-wasip2/release/upper.was
 | `crates/tau-ext` | wasmtime component host (sandboxed) |
 | `crates/tau-cli` | `tau` binary (print + interactive modes) |
 | `wit/tau.wit` | the extension contract, versioned |
-| `docs/probes.md` | lifecycle probe points and verdict semantics |
+| `docs/` | probes, events, bridges, signing, oci, media |
 | `examples/upper` | example wasm extension (tool) |
 | `examples/echo-provider` | example wasm provider (push-mode streaming) |
+| `examples/http-provider` | example wasm provider (consent-gated http) |
+| `examples/mcp-bridge` | example MCP bridge (stdio + streamable HTTP) |
 
 ## Interactive mode
 

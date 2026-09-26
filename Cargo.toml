@@ -22,3 +22,9 @@ anyhow = "1"
 futures = "0.3"
 async-trait = "0.1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "signal"] }
+
+[profile.release]
+# Distribution build: one fast, small binary.
+lto = true
+codegen-units = 1
+strip = true

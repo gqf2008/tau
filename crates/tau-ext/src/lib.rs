@@ -117,10 +117,27 @@ impl ExtensionHost {
 
     /// Read a component file and enforce the trust policy on its bytes.
     fn read_verified(&self, path: &Path) -> Result<Vec<u8>, ExtError> {
-        let bytes = std::fs::read(path).map_err(|e| ExtError::Load {
-            path: path.display().to_string(),
-            reason: e.to_string(),
-        })?;
+        // Windows virus scanners briefly lock freshly-written files; a
+        // component read right after an OCI pull can hit ERROR_ACCESS_DENIED
+        // for a few hundred ms. Bounded retry on PermissionDenied only.
+        let mut attempt = 0;
+        let bytes = loop {
+            match std::fs::read(path) {
+                Ok(bytes) => break bytes,
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::PermissionDenied && attempt < 10 =>
+                {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(100));
+                }
+                Err(e) => {
+                    return Err(ExtError::Load {
+                        path: path.display().to_string(),
+                        reason: e.to_string(),
+                    })
+                }
+            }
+        };
         sign::check_policy(&bytes, &self.policy).map_err(|e| ExtError::Load {
             path: path.display().to_string(),
             reason: e.to_string(),
