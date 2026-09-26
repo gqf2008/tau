@@ -308,6 +308,37 @@ echo "$OUT" | grep -q "STATUS 302" \
     || fail "redirect was followed — consent escaped: $OUT"
 echo "ok — consented origin's 302 is shown, never followed"
 
+# Origin matching sees the same host the client dials: userinfo inside
+# the authority is stripped (flows), a backslash after the authority is
+# path material (stays on the consented host), and the delimiter tricks
+# plus the trailing-dot twin are refused as unconsented.
+OUT="$("$TAU" --allow-unsigned \
+    --provider-wasm "$HTTP_PROVIDER" --model http-echo \
+    --provider-origin http://127.0.0.1:8402 \
+    -p "http://user:pw@127.0.0.1:8402/" 2>&1)" || fail "userinfo run: $OUT"
+echo "$OUT" | grep -q "STATUS 200: hello" \
+    || fail "userinfo-inside-authority fetch did not land: $OUT"
+OUT="$("$TAU" --allow-unsigned \
+    --provider-wasm "$HTTP_PROVIDER" --model http-echo \
+    --provider-origin http://127.0.0.1:8402 \
+    -p 'http://127.0.0.1:8402\@evil.invalid/' 2>&1)" || fail "backslash run: $OUT"
+echo "$OUT" | grep -q "STATUS 200: hello" \
+    || fail "backslash-after-authority left the consented host: $OUT"
+for evil in 'http://evil.invalid\@127.0.0.1:8402/' \
+            'http://evil.invalid?@127.0.0.1:8402/' \
+            'http://127.0.0.1:8402./'; do
+    OUT="$("$TAU" --allow-unsigned \
+        --provider-wasm "$HTTP_PROVIDER" --model http-echo \
+        --provider-origin http://127.0.0.1:8402 \
+        -p "$evil" 2>&1 || true)"
+    echo "$OUT" | grep -q "not in consent allowlist" \
+        || fail "consent bypass reached the network: $evil → $OUT"
+    if echo "$OUT" | grep -q "STATUS 200"; then
+        fail "consent bypass was served: $evil"
+    fi
+done
+echo "ok — origin gate: userinfo/backslash stay home, tricks and twins refused"
+
 # --- step 5: MCP bridge (consent-gated spawn) --------------------------
 step "5/10 MCP bridge (consent-gated spawn)"
 # Without --mcp-command the bridge has nothing it may spawn: the load

@@ -211,7 +211,104 @@ mod tests {
         assert_eq!(origin("HTTP://example.com/"), None);
         assert_eq!(origin("http://@/x"), None);
         assert_eq!(origin("http://"), None);
+        assert_eq!(origin("http:///path"), None);
         assert_eq!(origin("not a url"), None);
+    }
+
+    #[test]
+    fn origin_matching_is_exact_and_fail_closed_on_normalized_forms() {
+        // WHATWG/IDNA normalizations the client applies but the gate
+        // does NOT: each of these computes an origin that differs from
+        // the plain form, so consent for one never covers the other.
+        // That is a usability wart in the SAFE direction — a mismatch
+        // refuses. If normalization is ever added it must happen on
+        // BOTH sides of the comparison, or the differential reopens.
+        let cases = [
+            // Trailing dot: same DNS answer, different origin.
+            ("http://example.com./", "http://example.com."),
+            // Explicit default port vs the implicit form.
+            ("http://example.com:80/", "http://example.com:80"),
+            // Empty port (the client drops it).
+            ("http://example.com:/", "http://example.com:"),
+            // IDN: raw unicode, no punycode mapping on our side.
+            ("http://exämple.com/", "http://exämple.com"),
+            // UTS-46 ideographic full stop: the client maps 。 to "." —
+            // we do not, so consent for example.com does not leak.
+            ("http://example。com/", "http://example。com"),
+        ];
+        for (url, want) in cases {
+            assert_eq!(origin(url), Some(want.to_string()), "url: {url}");
+        }
+        // Tabs/CR/LF (which the URL spec strips entirely) stay raw on
+        // our side: they simply never match a consented origin.
+        assert_eq!(
+            origin("http://example\t.com/"),
+            Some("http://example\t.com".into())
+        );
+        // None of the normalized twins pass a gate consented to the
+        // plain form.
+        let mut registry =
+            HttpRegistry::new(["http://example.com".to_string()].into_iter().collect());
+        for url in [
+            "http://example.com./",
+            "http://example.com:80/",
+            "http://example.com:/",
+            "http://example\t.com/",
+        ] {
+            let err = registry.request("GET", url, &[], &[]).unwrap_err();
+            assert!(
+                err.contains("not in consent allowlist"),
+                "normalized twin slipped the gate: {url} → {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn gate_and_client_agree_on_every_accepted_url() {
+        // The dangerous direction of a parser differential: the gate
+        // accepts (origin IS the consented one) but the HTTP client
+        // dials a different host. For every URL our extractor maps to
+        // the consented origin, reqwest's own parser must name the
+        // same scheme, host, and port.
+        let consented = "http://127.0.0.1:8402";
+        let urls = [
+            "http://127.0.0.1:8402/",
+            "http://127.0.0.1:8402",
+            "http://user:pw@127.0.0.1:8402/x?q=1#f",
+            "http://@127.0.0.1:8402/",
+            "http://127.0.0.1:8402/path",
+            // Backslash after the authority: path material, same host.
+            "http://127.0.0.1:8402\\@evil.invalid/",
+            // The bypass shapes must NOT reach this test's assert —
+            // the gate computes a different origin for them (covered
+            // above), so they are skipped here by construction.
+            "http://evil.invalid?@127.0.0.1:8402/",
+            "http://evil.invalid#@127.0.0.1:8402/",
+            "http://evil.invalid\\@127.0.0.1:8402/",
+            "http://127.0.0.1:8402.evil.invalid/",
+        ];
+        for url in urls {
+            let Some(computed) = origin(url) else {
+                continue;
+            };
+            if computed != consented {
+                continue; // the gate refuses these — asserted elsewhere
+            }
+            let parsed = reqwest::Url::parse(url)
+                .unwrap_or_else(|_| panic!("gate accepted but the client cannot parse: {url}"));
+            let client_origin = match parsed.port() {
+                Some(port) => format!(
+                    "{}://{}:{port}",
+                    parsed.scheme(),
+                    parsed.host_str().expect("host")
+                ),
+                None => format!("{}://{}", parsed.scheme(), parsed.host_str().expect("host")),
+            };
+            assert_eq!(
+                client_origin, consented,
+                "gate/client disagree on {url}: gate saw {computed}, client dials {client_origin}"
+            );
+        }
     }
 
     #[test]
