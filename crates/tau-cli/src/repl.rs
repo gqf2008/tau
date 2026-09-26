@@ -15,6 +15,20 @@ use anyhow::{Context, Result};
 use tau_core::{Agent, AgentEvent, Control, JsonlStore, Message};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
+/// One-line, length-capped preview of a tool output for `[tau] tool ←`
+/// lines: whitespace collapsed, char-safe truncation.
+pub(crate) fn compact_preview(output: &str) -> String {
+    const LIMIT: usize = 100;
+    let flat: String = output.split_whitespace().collect::<Vec<_>>().join(" ");
+    let mut chars = flat.chars();
+    let head: String = chars.by_ref().take(LIMIT).collect();
+    if chars.next().is_some() {
+        format!("{head}…")
+    } else {
+        head
+    }
+}
+
 /// What the input thread observed.
 pub(crate) enum LineEvent {
     Line(String),
@@ -132,10 +146,16 @@ pub(crate) async fn drive(
                     format!("[tau] audio Δ {bytes} bytes ({media_type})")
                 }
                 Ok(AgentEvent::ToolCallStart { name, .. }) => format!("[tau] tool → {name}"),
-                Ok(AgentEvent::ToolCallEnd { name, is_error, .. }) => {
+                Ok(AgentEvent::ToolCallEnd {
+                    name,
+                    is_error,
+                    output,
+                    ..
+                }) => {
                     format!(
-                        "[tau] tool ← {name}{}",
-                        if is_error { " (error)" } else { "" }
+                        "[tau] tool ← {name}{}: {}",
+                        if is_error { " (error)" } else { "" },
+                        compact_preview(&output)
                     )
                 }
                 Ok(AgentEvent::Probe { point, action }) => format!("[tau] probe {point}: {action}"),

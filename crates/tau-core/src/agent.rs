@@ -47,6 +47,9 @@ pub enum AgentEvent {
         name: String,
         /// Whether the tool reported failure.
         is_error: bool,
+        /// The output the loop recorded (post-probe). Renderers should
+        /// show a compact preview, not dump it verbatim.
+        output: String,
     },
     /// A probe fired; observers see the full decision trail.
     Probe {
@@ -478,6 +481,7 @@ impl Agent {
                             id: id.clone(),
                             name: name.clone(),
                             is_error: true,
+                            output: format!("blocked: {reason}"),
                         });
                         results.push(Content::ToolResult {
                             call_id: id,
@@ -518,6 +522,7 @@ impl Agent {
                     id: id.clone(),
                     name,
                     is_error: output.is_error,
+                    output: output.content.clone(),
                 });
                 results.push(Content::ToolResult {
                     call_id: id,

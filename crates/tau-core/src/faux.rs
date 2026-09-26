@@ -111,10 +111,29 @@ fn demo_round(req: &Request) -> Vec<ModelEvent> {
             },
         ];
     }
+    // A tool ran: say what it returned, so the demo shows the loop
+    // closing (result → model), not just the call.
+    let outcome = req
+        .messages
+        .iter()
+        .rev()
+        .flat_map(|m| &m.content)
+        .find_map(|c| match c {
+            Content::ToolResult {
+                content, is_error, ..
+            } => Some((content.clone(), *is_error)),
+            _ => None,
+        });
+    let middle = match outcome {
+        Some((content, false)) => format!("The tool answered: {content}. "),
+        Some((content, true)) => format!("The tool failed: {content}. "),
+        None => String::new(),
+    };
     vec![
         ModelEvent::TextDelta {
             text: "tau is alive. ".into(),
         },
+        ModelEvent::TextDelta { text: middle },
         ModelEvent::TextDelta {
             text: "(faux model — set ANTHROPIC_API_KEY or OPENAI_API_KEY for a real one)".into(),
         },
@@ -296,6 +315,16 @@ mod tests {
                 .iter()
                 .any(|e| matches!(e, ModelEvent::TextDelta { .. }))
         );
+        // The answer cites the tool result — the demo shows the loop
+        // closing, not just the call.
+        let answer: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ModelEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(answer.contains("The tool answered: SAY HI."), "{answer}");
         assert!(matches!(
             events.last(),
             Some(ModelEvent::Done {

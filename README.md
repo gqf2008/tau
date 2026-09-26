@@ -68,7 +68,18 @@ cargo run -p tau-cli -- --demo
 cargo build --manifest-path examples/upper/Cargo.toml --target wasm32-wasip2 --release
 cargo run -p tau-cli -- --allow-unsigned \
   -e examples/upper/target/wasm32-wasip2/release/upper.wasm \
-  -p "shout 'hello tau' using the upper tool"
+  --demo -p "shout hello tau"
+```
+
+The demo with the extension loaded shows the whole agent loop — call,
+result, answer citing the result:
+
+```
+[tau] loaded extension: upper
+[tau]   tool: upper
+[tau] tool → upper
+[tau] tool ← upper: SHOUT HELLO TAU
+tau is alive. The tool answered: SHOUT HELLO TAU. (faux model — …)
 ```
 
 ## Releases

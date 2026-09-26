@@ -798,10 +798,16 @@ async fn main() -> Result<()> {
                     eprintln!("[tau] audio Δ {bytes} bytes ({media_type})")
                 }
                 Ok(AgentEvent::ToolCallStart { name, .. }) => eprintln!("\n[tau] tool → {name}"),
-                Ok(AgentEvent::ToolCallEnd { name, is_error, .. }) => {
+                Ok(AgentEvent::ToolCallEnd {
+                    name,
+                    is_error,
+                    output,
+                    ..
+                }) => {
                     eprintln!(
-                        "[tau] tool ← {name}{}",
-                        if is_error { " (error)" } else { "" }
+                        "[tau] tool ← {name}{}: {}",
+                        if is_error { " (error)" } else { "" },
+                        repl::compact_preview(&output)
                     )
                 }
                 Ok(AgentEvent::Probe { point, action }) => {
