@@ -14,6 +14,9 @@ extensible — but extensions are **wasm components**, not in-process scripts.
   tools) and `hooks` (probes that observe and influence the run).
   Sandboxed by default — the world exports no capabilities, so a component
   that imports fs/net/env fails instantiation.
+- **Signing**: components must carry an embedded ed25519 signature from a
+  trusted key (`tau keygen` / `tau sign` / `tau trust`); `--allow-unsigned`
+  is the explicit dev escape. See `docs/signing.md`.
 - **Bridges**: no MCP in core. External tool protocols (MCP) are translated
   by bridge components over a consent-gated spawn-with-pipes capability
   (`--mcp-bridge b.wasm --mcp-command '["python","server.py"]'`).

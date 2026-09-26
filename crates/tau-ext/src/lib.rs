@@ -39,6 +39,7 @@ mod bridge_bindings {
 }
 
 pub mod bridge;
+pub mod sign;
 
 #[derive(Debug, Error)]
 pub enum ExtError {
@@ -88,6 +89,7 @@ impl LoadedExtension {
 
 pub struct ExtensionHost {
     engine: Engine,
+    policy: sign::TrustPolicy,
 }
 
 impl Default for ExtensionHost {
@@ -97,10 +99,30 @@ impl Default for ExtensionHost {
 }
 
 impl ExtensionHost {
+    /// Library default: unsigned components load. The CLI product uses
+    /// `with_policy(RequireTrusted)` and gates this behind --allow-unsigned.
     pub fn new() -> Self {
+        Self::with_policy(sign::TrustPolicy::AllowUnsigned)
+    }
+
+    pub fn with_policy(policy: sign::TrustPolicy) -> Self {
         Self {
             engine: Engine::new(&Config::new()).expect("wasmtime engine"),
+            policy,
         }
+    }
+
+    /// Read a component file and enforce the trust policy on its bytes.
+    fn read_verified(&self, path: &Path) -> Result<Vec<u8>, ExtError> {
+        let bytes = std::fs::read(path).map_err(|e| ExtError::Load {
+            path: path.display().to_string(),
+            reason: e.to_string(),
+        })?;
+        sign::check_policy(&bytes, &self.policy).map_err(|e| ExtError::Load {
+            path: path.display().to_string(),
+            reason: e.to_string(),
+        })?;
+        Ok(bytes)
     }
 
     /// Run component instantiation and entry-point calls on a plain OS
@@ -123,7 +145,8 @@ impl ExtensionHost {
     }
 
     fn load_inner(&self, path: &Path) -> Result<LoadedExtension, ExtError> {
-        let component = Component::from_file(&self.engine, path).map_err(|e| ExtError::Load {
+        let bytes = self.read_verified(path)?;
+        let component = Component::from_binary(&self.engine, &bytes).map_err(|e| ExtError::Load {
             path: path.display().to_string(),
             reason: e.to_string(),
         })?;
@@ -321,7 +344,8 @@ impl ExtensionHost {
     }
 
     fn load_provider_inner(&self, path: &Path, model: String) -> Result<WasmModel, ExtError> {
-        let component = Component::from_file(&self.engine, path).map_err(|e| ExtError::Load {
+        let bytes = self.read_verified(path)?;
+        let component = Component::from_binary(&self.engine, &bytes).map_err(|e| ExtError::Load {
             path: path.display().to_string(),
             reason: e.to_string(),
         })?;

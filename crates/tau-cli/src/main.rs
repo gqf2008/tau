@@ -13,6 +13,9 @@ use tau_core::{Agent, Message, Model, ProbeRegistry, ToolRegistry};
 #[derive(Parser)]
 #[command(name = "tau", version, about = "Minimal agent harness with wasm extensions")]
 struct Cli {
+    #[command(subcommand)]
+    command: Option<Sub>,
+
     /// Prompt to run (print mode).
     #[arg(short, long)]
     print: Option<String>,
@@ -67,6 +70,68 @@ struct Cli {
     /// origin and nothing else.
     #[arg(long)]
     mcp_url: Option<String>,
+
+    /// Load unsigned components. By default every extension, provider, and
+    /// bridge must carry a valid signature from a key in ~/.tau/trust.
+    #[arg(long)]
+    allow_unsigned: bool,
+}
+
+#[derive(clap::Subcommand)]
+enum Sub {
+    /// Generate a signing keypair into ~/.tau/keys and trust it.
+    Keygen,
+    /// Sign a wasm component in place (embedded signature section).
+    Sign {
+        /// Component file to sign.
+        wasm: PathBuf,
+        /// Key fingerprint in ~/.tau/keys; required if more than one key.
+        #[arg(long)]
+        key: Option<String>,
+    },
+    /// Trust a base64 ed25519 pubkey (or list trusted keys).
+    Trust {
+        /// Base64 pubkey to add to ~/.tau/trust.
+        pubkey: Option<String>,
+        /// List trusted key fingerprints.
+        #[arg(long)]
+        list: bool,
+    },
+}
+
+fn run_sub(sub: Sub) -> Result<()> {
+    match sub {
+        Sub::Keygen => {
+            let fp = tau_ext::sign::keygen()?;
+            println!("key generated and trusted: {fp}");
+            println!("  secret: {}", tau_ext::sign::keys_dir().join(format!("{fp}.key")).display());
+        }
+        Sub::Sign { wasm, key } => {
+            let (fp, key) = tau_ext::sign::load_key(key.as_deref())?;
+            let signed_fp = tau_ext::sign::sign_file(&wasm, &key)?;
+            println!("signed {} with {signed_fp}", wasm.display());
+            let _ = fp;
+        }
+        Sub::Trust { pubkey, list } => {
+            if list {
+                let dir = tau_ext::sign::trust_dir();
+                let mut entries: Vec<_> = std::fs::read_dir(&dir)
+                    .map(|rd| rd.filter_map(|e| e.ok()).collect())
+                    .unwrap_or_default();
+                entries.sort_by_key(|e| e.file_name());
+                for entry in entries {
+                    println!("{}", entry.file_name().to_string_lossy().trim_end_matches(".pub"));
+                }
+                return Ok(());
+            }
+            let Some(pubkey) = pubkey else {
+                anyhow::bail!("usage: tau trust <base64-pubkey> | tau trust --list");
+            };
+            let fp = tau_ext::sign::trust_key(&pubkey)?;
+            println!("trusted: {fp}");
+        }
+    }
+    Ok(())
 }
 
 fn default_model() -> String {
@@ -78,6 +143,9 @@ fn default_model() -> String {
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
+    if let Some(sub) = cli.command {
+        return run_sub(sub);
+    }
     let Some(prompt_text) = cli.print else {
         eprintln!("tau v0 is print-mode only. Try: tau --demo -p \"hello\"");
         std::process::exit(2);
@@ -85,7 +153,13 @@ async fn main() -> Result<()> {
 
     let mut tools = ToolRegistry::new();
     let mut probes = ProbeRegistry::new();
-    let host = tau_ext::ExtensionHost::new();
+    let host = if cli.allow_unsigned {
+        tau_ext::ExtensionHost::new()
+    } else {
+        tau_ext::ExtensionHost::with_policy(tau_ext::sign::TrustPolicy::RequireTrusted {
+            trust_dir: tau_ext::sign::trust_dir(),
+        })
+    };
     for path in &cli.extensions {
         let extension = host
             .load(path)

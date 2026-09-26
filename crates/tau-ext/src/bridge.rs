@@ -356,7 +356,8 @@ impl ExtensionHost {
         path: &Path,
         consent: BridgeConsent,
     ) -> Result<Vec<Box<dyn Tool>>, ExtError> {
-        let component = Component::from_file(&self.engine, path).map_err(|e| ExtError::Load {
+        let bytes = self.read_verified(path)?;
+        let component = Component::from_binary(&self.engine, &bytes).map_err(|e| ExtError::Load {
             path: path.display().to_string(),
             reason: e.to_string(),
         })?;
