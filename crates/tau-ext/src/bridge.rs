@@ -122,8 +122,11 @@ impl Drop for ProcessRegistry {
 /// (the bridge learns its endpoint via TAU_MCP_URL).
 #[derive(Default, Clone)]
 pub struct BridgeConsent {
+    /// The argv the bridge may spawn (delivered as TAU_MCP_COMMAND).
     pub command: Option<Vec<String>>,
+    /// The MCP endpoint URL (delivered as TAU_MCP_URL).
     pub mcp_url: Option<String>,
+    /// `scheme://host[:port]` prefixes HTTP requests may target.
     pub origins: HashSet<String>,
 }
 

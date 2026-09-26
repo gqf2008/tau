@@ -25,18 +25,34 @@ const WASM_LAYER_MEDIA_TYPE: &str = "application/vnd.wasm.content.layer.v1+wasm"
 const WASM_CONFIG_MEDIA_TYPE: &str = "application/vnd.wasm.config.v1+json";
 const MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 
+/// Failures pulling from or pushing to an OCI registry.
 #[derive(Debug, Error)]
 pub enum OciError {
+    /// The `oci://` reference did not parse.
     #[error(
         "bad oci reference {0:?} (want oci://registry/repo:tag or oci://registry/repo@sha256:...)"
     )]
     BadReference(String),
+    /// The registry rejected a request (HTTP error, auth, network).
     #[error("registry {0}")]
     Registry(String),
+    /// The manifest was unusable.
     #[error("manifest for {reference}: {reason}")]
-    Manifest { reference: String, reason: String },
+    Manifest {
+        /// The reference being resolved.
+        reference: String,
+        /// Why the manifest was rejected.
+        reason: String,
+    },
+    /// A downloaded blob did not match its manifest digest.
     #[error("blob digest mismatch: manifest said {expected}, got {actual}")]
-    DigestMismatch { expected: String, actual: String },
+    DigestMismatch {
+        /// The digest the manifest declared.
+        expected: String,
+        /// The digest of the bytes actually received.
+        actual: String,
+    },
+    /// Filesystem failure (cache read/write).
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -44,18 +60,22 @@ pub enum OciError {
 /// A parsed `oci://registry/repo[:tag|@digest]` reference.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OciRef {
+    /// Registry host[:port].
     pub registry: String,
+    /// Repository path within the registry.
     pub repo: String,
     /// Tag (mutable) or `sha256:...` digest (immutable).
     pub reference: String,
 }
 
 impl OciRef {
+    /// Whether the reference pins a digest (immutable) vs. a tag.
     pub fn is_digest(&self) -> bool {
         self.reference.starts_with("sha256:")
     }
 }
 
+/// Parse an `oci://registry/repo[:tag|@sha256:...]` reference.
 pub fn parse(reference: &str) -> Result<OciRef, OciError> {
     let rest = reference
         .strip_prefix("oci://")
@@ -238,11 +258,15 @@ impl Registry {
 /// What a pull resolved to: the cached blob path and whether the reference
 /// was a mutable tag (so the caller can note mutability).
 pub struct Pulled {
+    /// Local path of the cached component blob.
     pub path: PathBuf,
+    /// The `sha256:...` digest the reference resolved to.
     pub digest: String,
+    /// Whether the reference was a tag (mutable — may change upstream).
     pub mutable_tag: bool,
 }
 
+/// Where pulled blobs are cached (`~/.tau/oci/blobs`).
 pub fn cache_dir() -> PathBuf {
     sign::config_dir().join("oci").join("blobs")
 }
@@ -253,6 +277,7 @@ pub fn pull(reference: &str) -> Result<Pulled, OciError> {
     pull_into(reference, &cache_dir())
 }
 
+/// [`pull`] with an explicit cache directory (tests, air-gapped use).
 pub fn pull_into(reference: &str, cache: &Path) -> Result<Pulled, OciError> {
     let oci_ref = parse(reference)?;
     let mut registry = Registry::new(&oci_ref);
@@ -315,7 +340,9 @@ pub fn pull_into(reference: &str, cache: &Path) -> Result<Pulled, OciError> {
 /// What a push uploaded: the wasm blob's digest, under the given
 /// (mutable) tag.
 pub struct Pushed {
+    /// The `sha256:...` digest of the uploaded wasm blob.
     pub digest: String,
+    /// The full reference the component is now reachable under.
     pub reference: String,
 }
 

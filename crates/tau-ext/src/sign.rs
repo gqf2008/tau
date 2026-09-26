@@ -17,22 +17,31 @@ use ed25519_dalek::{Signature, Signer, SigningKey, VerifyingKey};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
+/// Name of the custom wasm section holding the signature JSON
+/// (`{"key": base64-pubkey, "sig": base64-sig}` per signer).
 pub const SIGNATURE_SECTION: &str = "tau-signature";
 
+/// Failures signing, verifying, or trusting components.
 #[derive(Debug, Error)]
 pub enum SignError {
+    /// Input was not a parseable wasm binary, or key material was malformed.
     #[error("not a wasm binary: {0}")]
     Malformed(String),
+    /// The signature section's JSON did not parse.
     #[error("signature section is not valid json: {0}")]
     BadSignatureJson(String),
+    /// A signature failed ed25519 verification.
     #[error("signature does not verify: {0}")]
     BadSignature(String),
+    /// The component carries no signature section.
     #[error("component is unsigned (sign it with `tau sign`, or load with --allow-unsigned)")]
     Unsigned,
+    /// The signature verifies, but its key is not trusted yet.
     #[error(
         "signing key {0} is not in the trust store ({1}) — trust it with `tau trust --from-component <component>` after verifying the fingerprint out-of-band"
     )]
     Untrusted(String, String),
+    /// Filesystem failure (key/trust store access).
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -44,7 +53,10 @@ pub enum TrustPolicy {
     /// RequireTrusted and exposes this as --allow-unsigned.
     AllowUnsigned,
     /// Require a valid signature whose key is in `trust_dir`.
-    RequireTrusted { trust_dir: PathBuf },
+    RequireTrusted {
+        /// Directory of trusted `<fingerprint>.pub` files.
+        trust_dir: PathBuf,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -146,6 +158,8 @@ fn b64() -> base64::engine::GeneralPurpose {
     base64::engine::general_purpose::STANDARD
 }
 
+/// Short hex fingerprint of a public key (first 16 hex chars of its
+/// sha256) — the trust store's filename and the consent store's key.
 pub fn fingerprint(key: &VerifyingKey) -> String {
     hex_prefix(&Sha256::digest(key.as_bytes()), 16)
 }
@@ -271,16 +285,19 @@ pub fn check_policy(wasm: &[u8], policy: &TrustPolicy) -> Result<(), SignError> 
 // Filesystem: config dir, keygen, trust store
 // ---------------------------------------------------------------------------
 
+/// tau's per-user config root (`~/.tau`).
 pub fn config_dir() -> PathBuf {
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".tau")
 }
 
+/// Where private signing keys live (`~/.tau/keys`).
 pub fn keys_dir() -> PathBuf {
     config_dir().join("keys")
 }
 
+/// Where trusted public keys live (`~/.tau/trust`).
 pub fn trust_dir() -> PathBuf {
     config_dir().join("trust")
 }
@@ -337,10 +354,13 @@ pub fn load_key(fp: Option<&str>) -> Result<(String, SigningKey), SignError> {
 }
 
 /// Add a raw base64 pubkey to the trust store. Returns the fingerprint.
+/// Add a base64 public key to the default trust store; returns its
+/// fingerprint.
 pub fn trust_key(pubkey_b64: &str) -> Result<String, SignError> {
     trust_key_in(&trust_dir(), pubkey_b64)
 }
 
+/// [`trust_key`] against an explicit trust directory.
 pub fn trust_key_in(dir: &Path, pubkey_b64: &str) -> Result<String, SignError> {
     let bytes: [u8; 32] = b64()
         .decode(pubkey_b64.trim())
@@ -365,6 +385,7 @@ pub fn trust_component_keys(wasm: &[u8]) -> Result<Vec<String>, SignError> {
     trust_component_keys_in(&trust_dir(), wasm)
 }
 
+/// [`trust_component_keys`] against an explicit trust directory.
 pub fn trust_component_keys_in(dir: &Path, wasm: &[u8]) -> Result<Vec<String>, SignError> {
     let keys = verify(wasm)?;
     if keys.is_empty() {

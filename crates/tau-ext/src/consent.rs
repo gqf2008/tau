@@ -16,12 +16,18 @@ use serde::{Deserialize, Serialize};
 use crate::bridge::BridgeConsent;
 use crate::sign::{self, SignError};
 
+/// Per-fingerprint capability grants persisted under
+/// `~/.tau/consent/`. Secrets are never stored — only the grant to
+/// deliver them.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq)]
 pub struct RememberedConsent {
+    /// The argv this component's bridge may spawn.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub command: Option<Vec<String>>,
+    /// The MCP endpoint URL this component's bridge may use.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mcp_url: Option<String>,
+    /// HTTP origins this component may reach.
     #[serde(default, skip_serializing_if = "HashSet::is_empty")]
     pub origins: HashSet<String>,
     /// Grant to deliver the provider credential (`TAU_PROVIDER_AUTH`)
@@ -37,6 +43,7 @@ pub struct RememberedConsent {
 }
 
 impl RememberedConsent {
+    /// Whether no capability is granted (nothing worth persisting).
     pub fn is_empty(&self) -> bool {
         self.command.is_none()
             && self.mcp_url.is_none()
@@ -83,20 +90,26 @@ pub fn remember_into(existing: RememberedConsent, grant: RememberedConsent) -> R
     }
 }
 
+/// Filesystem-backed store of [`RememberedConsent`] records, one
+/// `<fingerprint>.json` per file.
 pub struct ConsentStore {
     dir: PathBuf,
 }
 
 impl ConsentStore {
+    /// A store rooted at `dir` (created on first [`save`](Self::save)).
     pub fn new(dir: PathBuf) -> Self {
         Self { dir }
     }
 
+    /// The remembered grants for `fingerprint`, if any (a corrupt
+    /// file reads as absent, never as an error).
     pub fn load(&self, fingerprint: &str) -> Option<RememberedConsent> {
         let bytes = std::fs::read(self.dir.join(format!("{fingerprint}.json"))).ok()?;
         serde_json::from_slice(&bytes).ok()
     }
 
+    /// Persist `consent` for `fingerprint` (overwrites).
     pub fn save(&self, fingerprint: &str, consent: &RememberedConsent) -> std::io::Result<()> {
         std::fs::create_dir_all(&self.dir)?;
         std::fs::write(
@@ -105,6 +118,7 @@ impl ConsentStore {
         )
     }
 
+    /// Delete the record for `fingerprint`; `false` when none existed.
     pub fn revoke(&self, fingerprint: &str) -> std::io::Result<bool> {
         match std::fs::remove_file(self.dir.join(format!("{fingerprint}.json"))) {
             Ok(()) => Ok(true),
