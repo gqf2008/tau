@@ -1,0 +1,134 @@
+package tau:extension@0.1.0;
+
+/// Tools an extension contributes to the agent.
+interface tools {
+    /// A tool the model may call, described with a JSON Schema parameter object.
+    record definition {
+        name: string,
+        description: string,
+        /// JSON Schema for the tool's arguments, serialized.
+        parameters-json: string,
+    }
+
+    record tool-result {
+        /// Text content handed back to the model as the tool result.
+        content: string,
+        is-error: bool,
+    }
+
+    /// Called once at load time to enumerate the tools this component provides.
+    definitions: func() -> list<definition>;
+
+    /// Execute one tool call. `arguments-json` is the model-produced JSON
+    /// object matching the definition's schema.
+    execute: func(name: string, arguments-json: string) -> tool-result;
+}
+
+/// Probes: lifecycle points where an extension can observe and influence a
+/// run. See docs/probes.md for the point list and payload shapes.
+interface hooks {
+    enum action {
+        /// No opinion; run proceeds unchanged.
+        continue,
+        /// Use payload-json as the replacement for the probed value.
+        replace,
+        /// Veto the action; reason is handed back to the model or user.
+        block,
+    }
+
+    record verdict {
+        action: action,
+        /// Replacement payload for `replace`, point-specific JSON.
+        payload-json: option<string>,
+        /// Reason for `block`.
+        reason: option<string>,
+    }
+
+    /// Probe points this component handles (e.g. ["before_tool"]).
+    /// Empty list = observe nothing, called once at load time.
+    points: func() -> list<string>;
+
+    /// Synchronous probe call. The harness pauses until the verdict returns,
+    /// so handlers on the hot path must be fast.
+    probe: func(point: string, payload-json: string) -> verdict;
+}
+
+/// Push channel from a provider component back to the host. Not a
+/// capability: the host always provides it.
+interface events {
+    /// One model event, JSON-serialized using tau's model-event wire shape:
+    /// {"kind":"text-delta","text":"..."}
+    /// {"kind":"tool-call-delta","index":0,"id":"...","name":"...","arguments-delta":"..."}
+    /// {"kind":"done","stop":"stop|tool-use|length|error|aborted"}
+    /// {"kind":"error","message":"..."}
+    emit: func(event-json: string);
+}
+
+/// A model provider. Streaming is push-mode: the component calls
+/// `events.emit` per chunk and returns from `stream` when the response is
+/// complete. Provider components typically need scoped network access
+/// (declared in metadata, granted by user consent); auth tokens are
+/// delivered in the request payload by the host.
+interface models {
+    record info {
+        /// Model id passed in requests (e.g. "gpt-5", "claude-sonnet-4-5").
+        id: string,
+        name: string,
+        context-window: u32,
+        max-output: u32,
+    }
+
+    /// Models this provider can serve.
+    list-models: func() -> list<info>;
+
+    /// Run one streaming request to completion, pushing events via `emit`.
+    /// request-json: {"model": string, "system": string|null,
+    ///   "messages": [...], "tools": [...]} using tau's message wire shape.
+    /// Contract (same as the native Model trait): never trap for
+    /// request/transport failures; report via an error event followed by
+    /// done{stop:"error"}.
+    run: func(request-json: string);
+}
+
+/// General extension: tools and/or probes. Sandboxed by default — the world
+/// exports no capabilities, so a component importing fs/net/env fails
+/// instantiation unless the host explicitly grants it.
+world extension {
+    export tools;
+    export hooks;
+}
+
+/// Model provider extension. `events.emit` is the push channel; network
+/// access is granted per-component by capability consent, not by this world.
+world provider {
+    import events;
+    export models;
+}
+
+/// Spawn-with-pipes: a generic host capability for bridge components.
+/// NOT linked for ordinary extensions; the host grants it per component,
+/// per command, with explicit user consent (the consent UX shows argv).
+/// Deliberately plain-data: no wasi:io dependency, no MCP awareness.
+interface process {
+    /// Spawn argv[0] with args and a filtered environment.
+    /// Returns a handle or an error message.
+    spawn: func(argv: list<string>) -> result<u64, string>;
+
+    /// Append bytes to the child's stdin.
+    write-stdin: func(handle: u64, data: list<u8>) -> result<_, string>;
+
+    /// Read up to `max` bytes from the child's stdout. Blocks until at
+    /// least one byte is available or the stream closes (eof = true).
+    read-stdout: func(handle: u64, max: u32) -> result<tuple<list<u8>, bool>, string>;
+
+    /// Terminate the child and close the handle.
+    kill: func(handle: u64);
+}
+
+/// Bridge components translate an external tool protocol (MCP today) into
+/// tau tools. The host knows nothing about that protocol; it only grants
+/// the capabilities the bridge declares (process spawn, scoped http).
+world bridge {
+    import process;
+    export tools;
+}

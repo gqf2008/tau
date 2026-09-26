@@ -1,0 +1,331 @@
+//! The agent loop.
+//!
+//! One turn: send the active branch to the model, record the streamed
+//! assistant response, execute its tool calls, record the results. If the
+//! response had tool calls, start another turn; otherwise the run ends.
+
+use std::collections::HashMap;
+
+use thiserror::Error;
+
+use crate::bus::EventBus;
+use crate::model::{Model, ModelEvent, Request, StopReason};
+use crate::probe::{ProbePoint, ProbeRegistry, Verdict};
+use crate::tool::ToolRegistry;
+use crate::types::{Content, Message, Role};
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum AgentEvent {
+    RunStart,
+    TextDelta(String),
+    ToolCallStart { id: String, name: String },
+    ToolCallEnd { id: String, name: String, is_error: bool },
+    /// A probe fired; observers see the full decision trail.
+    Probe { point: &'static str, action: &'static str },
+    TurnEnd { stop: StopReason },
+    RunEnd { stop: StopReason },
+    RunError { message: String },
+}
+
+#[derive(Debug, Error)]
+pub enum AgentError {
+    #[error("model error: {0}")]
+    Model(String),
+}
+
+pub struct Agent {
+    model: Box<dyn Model>,
+    tools: ToolRegistry,
+    probes: ProbeRegistry,
+    bus: EventBus,
+    system: Option<String>,
+    /// Safety bound on consecutive model turns in one run.
+    max_turns: usize,
+}
+
+impl Agent {
+    pub fn new(model: Box<dyn Model>, tools: ToolRegistry) -> Self {
+        Self {
+            model,
+            tools,
+            probes: ProbeRegistry::new(),
+            bus: crate::bus::new_bus(),
+            system: None,
+            max_turns: 64,
+        }
+    }
+
+    /// Subscribe to the event stream. Call before `run`.
+    pub fn events(&self) -> crate::bus::EventStream {
+        self.bus.subscribe()
+    }
+
+    fn emit(&self, event: AgentEvent) {
+        // No subscribers is fine; a full channel is the subscriber's problem.
+        let _ = self.bus.send(event);
+    }
+
+    /// Fire a probe, publish its outcome, return the verdict.
+    async fn probe(&self, point: ProbePoint, payload: serde_json::Value) -> Verdict {
+        if self.probes.is_empty() {
+            return Verdict::Continue;
+        }
+        let verdict = self.probes.probe(point, payload).await;
+        let action = match &verdict {
+            Verdict::Continue => "continue",
+            Verdict::Replace(_) => "replace",
+            Verdict::Block { .. } => "block",
+        };
+        if action != "continue" {
+            self.emit(AgentEvent::Probe {
+                point: point.name(),
+                action,
+            });
+        }
+        verdict
+    }
+
+    pub fn system(mut self, system: impl Into<String>) -> Self {
+        self.system = Some(system.into());
+        self
+    }
+
+    pub fn probes(mut self, probes: ProbeRegistry) -> Self {
+        self.probes = probes;
+        self
+    }
+
+    pub fn max_turns(mut self, max_turns: usize) -> Self {
+        self.max_turns = max_turns;
+        self
+    }
+
+    /// Run the loop to completion. `history` is the active branch so far;
+    /// returns the new messages (assistant responses and tool results) to
+    /// append to the session, in order. All lifecycle events are published
+    /// on the bus; subscribe with [`Agent::events`].
+    pub async fn run(
+        &self,
+        history: &[Message],
+        prompt: Message,
+    ) -> Result<Vec<Message>, AgentError> {
+        self.emit(AgentEvent::RunStart);
+        let result = self.run_inner(history, prompt).await;
+        match &result {
+            Ok(_) => self.emit(AgentEvent::RunEnd {
+                stop: StopReason::Stop,
+            }),
+            Err(e) => self.emit(AgentEvent::RunError {
+                message: e.to_string(),
+            }),
+        }
+        result
+    }
+
+    async fn run_inner(
+        &self,
+        history: &[Message],
+        prompt: Message,
+    ) -> Result<Vec<Message>, AgentError> {
+        let prompt = match self
+            .probe(
+                ProbePoint::BeforeRun,
+                serde_json::json!({ "prompt": prompt }),
+            )
+            .await
+        {
+            Verdict::Replace(payload) => {
+                serde_json::from_value(payload["prompt"].clone())
+                    .map_err(|e| AgentError::Model(format!("bad before_run payload: {e}")))?
+            }
+            Verdict::Block { reason } => return Err(AgentError::Model(reason)),
+            Verdict::Continue => prompt,
+        };
+
+        let mut produced = vec![prompt];
+        for _ in 0..self.max_turns {
+            let mut request = Request {
+                system: self.system.clone(),
+                messages: [history, &produced].concat(),
+                tools: self.tools.defs(),
+            };
+            if let Verdict::Replace(payload) = self
+                .probe(
+                    ProbePoint::TransformContext,
+                    serde_json::json!({
+                        "messages": request.messages,
+                        "system": request.system,
+                    }),
+                )
+                .await
+            {
+                if let Some(messages) = payload.get("messages") {
+                    request.messages = serde_json::from_value(messages.clone())
+                        .map_err(|e| AgentError::Model(format!("bad context payload: {e}")))?;
+                }
+                if let Some(system) = payload.get("system") {
+                    request.system = serde_json::from_value(system.clone())
+                        .map_err(|e| AgentError::Model(format!("bad context payload: {e}")))?;
+                }
+            }
+            let (assistant, stop) = self.stream_turn(request).await?;
+            self.emit(AgentEvent::TurnEnd { stop });
+
+            let calls: Vec<(String, String, serde_json::Value)> = assistant
+                .tool_calls()
+                .map(|(id, name, args)| (id.to_string(), name.to_string(), args.clone()))
+                .collect();
+            produced.push(assistant);
+
+            if calls.is_empty() || stop != StopReason::ToolUse {
+                return Ok(produced);
+            }
+
+            let mut results = Vec::with_capacity(calls.len());
+            for (id, name, args) in calls {
+                self.emit(AgentEvent::ToolCallStart {
+                    id: id.clone(),
+                    name: name.clone(),
+                });
+                let args = match self
+                    .probe(
+                        ProbePoint::BeforeTool,
+                        serde_json::json!({ "id": id, "name": name, "args": args }),
+                    )
+                    .await
+                {
+                    Verdict::Replace(args) => args,
+                    Verdict::Block { reason } => {
+                        self.emit(AgentEvent::ToolCallEnd {
+                            id: id.clone(),
+                            name: name.clone(),
+                            is_error: true,
+                        });
+                        results.push(Content::ToolResult {
+                            call_id: id,
+                            content: format!("blocked: {reason}"),
+                            is_error: true,
+                        });
+                        continue;
+                    }
+                    Verdict::Continue => args,
+                };
+                let output = match self.tools.get(&name) {
+                    Some(tool) => tool.execute(args.clone()).await,
+                    None => crate::tool::ToolOutput::err(format!("unknown tool: {name}")),
+                };
+                let output = match self
+                    .probe(
+                        ProbePoint::AfterTool,
+                        serde_json::json!({
+                            "id": id,
+                            "name": name,
+                            "args": args,
+                            "content": output.content,
+                            "isError": output.is_error,
+                        }),
+                    )
+                    .await
+                {
+                    Verdict::Replace(payload) => crate::tool::ToolOutput {
+                        content: payload["content"]
+                            .as_str()
+                            .map(str::to_string)
+                            .unwrap_or(output.content),
+                        is_error: payload["isError"].as_bool().unwrap_or(output.is_error),
+                    },
+                    _ => output,
+                };
+                self.emit(AgentEvent::ToolCallEnd {
+                    id: id.clone(),
+                    name,
+                    is_error: output.is_error,
+                });
+                results.push(Content::ToolResult {
+                    call_id: id,
+                    content: output.content,
+                    is_error: output.is_error,
+                });
+            }
+            produced.push(Message {
+                role: Role::Tool,
+                content: results,
+            });
+        }
+        Err(AgentError::Model(format!(
+            "exceeded max turns ({})",
+            self.max_turns
+        )))
+    }
+
+    /// Stream one assistant response, reassembling tool-call deltas.
+    async fn stream_turn(&self, request: Request) -> Result<(Message, StopReason), AgentError> {
+        use futures::StreamExt;
+
+        let mut stream = self.model.stream(&request).await;
+        let mut text = String::new();
+        let mut calls: HashMap<u32, (String, String, String)> = HashMap::new();
+        let mut error = None;
+        let mut stop = StopReason::Stop;
+
+        while let Some(event) = stream.next().await {
+            match event {
+                ModelEvent::TextDelta { text: delta } => {
+                    text.push_str(&delta);
+                    self.emit(AgentEvent::TextDelta(delta));
+                }
+                ModelEvent::ToolCallDelta {
+                    index,
+                    id,
+                    name,
+                    arguments_delta,
+                } => {
+                    let call = calls.entry(index).or_default();
+                    if let Some(id) = id {
+                        call.0 = id;
+                    }
+                    if let Some(name) = name {
+                        call.1 = name;
+                    }
+                    call.2.push_str(&arguments_delta);
+                }
+                ModelEvent::Done { stop: s } => stop = s,
+                ModelEvent::Error { message } => error = Some(message),
+            }
+        }
+
+        if stop == StopReason::Error {
+            return Err(AgentError::Model(
+                error.unwrap_or_else(|| "unknown model error".into()),
+            ));
+        }
+
+        let mut content = Vec::new();
+        if !text.is_empty() {
+            content.push(Content::Text { text });
+        }
+        let mut ordered: Vec<_> = calls.into_iter().collect();
+        ordered.sort_by_key(|(index, _)| *index);
+        for (_, (id, name, arguments)) in ordered {
+            let arguments = if arguments.trim().is_empty() {
+                serde_json::json!({})
+            } else {
+                serde_json::from_str(&arguments).unwrap_or_else(|_| {
+                    serde_json::json!({ "__invalidJson": arguments })
+                })
+            };
+            content.push(Content::ToolCall {
+                id,
+                name,
+                arguments,
+            });
+        }
+        Ok((
+            Message {
+                role: Role::Assistant,
+                content,
+            },
+            stop,
+        ))
+    }
+}

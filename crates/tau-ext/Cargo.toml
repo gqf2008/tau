@@ -1,0 +1,17 @@
+[package]
+name = "tau-ext"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Wasm component extension host for tau (wasmtime, sandboxed by default)"
+
+[dependencies]
+tau-core = { path = "../tau-core" }
+serde_json.workspace = true
+thiserror.workspace = true
+async-trait.workspace = true
+tokio.workspace = true
+futures.workspace = true
+async-stream = "0.3"
+wasmtime = "49.0.1"
+wasmtime-wasi = "49.0.1"

@@ -1,0 +1,20 @@
+[package]
+name = "tau-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "tau command line: print-mode agent with wasm extensions"
+
+[[bin]]
+name = "tau"
+path = "src/main.rs"
+
+[dependencies]
+tau-core = { path = "../tau-core" }
+tau-openai = { path = "../tau-openai" }
+tau-anthropic = { path = "../tau-anthropic" }
+tau-ext = { path = "../tau-ext" }
+serde_json = "1"
+anyhow.workspace = true
+tokio.workspace = true
+clap = { version = "4", features = ["derive"] }

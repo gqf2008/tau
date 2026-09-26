@@ -1,0 +1,16 @@
+[package]
+name = "tau-core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Domain model, session tree, and agent loop for the tau agent harness"
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+futures.workspace = true
+async-trait.workspace = true
+async-stream = "0.3"
+tokio = { workspace = true, features = ["sync"] }
+base64 = "0.23.1"

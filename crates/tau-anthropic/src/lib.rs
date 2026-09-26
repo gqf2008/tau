@@ -1,0 +1,109 @@
+//! Anthropic Messages API (`POST /v1/messages`) with SSE streaming.
+//!
+//! Configuration by environment: `ANTHROPIC_API_KEY` (required),
+//! `ANTHROPIC_BASE_URL` (default `https://api.anthropic.com`).
+
+mod wire;
+
+use async_stream::stream;
+use async_trait::async_trait;
+use futures::stream::BoxStream;
+use futures::{StreamExt, TryStreamExt};
+use tau_core::model::{Model, ModelEvent, Request, StopReason};
+use tau_core::sse;
+
+pub struct AnthropicModel {
+    client: reqwest::Client,
+    base_url: String,
+    api_key: String,
+    model: String,
+    /// Required by the API; bounds one response.
+    max_tokens: u32,
+}
+
+impl AnthropicModel {
+    pub fn from_env(model: impl Into<String>) -> Result<Self, std::env::VarError> {
+        let api_key = std::env::var("ANTHROPIC_API_KEY")?;
+        let base_url = std::env::var("ANTHROPIC_BASE_URL")
+            .unwrap_or_else(|_| "https://api.anthropic.com".into());
+        Ok(Self::new(base_url, api_key, model))
+    }
+
+    pub fn new(
+        base_url: impl Into<String>,
+        api_key: impl Into<String>,
+        model: impl Into<String>,
+    ) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            base_url: base_url.into().trim_end_matches('/').to_string(),
+            api_key: api_key.into(),
+            model: model.into(),
+            max_tokens: 8192,
+        }
+    }
+
+    pub fn max_tokens(mut self, max_tokens: u32) -> Self {
+        self.max_tokens = max_tokens;
+        self
+    }
+}
+
+#[async_trait]
+impl Model for AnthropicModel {
+    async fn stream(&self, req: &Request) -> BoxStream<'static, ModelEvent> {
+        let body = wire::request_body(&self.model, self.max_tokens, req);
+        let response = self
+            .client
+            .post(format!("{}/v1/messages", self.base_url))
+            .header("x-api-key", &self.api_key)
+            .header("anthropic-version", "2023-06-01")
+            .json(&body)
+            .send()
+            .await;
+
+        let response = match response {
+            Ok(r) => r,
+            Err(e) => return error_stream(format!("request failed: {e}")),
+        };
+        if !response.status().is_success() {
+            let status = response.status();
+            let body = response.text().await.unwrap_or_default();
+            return error_stream(format!("HTTP {status}: {}", &body[..body.len().min(500)]));
+        }
+
+        let byte_stream = response
+            .bytes_stream()
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+        let mut events = sse::parse(byte_stream);
+
+        stream! {
+            while let Some(chunk) = events.next().await {
+                match chunk {
+                    Ok(data) => {
+                        for event in wire::chunk_events(&data) {
+                            yield event;
+                        }
+                    }
+                    Err(e) => {
+                        yield ModelEvent::Error { message: e };
+                        yield ModelEvent::Done { stop: StopReason::Error };
+                        return;
+                    }
+                }
+            }
+            yield ModelEvent::Done { stop: StopReason::Stop };
+        }
+        .boxed()
+    }
+}
+
+fn error_stream(message: String) -> BoxStream<'static, ModelEvent> {
+    futures::stream::iter([
+        ModelEvent::Error { message },
+        ModelEvent::Done {
+            stop: StopReason::Error,
+        },
+    ])
+    .boxed()
+}
