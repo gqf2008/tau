@@ -36,7 +36,25 @@ impl FauxModel {
 #[async_trait]
 impl Model for FauxModel {
     async fn stream(&self, _req: &Request) -> BoxStream<'static, ModelEvent> {
-        let round = self.rounds.lock().unwrap().remove(0);
+        // The Model contract forbids panicking: once the script is
+        // exhausted (interactive demo use runs past it), answer with a
+        // fallback round instead of remove(0) on an empty vec.
+        let round = {
+            let mut rounds = self.rounds.lock().unwrap();
+            if rounds.is_empty() {
+                vec![
+                    ModelEvent::TextDelta { text: "tau is alive. ".into() },
+                    ModelEvent::TextDelta {
+                        text: "(faux model — script exhausted)".into(),
+                    },
+                    ModelEvent::Done {
+                        stop: crate::model::StopReason::Stop,
+                    },
+                ]
+            } else {
+                rounds.remove(0)
+            }
+        };
         stream::iter(round).boxed()
     }
 }
@@ -46,6 +64,22 @@ use futures::StreamExt;
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn exhausted_script_falls_back_instead_of_panicking() {
+        use futures::StreamExt;
+        let model = FauxModel::echo();
+        let request = Request::default();
+        let first: Vec<_> = model.stream(&request).await.collect().await;
+        let second: Vec<_> = model.stream(&request).await.collect().await;
+        assert!(matches!(first.last(), Some(ModelEvent::Done { .. })));
+        assert!(matches!(second.last(), Some(ModelEvent::Done { .. })));
+        assert!(second.iter().any(|e| matches!(
+            e,
+            ModelEvent::TextDelta { text } if text.contains("script exhausted")
+        )));
+    }
+
     use crate::agent::{Agent, AgentEvent};
     use crate::model::StopReason;
     use crate::tool::{Tool, ToolDef, ToolOutput, ToolRegistry};
