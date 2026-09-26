@@ -305,15 +305,9 @@ async fn run_sub(sub: Sub) -> Result<()> {
             let store = tau_core::session::JsonlStore::open(&path)
                 .with_context(|| format!("opening {}", path.display()))?;
             let head = store.head().map(|h| h.id.clone());
+            let depths = entry_depths(store.entries());
             for (index, entry) in store.entries().iter().enumerate() {
-                // Depth = parent-chain length; the tree is a chain with
-                // occasional forks, so indenting by depth reads naturally.
-                let mut depth = 0usize;
-                let mut cursor = entry.parent.clone();
-                while let Some(id) = cursor {
-                    depth += 1;
-                    cursor = store.get(&id).and_then(|e| e.parent.clone());
-                }
+                let depth = depths[index];
                 let mark = if Some(&entry.id) == head.as_ref() {
                     " ← head"
                 } else {
@@ -858,9 +852,52 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
+/// Depth of every entry (parent-chain length) in one pass. The store
+/// is append-only and rejects unknown parents, so a parent always sits
+/// earlier in the vec than its children: depth(entry) = depth(parent)+1
+/// is O(n). Walking the parent chain per entry is O(n^2) and hung
+/// `tau tree` for ~21s on a 20k chain.
+fn entry_depths(entries: &[SessionEntry]) -> Vec<usize> {
+    let mut by_id: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+    entries
+        .iter()
+        .map(|entry| {
+            let depth = entry
+                .parent
+                .as_deref()
+                .and_then(|parent| by_id.get(parent).copied())
+                .map(|depth| depth + 1)
+                .unwrap_or(0);
+            by_id.insert(&entry.id, depth);
+            depth
+        })
+        .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn entry_depths_tracks_chains_and_forks() {
+        let entry = |id: &str, parent: Option<&str>| SessionEntry {
+            id: id.to_string(),
+            parent: parent.map(str::to_string),
+            kind: EntryKind::Message {
+                message: Message::user("x"),
+            },
+        };
+        let entries = vec![
+            entry("a", None),
+            entry("b", Some("a")),
+            entry("c", Some("b")),
+            entry("d", Some("a")), // fork off a
+        ];
+        assert_eq!(entry_depths(&entries), vec![0, 1, 2, 1]);
+        // A parentless entry after a chain starts a new root at depth 0.
+        let entries = vec![entry("a", None), entry("b", Some("a")), entry("z", None)];
+        assert_eq!(entry_depths(&entries), vec![0, 1, 0]);
+    }
 
     #[test]
     fn wasi_deny_from_flag_or_recall() {

@@ -481,6 +481,42 @@ mod tests {
     }
 
     #[test]
+    #[test]
+    #[ignore = "scale evidence for docs/perf.md, run on demand"]
+    fn scale_evidence_100k() {
+        // 100k-entry chain, written directly (append per entry would
+        // dominate the clock, and parsing is what we are measuring).
+        let dir = std::env::temp_dir().join(format!("tau-scale-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("100k.jsonl");
+        {
+            use std::io::Write;
+            let mut file = std::fs::File::create(&path).unwrap();
+            let mut parent = None;
+            for i in 0..100_000 {
+                let entry = SessionEntry {
+                    id: format!("{i:016x}"),
+                    parent,
+                    kind: EntryKind::Message {
+                        message: Message::user(format!("message number {i}")),
+                    },
+                };
+                parent = Some(entry.id.clone());
+                writeln!(file, "{}", serde_json::to_string(&entry).unwrap()).unwrap();
+            }
+        }
+        let start = std::time::Instant::now();
+        let store = JsonlStore::open(&path).unwrap();
+        let open = start.elapsed();
+        let head = store.head().unwrap().id.clone();
+        let start = std::time::Instant::now();
+        let branch = store.active_branch(&head).unwrap();
+        let branch_time = start.elapsed();
+        assert_eq!(branch.len(), 100_000);
+        eprintln!("open 100k-entry session: {open:?}; active_branch walk: {branch_time:?}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn open_parses_large_sessions_quickly() {
         // 10k entries; the generous bound guards pathological (e.g.
         // quadratic) regressions, not micro-perf. The actual time is

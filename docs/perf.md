@@ -30,11 +30,23 @@ Reproduce: `cargo test -p tau-ext --test perf_load -- --ignored --nocapture`
 
 ## Session store
 
-10,000-entry JSONL session: full parse + index on open in **66 ms**
-(~150k entries/s; the file is loaded once, `active_branch` is then
-O(branch) hash lookups). Gate: `open_parses_large_sessions_quickly`
-asserts < 10 s — deliberately generous; it guards pathological
-(quadratic-style) regressions, not micro-perf.
+| scale | open (parse + index) | active_branch walk |
+|---|---|---|
+| 10k entries | 66 ms | — |
+| 100k entries | 600 ms | 60 ms |
+
+~150k entries/s at both scales — parsing is linear, and
+`active_branch` is O(branch) hash lookups after the one file load.
+Gates: `open_parses_large_sessions_quickly` (10k, < 10 s, run by
+default — deliberately generous; it guards pathological regressions,
+not micro-perf); `scale_evidence_100k` (ignored, run on demand:
+`cargo test -p tau-core --lib scale -- --ignored --nocapture`).
+
+`tau tree` used to walk the parent chain per entry — O(n²), measured
+**20.7 s on a 20k chain** (≈ 8.6 min projected at 100k). It now
+computes depths in one pass (parents always precede children in an
+append-only store): **0.84 s end to end on 100k entries**, most of it
+process start + parse.
 
 ## Gates that run by default
 
