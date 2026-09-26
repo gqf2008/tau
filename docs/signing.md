@@ -32,8 +32,22 @@ Fingerprint: first 16 hex chars of the pubkey's SHA-256.
 tau keygen                 # generate a keypair; the pubkey is trusted automatically
 tau sign component.wasm    # embed a signature (uses the single key, or --key <fp>)
 tau trust <base64-pubkey>  # trust someone else's key
+tau trust --from-component component.wasm   # trust the key(s) embedded in a signed
+                           #  component — local file or oci:// reference
 tau trust --list           # show trusted fingerprints
 ```
+
+## Receiving a signed component
+
+The signature section embeds the signer's pubkey, so a signed component
+carries everything needed to onboard its author: `tau trust
+--from-component` verifies each embedded signature against the exact
+bytes and trusts only keys that verify, then prints the fingerprints.
+**Verify the fingerprint out-of-band** (the publisher's site, a signed
+release note) before relying on it — the command onboards *whoever
+signed these bytes*; only you can confirm that is who you expected.
+Works on `oci://` references too (the component is pulled, then trusted
+from the verified local bytes).
 
 ## Enforcement
 
@@ -48,8 +62,9 @@ Caused by:
 ```
 
 `--allow-unsigned` is the explicit escape hatch for development. A signed
-component whose key is not in the trust store fails the same way — signing
-proves authorship, trusting is a separate decision.
+component whose key is not in the trust store fails with the fingerprint
+and the exact `tau trust --from-component` command that would onboard it
+— signing proves authorship, trusting is a separate decision.
 
 ## What this does and does not do
 

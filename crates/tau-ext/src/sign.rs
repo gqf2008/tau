@@ -29,7 +29,7 @@ pub enum SignError {
     BadSignature(String),
     #[error("component is unsigned (sign it with `tau sign`, or load with --allow-unsigned)")]
     Unsigned,
-    #[error("signing key {0} is not in the trust store ({1})")]
+    #[error("signing key {0} is not in the trust store ({1}) — trust it with `tau trust --from-component <component>` after verifying the fingerprint out-of-band")]
     Untrusted(String, String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -347,6 +347,26 @@ pub fn trust_key_in(dir: &Path, pubkey_b64: &str) -> Result<String, SignError> {
     Ok(fp)
 }
 
+/// Trust every key whose signature verifies on this component: the
+/// signature section embeds the pubkeys, and verification already proved
+/// they sign these exact bytes — so trusting what verifies is sound.
+/// Returns the fingerprints, which the caller MUST print for out-of-band
+/// verification (the whole point of the chain). Unsigned components get
+/// [`SignError::Unsigned`].
+pub fn trust_component_keys(wasm: &[u8]) -> Result<Vec<String>, SignError> {
+    trust_component_keys_in(&trust_dir(), wasm)
+}
+
+pub fn trust_component_keys_in(dir: &Path, wasm: &[u8]) -> Result<Vec<String>, SignError> {
+    let keys = verify(wasm)?;
+    if keys.is_empty() {
+        return Err(SignError::Unsigned);
+    }
+    keys.iter()
+        .map(|key| trust_key_in(dir, &b64().encode(key.to_bytes())))
+        .collect()
+}
+
 /// Sign a component file in place.
 pub fn sign_file(path: &Path, key: &SigningKey) -> Result<String, SignError> {
     let wasm = std::fs::read(path)?;
@@ -421,5 +441,30 @@ mod tests {
         trust_key_in(&dir, &b64().encode(key.verifying_key().to_bytes())).unwrap();
         check_policy(&signed, &policy).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn trusting_from_component_onboards_the_verified_key() {
+        let dir = std::env::temp_dir().join(format!("tau-test-tofu-{}", std::process::id()));
+        let key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let signed = sign(&tiny_module(), &key).unwrap();
+        // Not trusted yet, then onboarded straight from the component.
+        assert!(trust_dir_is_empty(&dir));
+        let fps = trust_component_keys_in(&dir, &signed).unwrap();
+        assert_eq!(fps, vec![fingerprint(&key.verifying_key())]);
+        let policy = TrustPolicy::RequireTrusted {
+            trust_dir: dir.clone(),
+        };
+        check_policy(&signed, &policy).unwrap();
+        // Unsigned components have nothing to onboard.
+        assert!(matches!(
+            trust_component_keys_in(&dir, &tiny_module()),
+            Err(SignError::Unsigned)
+        ));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn trust_dir_is_empty(dir: &Path) -> bool {
+        std::fs::read_dir(dir).map(|mut rd| rd.next().is_none()).unwrap_or(true)
     }
 }

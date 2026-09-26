@@ -178,7 +178,14 @@ enum Sub {
     /// Trust a base64 ed25519 pubkey (or list trusted keys).
     Trust {
         /// Base64 pubkey to add to ~/.tau/trust.
+        #[arg(conflicts_with = "from_component")]
         pubkey: Option<String>,
+        /// Trust the key(s) embedded in a signed component (local file or
+        /// oci:// reference): the signature section carries the pubkeys,
+        /// and only keys whose signature verifies on the exact bytes are
+        /// trusted. Prints fingerprints — verify them out-of-band.
+        #[arg(long, value_name = "COMPONENT")]
+        from_component: Option<PathBuf>,
         /// List trusted key fingerprints.
         #[arg(long)]
         list: bool,
@@ -330,7 +337,25 @@ async fn run_sub(sub: Sub) -> Result<()> {
             println!("signed {} with {signed_fp}", wasm.display());
             let _ = fp;
         }
-        Sub::Trust { pubkey, list } => {
+        Sub::Trust {
+            pubkey,
+            list,
+            from_component,
+        } => {
+            if let Some(source) = from_component {
+                let path = resolve_component(&source).await?;
+                let bytes = std::fs::read(&path)
+                    .with_context(|| format!("reading {}", path.display()))?;
+                let fps = tau_ext::sign::trust_component_keys(&bytes)?;
+                for fp in &fps {
+                    println!("trusted: {fp} (from {})", source.display());
+                }
+                println!(
+                    "verify {} out-of-band before relying on it",
+                    if fps.len() == 1 { "this fingerprint" } else { "these fingerprints" }
+                );
+                return Ok(());
+            }
             if list {
                 let dir = tau_ext::sign::trust_dir();
                 let mut entries: Vec<_> = std::fs::read_dir(&dir)
@@ -343,7 +368,9 @@ async fn run_sub(sub: Sub) -> Result<()> {
                 return Ok(());
             }
             let Some(pubkey) = pubkey else {
-                anyhow::bail!("usage: tau trust <base64-pubkey> | tau trust --list");
+                anyhow::bail!(
+                    "usage: tau trust <base64-pubkey> | tau trust --from-component <component> | tau trust --list"
+                );
             };
             let fp = tau_ext::sign::trust_key(&pubkey)?;
             println!("trusted: {fp}");
