@@ -136,7 +136,9 @@ interface process {
 /// same shape as `process` — no wasi:http dependency.
 interface http {
     /// Start a request. Fails if the url's origin is not in the consent
-    /// allowlist. Returns a response handle.
+    /// allowlist. Returns a response handle. `method` is passed through
+    /// verbatim — send uppercase ("GET", "POST"); servers are
+    /// case-sensitive about method names.
     request: func(method: string, url: string, headers: list<tuple<string, string>>, body: list<u8>) -> result<u64, string>;
 
     /// HTTP status code of a started response.
