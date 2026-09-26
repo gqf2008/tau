@@ -782,3 +782,110 @@ mod compaction_tests {
         assert_eq!(request.messages[0].text(), "only this");
     }
 }
+
+#[cfg(test)]
+mod navigation_tests {
+    use crate::probe::{ProbeHandler, ProbePoint, Verdict};
+    use crate::session::{EntryKind, JsonlStore, SessionEntry};
+    use crate::{Agent, Message, ToolRegistry};
+    use async_trait::async_trait;
+
+    fn entry(id: &str, parent: Option<&str>, text: &str) -> SessionEntry {
+        SessionEntry {
+            id: id.to_string(),
+            parent: parent.map(str::to_string),
+            kind: EntryKind::Message {
+                message: Message::user(text),
+            },
+        }
+    }
+
+    fn store() -> JsonlStore {
+        let path = std::env::temp_dir().join(format!("tau-nav-test-{}.jsonl", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut store = JsonlStore::open(&path).unwrap();
+        store.append(entry("aaa", None, "first")).unwrap();
+        store.append(entry("bbb", Some("aaa"), "second")).unwrap();
+        store.append(entry("ccc", Some("bbb"), "third")).unwrap();
+        store
+    }
+
+    fn agent() -> Agent {
+        Agent::new(Box::new(crate::faux::FauxModel::echo()), ToolRegistry::new())
+    }
+
+    #[tokio::test]
+    async fn navigate_returns_the_branch_at_the_target() {
+        let store = store();
+        let (target, branch) = agent().navigate(&store, "bb").await.unwrap();
+        assert_eq!(target, "bbb");
+        let texts: Vec<String> = branch.iter().map(|m| m.text()).collect();
+        assert_eq!(texts, vec!["first", "second"]);
+
+        // A bare number is the append-order index `tau tree` displays.
+        let (target, _) = agent().navigate(&store, "1").await.unwrap();
+        assert_eq!(target, "bbb");
+        assert!(agent().navigate(&store, "9").await.is_err());
+    }
+
+    #[tokio::test]
+    async fn before_navigation_block_vetoes() {
+        struct Veto;
+        #[async_trait]
+        impl ProbeHandler for Veto {
+            fn points(&self) -> &[ProbePoint] {
+                &[ProbePoint::BeforeNavigation]
+            }
+            async fn probe(&self, _point: ProbePoint, _payload: serde_json::Value) -> Verdict {
+                Verdict::Block {
+                    reason: "critical phase".into(),
+                }
+            }
+        }
+        let mut probes = crate::ProbeRegistry::new();
+        probes.register(Box::new(Veto));
+        let err = agent()
+            .probes(probes)
+            .navigate(&store(), "aaa")
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("critical phase"));
+    }
+
+    #[tokio::test]
+    async fn before_navigation_replace_redirects_the_target() {
+        struct Redirect;
+        #[async_trait]
+        impl ProbeHandler for Redirect {
+            fn points(&self) -> &[ProbePoint] {
+                &[ProbePoint::BeforeNavigation]
+            }
+            async fn probe(&self, _point: ProbePoint, payload: serde_json::Value) -> Verdict {
+                // Asked to go to bbb; redirect to aaa instead.
+                assert_eq!(payload["target"], "bbb");
+                Verdict::Replace(serde_json::json!({ "target": "aaa" }))
+            }
+        }
+        let mut probes = crate::ProbeRegistry::new();
+        probes.register(Box::new(Redirect));
+        let (target, branch) = agent()
+            .probes(probes)
+            .navigate(&store(), "bbb")
+            .await
+            .unwrap();
+        assert_eq!(target, "aaa");
+        assert_eq!(branch.len(), 1);
+        assert_eq!(branch[0].text(), "first");
+    }
+
+    #[tokio::test]
+    async fn navigate_unknown_and_ambiguous_prefixes_are_errors() {
+        let store = store();
+        assert!(agent().navigate(&store, "zzz").await.is_err());
+        // "a".."c" all start with different letters here, so reuse one
+        // ambiguous prefix by adding another entry that shares it.
+        let mut store = store;
+        store.append(entry("aad", Some("ccc"), "fourth")).unwrap();
+        assert!(agent().navigate(&store, "aa").await.is_err());
+    }
+}

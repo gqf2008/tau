@@ -38,6 +38,10 @@ pub enum AgentEvent {
 pub enum AgentError {
     #[error("model error: {0}")]
     Model(String),
+    #[error("navigation blocked: {0}")]
+    NavigationBlocked(String),
+    #[error("session: {0}")]
+    Session(#[from] crate::session::SessionError),
 }
 
 pub struct Agent {
@@ -206,6 +210,43 @@ impl Agent {
             "[summary of the earlier conversation]
 {summary}"
         )))
+    }
+
+    /// Fork the session at `prefix_or_id`: probe `before_navigation`
+    /// (block vetoes, replace redirects the target), then return the
+    /// resolved entry id and the branch that becomes the new history.
+    /// The caller appends the next entry with the id as parent — the
+    /// fork materializes on write, pi-style.
+    pub async fn navigate(
+        &self,
+        store: &crate::session::JsonlStore,
+        prefix_or_id: &str,
+    ) -> Result<(String, Vec<Message>), AgentError> {
+        let mut target = store.resolve_id(prefix_or_id)?;
+        let entry = store
+            .get(&target)
+            .ok_or_else(|| crate::session::SessionError::NotFound(target.clone()))?;
+        let summary = crate::session::entry_summary(entry);
+
+        match self
+            .probe(
+                ProbePoint::BeforeNavigation,
+                serde_json::json!({ "target": target, "summary": summary }),
+            )
+            .await
+        {
+            Verdict::Replace(payload) => {
+                let redirected = payload["target"].as_str().ok_or_else(|| {
+                    AgentError::Model("bad before_navigation payload: no target".into())
+                })?;
+                target = store.resolve_id(redirected)?;
+            }
+            Verdict::Block { reason } => return Err(AgentError::NavigationBlocked(reason)),
+            Verdict::Continue => {}
+        }
+
+        let branch = store.active_branch(&target)?;
+        Ok((target, branch))
     }
 
     async fn run_inner(

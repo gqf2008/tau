@@ -33,6 +33,11 @@ struct Cli {
     #[arg(long)]
     r#continue: bool,
 
+    /// Fork the session at an older entry (full id or unique prefix):
+    /// history walks from there, the next entry appends under it.
+    #[arg(long, conflicts_with = "continue")]
+    continue_from: Option<String>,
+
     /// Session file (JSONL). Created if missing.
     #[arg(long, default_value = ".tau/session.jsonl")]
     session: PathBuf,
@@ -143,6 +148,12 @@ enum Sub {
         /// Target reference; must name a tag, not a digest.
         reference: String,
     },
+    /// Print the session tree: every entry, indented by depth, head marked.
+    Tree {
+        /// Session file [default: .tau/session.jsonl].
+        #[arg(long)]
+        session: Option<PathBuf>,
+    },
     /// Trust a base64 ed25519 pubkey (or list trusted keys).
     Trust {
         /// Base64 pubkey to add to ~/.tau/trust.
@@ -250,6 +261,36 @@ async fn run_sub(sub: Sub) -> Result<()> {
                 .await
                 .expect("push task")?;
             println!("pushed {} ({})", pushed.reference, pushed.digest);
+        }
+        Sub::Tree { session } => {
+            let path = session.unwrap_or_else(|| PathBuf::from(".tau/session.jsonl"));
+            let store = tau_core::session::JsonlStore::open(&path)
+                .with_context(|| format!("opening {}", path.display()))?;
+            let head = store.head().map(|h| h.id.clone());
+            for (index, entry) in store.entries().iter().enumerate() {
+                // Depth = parent-chain length; the tree is a chain with
+                // occasional forks, so indenting by depth reads naturally.
+                let mut depth = 0usize;
+                let mut cursor = entry.parent.clone();
+                while let Some(id) = cursor {
+                    depth += 1;
+                    cursor = store.get(&id).and_then(|e| e.parent.clone());
+                }
+                let mark = if Some(&entry.id) == head.as_ref() {
+                    " ← head"
+                } else {
+                    ""
+                };
+                println!(
+                    "{}#{index} {} {}{mark}",
+                    "  ".repeat(depth),
+                    &entry.id[..12.min(entry.id.len())],
+                    tau_core::session::entry_summary(entry)
+                );
+            }
+            if store.entries().is_empty() {
+                println!("(empty session: {})", path.display());
+            }
         }
         Sub::Keygen => {
             let fp = tau_ext::sign::keygen()?;
@@ -546,12 +587,27 @@ async fn main() -> Result<()> {
         }
     }
 
+    // --continue-from: fork at an older entry. The probe can veto or
+    // redirect; the fork materializes when the next entry appends under
+    // the target.
+    let mut base: Option<String> = None;
+    if let Some(target) = &cli.continue_from {
+        let (id, branch) = agent.navigate(&store, target).await?;
+        let summary = store
+            .get(&id)
+            .map(tau_core::session::entry_summary)
+            .unwrap_or_default();
+        eprintln!("[tau] forked at {}: {summary}", &id[..12.min(id.len())]);
+        history = branch;
+        base = Some(id);
+    }
+
     if interactive {
-        return repl::interactive(agent, store, history).await;
+        return repl::interactive(agent, store, history, base).await;
     }
     let prompt_text = cli.print.expect("print mode checked above");
 
-    let parent = store.head().map(|h| h.id.clone());
+    let parent = base.or_else(|| store.head().map(|h| h.id.clone()));
 
     // Renderer: just another event-bus subscriber.
     let mut events = agent.events();

@@ -1,7 +1,5 @@
 //! Probes: lifecycle points where extensions observe and influence a run.
-//! See docs/probes.md for the full map. Eight points are wired;
-//! before_navigation fires when branch navigation lands — a probe cannot
-//! probe what does not exist.
+//! See docs/probes.md for the full map. All nine points are wired.
 
 use async_trait::async_trait;
 use serde_json::Value as Json;
@@ -21,6 +19,8 @@ pub enum ProbePoint {
     /// About to compact: the message set to be summarized, before the
     /// summarization request.
     BeforeCompaction,
+    /// About to navigate: fork the session at an older entry.
+    BeforeNavigation,
 }
 
 impl ProbePoint {
@@ -34,6 +34,7 @@ impl ProbePoint {
             Self::AfterTool => "after_tool",
             Self::BeforeRunEnd => "before_run_end",
             Self::BeforeCompaction => "before_compaction",
+            Self::BeforeNavigation => "before_navigation",
         }
     }
 
@@ -47,11 +48,12 @@ impl ProbePoint {
             "after_tool" => Some(Self::AfterTool),
             "before_run_end" => Some(Self::BeforeRunEnd),
             "before_compaction" => Some(Self::BeforeCompaction),
+            "before_navigation" => Some(Self::BeforeNavigation),
             _ => None,
         }
     }
 
-    pub const ALL: [ProbePoint; 8] = [
+    pub const ALL: [ProbePoint; 9] = [
         Self::BeforeRun,
         Self::TransformContext,
         Self::BeforeRequest,
@@ -60,6 +62,7 @@ impl ProbePoint {
         Self::AfterTool,
         Self::BeforeRunEnd,
         Self::BeforeCompaction,
+        Self::BeforeNavigation,
     ];
 }
 
@@ -209,11 +212,11 @@ pub const CATALOG: &[PointInfo] = &[
         verdicts: "continue | replace{messages} | block{reason} — block vetoes the compaction",
     },
     PointInfo {
-        point: None,
+        point: Some(ProbePoint::BeforeNavigation),
         name: "before_navigation",
-        wired: false,
-        payload: r#"{"target": entry-id, "summary": string} (reserved — fires when branch navigation lands)"#,
-        verdicts: "continue | replace{summary} | block{reason}",
+        wired: true,
+        payload: r#"{"target": entry-id, "summary": string — first line of the target's message}"#,
+        verdicts: "continue | replace{target} — navigate to a different entry instead | block{reason} — vetoes the navigation",
     },
 ];
 

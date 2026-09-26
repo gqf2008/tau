@@ -26,10 +26,13 @@ pub(crate) enum LineEvent {
 
 /// Entry point from main: build the rustyline input thread and run the
 /// loop on the real terminal.
+/// `base` is the fork base from --continue-from: the parent the next
+/// append grows under. None seeds from the store head.
 pub(crate) async fn interactive(
     agent: Agent,
     store: JsonlStore,
     history: Vec<Message>,
+    base: Option<String>,
 ) -> Result<()> {
     let agent = Arc::new(agent);
     let (line_tx, line_rx) = unbounded_channel();
@@ -94,15 +97,17 @@ pub(crate) async fn interactive(
         .recv()
         .await
         .context("input thread failed to start")?;
-    drive(agent, store, history, line_rx, print.as_ref()).await
+    drive(agent, store, history, base, line_rx, print.as_ref()).await
 }
 
 /// The REPL loop, factored for tests: lines arrive on a channel, rendered
-/// output goes to `print`.
+/// output goes to `print`. `base` seeds the parent of the next append (a
+/// fork base); None = store head.
 pub(crate) async fn drive(
     agent: Arc<Agent>,
     mut store: JsonlStore,
     mut history: Vec<Message>,
+    base: Option<String>,
     mut lines: UnboundedReceiver<LineEvent>,
     print: impl Fn(&str) + Send + Sync,
 ) -> Result<()> {
@@ -159,7 +164,7 @@ pub(crate) async fn drive(
     let (done_tx, mut done_rx) =
         unbounded_channel::<Result<Vec<Message>, tau_core::agent::AgentError>>();
     let mut running = false;
-    let mut parent = store.head().map(|h| h.id.clone());
+    let mut parent = base.or_else(|| store.head().map(|h| h.id.clone()));
 
     print("tau interactive — /help for commands, /quit to exit");
     print("  mid-run: text queues as follow-up, !text steers, Ctrl-C aborts");
@@ -187,7 +192,7 @@ pub(crate) async fn drive(
                     match text {
                         "/quit" | "/exit" => break,
                         "/help" => {
-                            print("commands: /help /compact /quit /exit");
+                            print("commands: /help /compact /fork [id-prefix] /quit /exit");
                             print("  !<text> while running: steer; plain text while running: follow-up");
                             continue;
                         }
@@ -212,6 +217,44 @@ pub(crate) async fn drive(
                                     print("[tau] compacted — the summary now stands in for earlier turns");
                                 }
                                 Err(e) => print(&format!("[tau] compaction failed: {e}")),
+                            }
+                            continue;
+                        }
+                        _ if text == "/fork" || text.starts_with("/fork ") => {
+                            let arg = text.strip_prefix("/fork").unwrap().trim();
+                            if arg.is_empty() {
+                                print("recent entries (fork target = #index or id prefix):");
+                                let entries = store.entries();
+                                let start = entries.len().saturating_sub(8);
+                                for (index, entry) in entries.iter().enumerate().skip(start) {
+                                    let here = if Some(&entry.id) == parent.as_ref() {
+                                        " ← here"
+                                    } else {
+                                        ""
+                                    };
+                                    print(&format!(
+                                        "  #{index} {} {}{here}",
+                                        &entry.id[..12.min(entry.id.len())],
+                                        tau_core::session::entry_summary(entry)
+                                    ));
+                                }
+                                continue;
+                            }
+                            match agent.navigate(&store, arg).await {
+                                Ok((id, branch)) => {
+                                    let summary = store
+                                        .get(&id)
+                                        .map(tau_core::session::entry_summary)
+                                        .unwrap_or_default();
+                                    parent = Some(id.clone());
+                                    history = branch;
+                                    print(&format!(
+                                        "[tau] forked at {}: {summary} ({} messages in context)",
+                                        &id[..12.min(id.len())],
+                                        history.len()
+                                    ));
+                                }
+                                Err(e) => print(&format!("[tau] fork failed: {e}")),
                             }
                             continue;
                         }
@@ -377,6 +420,7 @@ mod tests {
             agent,
             store,
             Vec::new(),
+            None,
             rx,
             capture.printer(),
         ));
@@ -422,6 +466,7 @@ mod tests {
             agent,
             store,
             Vec::new(),
+            None,
             rx,
             capture.printer(),
         ));
@@ -453,6 +498,61 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn fork_rewinds_history_and_the_next_turn_appends_there() {
+        let (_dir, store) = store();
+        let agent = Arc::new(Agent::new(Box::new(StaticModel), ToolRegistry::new()));
+        let capture = Arc::new(Capture {
+            lines: Mutex::new(Vec::new()),
+            ready: Notify::new(),
+        });
+        let (tx, rx) = unbounded_channel();
+        let task = tokio::spawn(drive(
+            agent,
+            store,
+            Vec::new(),
+            None,
+            rx,
+            capture.printer(),
+        ));
+        tx.send(LineEvent::Line("one".into())).unwrap();
+        capture.ready.notified().await;
+        tx.send(LineEvent::Line("two".into())).unwrap();
+        capture.ready.notified().await;
+
+        // Fork back to the first user entry, then run a new turn: it
+        // must grow under the fork point, not under the old head.
+        let store = JsonlStore::open(_dir.path().join("session.jsonl")).unwrap();
+        let first = store.entries()[0].id.clone();
+        tx.send(LineEvent::Line(format!("/fork {first}"))).unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if capture.text().contains("forked at") {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fork completes");
+        tx.send(LineEvent::Line("three".into())).unwrap();
+        capture.ready.notified().await;
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        // The entry for "three" has the fork point as parent.
+        let store = JsonlStore::open(_dir.path().join("session.jsonl")).unwrap();
+        let three = store
+            .entries()
+            .iter()
+            .find(|e| tau_core::session::entry_summary(e) == "three")
+            .expect("three appended");
+        assert_eq!(three.parent.as_deref(), Some(first.as_str()));
+
+        let text = capture.text();
+        assert!(text.contains("forked at"), "output: {text}");
+    }
+
+    #[tokio::test]
     async fn compact_replaces_context_with_summary_entry() {
         let (_dir, store) = store();
         let agent = Arc::new(Agent::new(Box::new(StaticModel), ToolRegistry::new()));
@@ -465,6 +565,7 @@ mod tests {
             agent,
             store,
             Vec::new(),
+            None,
             rx,
             capture.printer(),
         ));
@@ -524,6 +625,7 @@ mod tests {
             agent,
             store,
             Vec::new(),
+            None,
             rx,
             capture.printer(),
         ));

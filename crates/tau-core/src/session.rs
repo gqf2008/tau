@@ -46,6 +46,8 @@ pub enum SessionError {
     },
     #[error("entry not found: {0}")]
     NotFound(String),
+    #[error("ambiguous id prefix {0} — matches more than one entry")]
+    Ambiguous(String),
 }
 
 /// Append-only JSONL session store. Loads the whole file into memory;
@@ -150,6 +152,38 @@ impl JsonlStore {
         self.by_id.get(id).map(|&i| &self.entries[i])
     }
 
+    /// All entries, in append order (for `tau tree` and fork-target
+    /// pickers).
+    pub fn entries(&self) -> &[SessionEntry] {
+        &self.entries
+    }
+
+    /// Resolve a full id, an unambiguous prefix, or a `#index` into
+    /// append order (what `tau tree` and `/fork` display) to the full id.
+    pub fn resolve_id(&self, prefix_or_id: &str) -> Result<String, SessionError> {
+        if let Ok(index) = prefix_or_id.parse::<usize>() {
+            return self
+                .entries
+                .get(index)
+                .map(|entry| entry.id.clone())
+                .ok_or_else(|| SessionError::NotFound(prefix_or_id.to_string()));
+        }
+        if self.by_id.contains_key(prefix_or_id) {
+            return Ok(prefix_or_id.to_string());
+        }
+        let matches: Vec<&str> = self
+            .by_id
+            .keys()
+            .map(String::as_str)
+            .filter(|id| id.starts_with(prefix_or_id))
+            .collect();
+        match matches.as_slice() {
+            [one] => Ok((*one).to_string()),
+            [] => Err(SessionError::NotFound(prefix_or_id.to_string())),
+            _ => Err(SessionError::Ambiguous(prefix_or_id.to_string())),
+        }
+    }
+
     /// Walk parents from `head_id` to the root; returns messages oldest-first.
     pub fn active_branch(&self, head_id: &str) -> Result<Vec<Message>, SessionError> {
         let mut messages = Vec::new();
@@ -176,6 +210,16 @@ impl JsonlStore {
 }
 
 /// Monotonic-ish unique entry id: time-based, no external deps.
+/// One display line for an entry: kind marker + first line of its text.
+pub fn entry_summary(entry: &SessionEntry) -> String {
+    let (marker, message) = match &entry.kind {
+        EntryKind::Message { message } => ("", message),
+        EntryKind::Compaction { summary } => ("[compaction] ", summary),
+    };
+    let first = message.text().lines().next().unwrap_or("").to_string();
+    format!("{marker}{first}")
+}
+
 pub fn new_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};

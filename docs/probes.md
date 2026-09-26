@@ -16,10 +16,10 @@ Model (derived from pi's `HookMap`, packages/agent/src/harness/agent-harness.ts)
 
 ## Run lifecycle
 
-Wired: 1–8 (verdicts `continue` / `replace` / `block`; block aborts
-with the reason as the run error, except `before_tool` where it becomes a
-blocked tool result handed back to the model). Reserved: 9 — it fires when
-branch navigation lands; a probe cannot probe what does not exist.
+All nine points are wired (verdicts `continue` / `replace` / `block`;
+block aborts with the reason as the run error, except `before_tool` where
+it becomes a blocked tool result handed back to the model, and
+`before_compaction`/`before_navigation` where it vetoes the action).
 
 | # | point | payload (in) | verdicts | jev use case |
 |---|-------|--------------|----------|--------------|
@@ -31,7 +31,7 @@ branch navigation lands; a probe cannot probe what does not exist.
 | 6 | `after_tool` | id, name, args, result content, is_error | replace result / continue | truncate or sanitize result; score usefulness → decide run ends early |
 | 7 | `before_run_end` | produced messages + stop reason | replace messages / block | chain runs: score "task done?" → enqueue next step |
 | 8 | `before_compaction` | `{"reason": "manual", "messages": [Message]}` | continue / replace{messages} / block{reason} | custom summarizer (replace the message set the summarizer sees); veto compaction during a critical phase |
-| 9 | `before_navigation` *(reserved)* | branch target, prepared branch summary | decline / replace summary | custom branch summarizer |
+| 9 | `before_navigation` | `{"target": entry-id, "summary": string — first line of the target's message}` | continue / replace{target} / block{reason} | policy: veto rewinding past a critical point; redirect navigation to a sanctioned entry |
 
 ## Session lifecycle (observe-only in v0)
 

@@ -5,7 +5,8 @@ Minimal agent harness in Rust. Design follows the pi agent harness
 extensible — but extensions are **wasm components**, not in-process scripts.
 
 - **Session**: append-only JSONL tree; entries have id + parent; the active
-  branch supplies model history; fork = continue from an earlier entry.
+  branch supplies model history; fork = continue from an earlier entry
+  (`--continue-from <id>`, `/fork` in the REPL, `tau tree` to see the shape).
 - **Agent loop**: prompt → model stream → tool calls → results → repeat.
   Steering/compaction/navigation: see `docs/probes.md` (v0 wires the
   run-critical probes). Compaction condenses the branch into a summary
