@@ -210,14 +210,31 @@ impl JsonlStore {
 }
 
 /// Monotonic-ish unique entry id: time-based, no external deps.
-/// One display line for an entry: kind marker + first line of its text.
+/// One display line for an entry: kind marker + first line of its text;
+/// text-less tool traffic degrades to a variant label so `tau tree`
+/// never prints blank rows.
 pub fn entry_summary(entry: &SessionEntry) -> String {
     let (marker, message) = match &entry.kind {
         EntryKind::Message { message } => ("", message),
         EntryKind::Compaction { summary } => ("[compaction] ", summary),
     };
     let first = message.text().lines().next().unwrap_or("").to_string();
-    format!("{marker}{first}")
+    if !first.is_empty() {
+        return format!("{marker}{first}");
+    }
+    for content in &message.content {
+        match content {
+            crate::types::Content::ToolCall { name, .. } => {
+                return format!("{marker}[tool call: {name}]");
+            }
+            crate::types::Content::ToolResult { is_error, .. } => {
+                let label = if *is_error { "tool result (error)" } else { "tool result" };
+                return format!("{marker}[{label}]");
+            }
+            _ => {}
+        }
+    }
+    format!("{marker}(no text)")
 }
 
 pub fn new_id() -> String {

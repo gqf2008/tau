@@ -8,8 +8,8 @@ extensible — but extensions are **wasm components**, not in-process scripts.
   branch supplies model history; fork = continue from an earlier entry
   (`--continue-from <id>`, `/fork` in the REPL, `tau tree` to see the shape).
 - **Agent loop**: prompt → model stream → tool calls → results → repeat.
-  Steering/compaction/navigation: see `docs/probes.md` (v0 wires the
-  run-critical probes). Compaction condenses the branch into a summary
+  Steering/compaction/navigation: see `docs/probes.md` (all nine probe
+  points are wired). Compaction condenses the branch into a summary
   entry (`--compact`, `/compact` in the interactive REPL); the originals
   stay in the tree, pi-style.
 - **Extensions**: drop a `.wasm` in. Components implement the
@@ -22,24 +22,25 @@ extensible — but extensions are **wasm components**, not in-process scripts.
   is the explicit dev escape. See `docs/signing.md`.
 - **Media**: bytes in the model, base64 only at JSON edges; media past
   256KB is externalized to a content-addressed blob store at session
-  write and materialized back at the request edge. See `docs/media.md`.
-- **Distribution**: components pull from any OCI registry
-  (`oci://ghcr.io/org/ext:tag`), content-addressed cache, digest-verified;
-  signature/trust/consent apply to pulled bytes unchanged. Pull-only —
-  publishing is `oras`/`crane`'s job. See `docs/oci.md`.
+  write and materialized back at the request edge; `tau gc` sweeps
+  unreferenced blobs (dry-run by default). See `docs/media.md`.
+- **Distribution**: components push to and pull from any OCI registry
+  (`tau push ext.wasm oci://ghcr.io/org/ext:tag`, then `-e oci://…` to
+  load), content-addressed cache, digest-verified; signature/trust/consent
+  apply to pulled bytes unchanged. See `docs/oci.md`.
 - **Bridges**: no MCP in core. External tool protocols (MCP) are translated
   by bridge components over a consent-gated spawn-with-pipes capability
   (`--mcp-bridge b.wasm --mcp-command '["python","server.py"]'`).
   See `docs/bridges.md`.
 - **Models**: three built-in APIs — OpenAI chat completions (`--provider openai`),
   OpenAI Responses (`--provider responses`), Anthropic Messages
-  (`--provider anthropic`); plus wasm provider components whose HTTP egress
-  is consent-gated per signing fingerprint (`--provider-origin`, remembered
-  with `--remember`)
+  (`--provider anthropic`); plus wasm provider components
   (`--provider-wasm x.wasm --model id`) pushing stream events through the
-  `events.emit` host channel. Messages are multimodal: text, image, audio,
-  video, and file blocks, mapped per API (or degraded to placeholders where
-  the API has no equivalent block).
+  `events.emit` host channel, with consent-gated HTTP egress
+  (`--provider-origin`, remembered with `--remember`) and explicit bearer
+  credential delivery (`--provider-auth`, never persisted). Messages are
+  multimodal: text, image, audio, video, and file blocks, mapped per API
+  (or degraded to placeholders where the API has no equivalent block).
 
 ## Try it
 
@@ -90,7 +91,9 @@ and prebuilt (unsigned) example components.
 editing, persisted history): streamed answers print inline while you can
 keep typing. Mid-run input is the control plane — plain text queues as a
 follow-up, `!text` steers after the current turn, Ctrl-C aborts, `/quit`
-exits. `tau -p "..."` stays one-shot print mode.
+exits. Idle commands: `/compact` (summarize history into a compaction
+entry), `/fork [id|#index]` (rewind to an earlier entry and branch from
+there), `/help`. `tau -p "..."` stays one-shot print mode.
 
 ## Testing
 

@@ -11,6 +11,7 @@ use crate::model::{Model, ModelEvent, Request};
 
 pub struct FauxModel {
     rounds: Mutex<Vec<Vec<ModelEvent>>>,
+    demo: std::sync::atomic::AtomicBool,
 }
 
 impl FauxModel {
@@ -18,7 +19,21 @@ impl FauxModel {
     pub fn scripted(rounds: Vec<Vec<ModelEvent>>) -> Self {
         Self {
             rounds: Mutex::new(rounds),
+            demo: std::sync::atomic::AtomicBool::new(false),
         }
+    }
+
+    /// Demo mode: exercises the tool loop when tools are registered.
+    /// First model call of a run (tools present, no tool result in the
+    /// history yet) emits one call to the first tool — required string
+    /// parameters are filled with the last user text, numbers with 1,
+    /// booleans with true; required parameters of other shapes skip the
+    /// call. The follow-up call (tool result present) answers plain text.
+    /// Deterministic, offline, and makes `--demo -e tool.wasm` real.
+    pub fn demo() -> Self {
+        let model = Self::scripted(vec![]); // rounds unused; stream() synthesizes
+        model.demo.store(true, std::sync::atomic::Ordering::Relaxed);
+        model
     }
 
     /// One round of plain text, for demos.
@@ -35,7 +50,11 @@ impl FauxModel {
 
 #[async_trait]
 impl Model for FauxModel {
-    async fn stream(&self, _req: &Request) -> BoxStream<'static, ModelEvent> {
+    async fn stream(&self, req: &Request) -> BoxStream<'static, ModelEvent> {
+        // Demo rounds are synthesized from the request, not scripted.
+        if self.demo.load(std::sync::atomic::Ordering::Relaxed) {
+            return stream::iter(demo_round(req)).boxed();
+        }
         // The Model contract forbids panicking: once the script is
         // exhausted (interactive demo use runs past it), answer with a
         // fallback round instead of remove(0) on an empty vec.
@@ -59,11 +78,145 @@ impl Model for FauxModel {
     }
 }
 
+/// One synthesized demo round: a scripted tool call when the run has
+/// not seen a tool result yet, else the plain alive-text answer.
+fn demo_round(req: &Request) -> Vec<ModelEvent> {
+    use crate::model::StopReason;
+    use crate::types::Content;
+
+    let answered = req.messages.iter().any(|m| {
+        m.content
+            .iter()
+            .any(|c| matches!(c, Content::ToolResult { .. }))
+    });
+    if !answered && let Some(call) = demo_tool_call(req) {
+        return vec![
+            ModelEvent::ToolCallDelta {
+                index: 0,
+                id: Some(call.0),
+                name: Some(call.1),
+                arguments_delta: call.2,
+            },
+            ModelEvent::Done {
+                stop: StopReason::ToolUse,
+            },
+        ];
+    }
+    vec![
+        ModelEvent::TextDelta { text: "tau is alive. ".into() },
+        ModelEvent::TextDelta {
+            text: "(faux model — set ANTHROPIC_API_KEY or OPENAI_API_KEY for a real one)".into(),
+        },
+        ModelEvent::Done {
+            stop: StopReason::Stop,
+        },
+    ]
+}
+
+/// Build one deterministic tool call from the first tool's schema:
+/// required strings get the last user text, numbers 1, booleans true;
+/// anything else unfillable skips the call (None).
+fn demo_tool_call(req: &Request) -> Option<(String, String, String)> {
+    use crate::types::Content;
+    let tool = req.tools.first()?;
+    let prompt = req
+        .messages
+        .iter()
+        .rev()
+        .find_map(|m| {
+            m.content.iter().find_map(|c| match c {
+                Content::Text { text } => Some(text.clone()),
+                _ => None,
+            })
+        })
+        .unwrap_or_else(|| "hello".into());
+    let schema = &tool.parameters;
+    let mut args = serde_json::Map::new();
+    for name in schema["required"].as_array().into_iter().flatten() {
+        let Some(name) = name.as_str() else { continue };
+        let ty = schema["properties"][name]["type"].as_str().unwrap_or("string");
+        let value = match ty {
+            "string" => serde_json::Value::String(prompt.clone()),
+            "number" | "integer" => serde_json::json!(1),
+            "boolean" => serde_json::json!(true),
+            _ => return None, // cannot fabricate — no demo call
+        };
+        args.insert(name.to_string(), value);
+    }
+    Some((
+        "demo-call-1".to_string(),
+        tool.name.clone(),
+        serde_json::Value::Object(args).to_string(),
+    ))
+}
+
 use futures::StreamExt;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn demo_calls_the_first_tool_then_answers() {
+        use crate::model::StopReason;
+        use crate::tool::ToolDef;
+        let model = FauxModel::demo();
+        let tool = ToolDef {
+            name: "upper".into(),
+            description: "shout".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "text": { "type": "string" } },
+                "required": ["text"],
+            }),
+        };
+        // First call of the run: a tool call for upper with the prompt.
+        let req = Request {
+            system: None,
+            messages: vec![crate::Message::user("say hi")],
+            tools: vec![tool.clone()],
+        };
+        let events: Vec<_> = model.stream(&req).await.collect().await;
+        let call = events.iter().find_map(|e| match e {
+            ModelEvent::ToolCallDelta { name, arguments_delta, .. } => {
+                Some((name.clone().unwrap(), arguments_delta.clone()))
+            }
+            _ => None,
+        });
+        let (name, args) = call.expect("demo emits a tool call");
+        assert_eq!(name, "upper");
+        assert_eq!(args, r#"{"text":"say hi"}"#);
+        assert!(matches!(
+            events.last(),
+            Some(ModelEvent::Done {
+                stop: StopReason::ToolUse
+            })
+        ));
+
+        // After the tool result lands, the demo answers plain text.
+        let mut history = req.messages.clone();
+        history.push(crate::Message {
+            role: crate::types::Role::Assistant,
+            content: vec![crate::types::Content::ToolResult {
+                call_id: "demo-call-1".into(),
+                content: "SAY HI".into(),
+                is_error: false,
+            }],
+        });
+        let req2 = Request {
+            system: None,
+            messages: history,
+            tools: vec![tool],
+        };
+        let events: Vec<_> = model.stream(&req2).await.collect().await;
+        assert!(events.iter().any(|e| matches!(e, ModelEvent::TextDelta { .. })));
+        assert!(matches!(
+            events.last(),
+            Some(ModelEvent::Done {
+                stop: StopReason::Stop
+            })
+        ));
+    }
 
     #[tokio::test]
     async fn exhausted_script_falls_back_instead_of_panicking() {

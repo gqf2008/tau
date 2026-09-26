@@ -497,7 +497,7 @@ async fn main() -> Result<()> {
     }
 
     let model: Box<dyn Model> = if cli.demo {
-        Box::new(FauxModel::echo())
+        Box::new(FauxModel::demo())
     } else if let Some(raw) = &cli.provider_wasm {
         let path = &resolve_component(raw).await?;
         let name = cli
