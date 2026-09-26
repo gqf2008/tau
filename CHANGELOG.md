@@ -20,9 +20,10 @@ the extension unit instead of in-process scripts.
   aborts through the control channel.
 - **Wasm component extensions** (`wit/tau.wit`): tools and probe hooks.
   Nine wired probe points (`before_run` … `before_navigation`) with
-  continue/replace/block verdicts; a broken probe degrades to continue
-  instead of wedging the run. Ambient WASI by default, `--deny-wasi`
-  restores the sandbox.
+  continue/replace/block verdicts; a trapped probe degrades to continue
+  and the guest instance is rebuilt, so later probes still decide —
+  a broken probe never wedges the run and never goes silently dead.
+  Ambient WASI by default, `--deny-wasi` restores the sandbox.
 - **Signing & consent**: embedded ed25519 signature sections, a trust
   store, per-fingerprint remembered capability grants (bridge argv,
   HTTP origins, credential delivery, WASI-deny). Secrets are delivered,
@@ -59,8 +60,9 @@ byte-flipped, signature-stripped, and corrupted-signature rejection),
 all three built-in providers
 against a loopback mock, wasm-provider consent gate, MCP bridge spawn
 gate, remembered-consent lifecycle, OCI push/pull/trust onboarding,
-blob GC, and probe verdicts — restoring the environment exactly
-afterwards. 97 tests, clippy-clean across all workspaces.
+blob GC, and probe verdicts (block, continue, and a trapped probe
+degrading without going dead) — restoring the environment exactly
+afterwards. 98 tests, clippy-clean across all workspaces.
 
 Performance baseline (docs/perf.md): extension load 202ms cold → 9ms
 warm (wasmtime compile cache); 10k-entry session opens in 66ms.

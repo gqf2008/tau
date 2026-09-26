@@ -1,7 +1,9 @@
 //! Example tau extension: a probe that actually decides. Contributes no
 //! tools; its `before_tool` probe blocks any call whose arguments carry
 //! the word "forbidden" — the block reason goes back to the model as
-//! the tool result, so the run continues instead of dying.
+//! the tool result, so the run continues instead of dying. Arguments
+//! carrying "crash" make the probe panic instead: the host degrades a
+//! broken probe to continue, so the call still goes through.
 //!
 //! Build:
 //!   cargo build --manifest-path examples/guard/Cargo.toml \
@@ -53,11 +55,15 @@ impl Hooks for Guard {
         }
         // before_tool payload: {"id": ..., "name": ..., "args": {...}}.
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(&payload_json);
-        let forbidden = parsed
+        let text = parsed
             .ok()
-            .and_then(|p| p["args"]["text"].as_str().map(str::to_string))
-            .is_some_and(|text| text.contains("forbidden"));
-        if forbidden {
+            .and_then(|p| p["args"]["text"].as_str().map(str::to_string));
+        // A broken probe must degrade to continue, never wedge the run:
+        // this panic is the fixture that proves it end to end.
+        if text.as_deref().is_some_and(|t| t.contains("crash")) {
+            panic!("the guard blew up");
+        }
+        if text.is_some_and(|text| text.contains("forbidden")) {
             Verdict {
                 action: Action::Block,
                 payload_json: None,

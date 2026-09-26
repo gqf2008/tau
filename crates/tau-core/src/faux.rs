@@ -1055,7 +1055,14 @@ mod navigation_tests {
     }
 
     fn store() -> JsonlStore {
-        let path = std::env::temp_dir().join(format!("tau-nav-test-{}.jsonl", std::process::id()));
+        // Unique per call: the navigation tests run in parallel in one
+        // process, and a pid-only path made them race the same file.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let unique = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let path = std::env::temp_dir().join(format!(
+            "tau-nav-test-{}-{unique}.jsonl",
+            std::process::id()
+        ));
         let _ = std::fs::remove_file(&path);
         let mut store = JsonlStore::open(&path).unwrap();
         store.append(entry("aaa", None, "first")).unwrap();

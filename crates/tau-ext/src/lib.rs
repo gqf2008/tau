@@ -138,7 +138,46 @@ struct ComponentInstance {
     bindings: bindings::Extension,
 }
 
-type Shared = Arc<Mutex<ComponentInstance>>;
+/// Everything needed to (re)create an instance. A trapped guest poisons
+/// its instance — wasmtime lets the store live on, but the component's
+/// own state aborted mid-call and later calls trap too — so the host
+/// re-instantiates after a trap to keep later calls deciding.
+struct InstanceFactory {
+    engine: Engine,
+    component: Component,
+    linker: Linker<ComponentState>,
+    wasi: WasiPolicy,
+}
+
+impl InstanceFactory {
+    fn instantiate(&self) -> Result<ComponentInstance, wasmtime::Error> {
+        let state = ComponentState {
+            ctx: self.wasi.ctx_builder().build(),
+            table: ResourceTable::new(),
+        };
+        let mut store = Store::new(&self.engine, state);
+        let bindings = bindings::Extension::instantiate(&mut store, &self.component, &self.linker)?;
+        Ok(ComponentInstance { store, bindings })
+    }
+}
+
+struct SharedInstance {
+    instance: ComponentInstance,
+    factory: InstanceFactory,
+}
+
+impl SharedInstance {
+    /// Drop a poisoned instance and build a fresh one. Best-effort: if
+    /// re-instantiation somehow fails, the poisoned instance stays and
+    /// calls keep degrading the way they did before this fix.
+    fn revive(&mut self) {
+        if let Ok(fresh) = self.factory.instantiate() {
+            self.instance = fresh;
+        }
+    }
+}
+
+type Shared = Arc<Mutex<SharedInstance>>;
 
 /// What a loaded component contributes, unpacked.
 pub type LoadedParts = (Vec<Box<dyn Tool>>, Vec<Box<dyn ProbeHandler>>);
@@ -342,36 +381,38 @@ impl ExtensionHost {
         // what they may actually do follows the host's WasiPolicy.
         let mut linker: Linker<ComponentState> = Linker::new(&self.engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
-        let state = ComponentState {
-            ctx: self.wasi.ctx_builder().build(),
-            table: ResourceTable::new(),
+        let factory = InstanceFactory {
+            engine: self.engine.clone(),
+            component,
+            linker,
+            wasi: self.wasi,
         };
-        let mut store = Store::new(&self.engine, state);
-        let bindings = bindings::Extension::instantiate(&mut store, &component, &linker)
-            .map_err(|e| ExtError::Load {
-                path: path.display().to_string(),
-                reason: format!(
-                    "instantiation failed (does it import capabilities the host does not grant?): {}",
-                    compact_wasm_error(&e)
-                ),
-            })?;
+        let mut instance = factory.instantiate().map_err(|e| ExtError::Load {
+            path: path.display().to_string(),
+            reason: format!(
+                "instantiation failed (does it import capabilities the host does not grant?): {}",
+                compact_wasm_error(&e)
+            ),
+        })?;
 
-        let definitions = bindings
+        let definitions = instance
+            .bindings
             .tau_extension_tools()
-            .call_definitions(&mut store)
+            .call_definitions(&mut instance.store)
             .map_err(|e| ExtError::Load {
                 path: path.display().to_string(),
                 reason: format!("definitions() trapped: {}", compact_wasm_error(&e)),
             })?;
-        let points = bindings
+        let points = instance
+            .bindings
             .tau_extension_hooks()
-            .call_points(&mut store)
+            .call_points(&mut instance.store)
             .map_err(|e| ExtError::Load {
                 path: path.display().to_string(),
                 reason: format!("points() trapped: {}", compact_wasm_error(&e)),
             })?;
 
-        let shared: Shared = Arc::new(Mutex::new(ComponentInstance { store, bindings }));
+        let shared: Shared = Arc::new(Mutex::new(SharedInstance { instance, factory }));
 
         let tools: Vec<Box<dyn Tool>> = definitions
             .into_iter()
@@ -431,10 +472,17 @@ impl Tool for WasmTool {
             let mut guard = shared
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let ComponentInstance { store, bindings } = &mut *guard;
-            bindings
-                .tau_extension_tools()
-                .call_execute(store, &name, &arguments.to_string())
+            let ComponentInstance { store, bindings } = &mut guard.instance;
+            let result =
+                bindings
+                    .tau_extension_tools()
+                    .call_execute(store, &name, &arguments.to_string());
+            if result.is_err() {
+                // The trap poisoned the guest; rebuild so the next call
+                // reaches a working tool instead of trapping forever.
+                guard.revive();
+            }
+            result
         })
         .await;
         match result {
@@ -466,10 +514,17 @@ impl ProbeHandler for WasmProbes {
             let mut guard = shared
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let ComponentInstance { store, bindings } = &mut *guard;
-            bindings
-                .tau_extension_hooks()
-                .call_probe(store, &point_name, &payload.to_string())
+            let ComponentInstance { store, bindings } = &mut guard.instance;
+            let result =
+                bindings
+                    .tau_extension_hooks()
+                    .call_probe(store, &point_name, &payload.to_string());
+            if result.is_err() {
+                // The trap poisoned the guest; rebuild so the next probe
+                // still decides instead of degrading forever.
+                guard.revive();
+            }
+            result
         })
         .await;
         match result {

@@ -437,4 +437,14 @@ echo "$OUT" | grep -q "tool ← upper: SHOUT ALLOWED" \
     || fail "allowed call did not pass through: $OUT"
 echo "ok — continue: clean calls pass untouched"
 
+# The guard's probe panics on "crash": the trap must degrade to continue
+# (the call goes through) and the guest's panic text must reach stderr.
+OUT="$("$TAU" --allow-unsigned -e "$UPPER" -e "$GUARD" \
+    --demo -p "shout crash" 2>&1)" || fail "broken-probe run: $OUT"
+echo "$OUT" | grep -q "tool ← upper: SHOUT CRASH" \
+    || fail "trapped probe did not degrade to continue: $OUT"
+echo "$OUT" | grep -q "the guard blew up" \
+    || fail "guest panic did not reach stderr: $OUT"
+echo "ok — degrade: trapped probe continues, the call goes through"
+
 step "ALL NINE STEPS PASSED — the release candidate stands"
