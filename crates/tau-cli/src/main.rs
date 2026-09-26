@@ -630,6 +630,9 @@ async fn main() -> Result<()> {
                     print!("{delta}");
                     let _ = std::io::stdout().flush();
                 }
+                Ok(AgentEvent::AudioDelta { bytes, media_type }) => {
+                    eprintln!("[tau] audio Δ {bytes} bytes ({media_type})")
+                }
                 Ok(AgentEvent::ToolCallStart { name, .. }) => eprintln!("\n[tau] tool → {name}"),
                 Ok(AgentEvent::ToolCallEnd { name, is_error, .. }) => {
                     eprintln!("[tau] tool ← {name}{}", if is_error { " (error)" } else { "" })

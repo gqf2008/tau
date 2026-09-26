@@ -1,0 +1,56 @@
+//! Integration test: a wasm provider's audio-delta events cross the
+//! events.emit channel and arrive as ModelEvent::AudioDelta with honest
+//! bytes (base64 only on the wire). Skipped unless the echo_provider
+//! artifact has been built.
+
+use std::path::PathBuf;
+
+use futures::StreamExt;
+use tau_core::model::{Model, ModelEvent};
+use tau_ext::ExtensionHost;
+
+fn artifact() -> Option<PathBuf> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/echo-provider/target/wasm32-wasip2/release/echo_provider.wasm");
+    path.exists().then_some(path)
+}
+
+#[tokio::test]
+async fn audio_deltas_cross_the_channel_as_bytes() {
+    let Some(wasm) = artifact() else {
+        eprintln!("skipping: echo_provider.wasm not built");
+        return;
+    };
+    let host = ExtensionHost::new();
+    let model = host
+        .load_provider(&wasm, "echo", Default::default(), None)
+        .expect("load provider");
+
+    let request = tau_core::Request {
+        system: None,
+        messages: vec![tau_core::Message::user("audio please")],
+        tools: vec![],
+    };
+    let events: Vec<ModelEvent> = model.stream(&request).await.collect().await;
+    let chunks: Vec<Vec<u8>> = events
+        .iter()
+        .filter_map(|e| match e {
+            ModelEvent::AudioDelta { data, media_type } => {
+                assert_eq!(media_type, "audio/pcm;rate=24000");
+                Some(data.clone())
+            }
+            _ => None,
+        })
+        .collect();
+    assert_eq!(chunks, vec![vec![1, 2, 3], vec![4, 5]]);
+    assert!(events.iter().any(|e| matches!(
+        e,
+        ModelEvent::TextDelta { text } if text.contains("audio chunks")
+    )));
+    assert!(matches!(
+        events.last(),
+        Some(ModelEvent::Done {
+            stop: tau_core::StopReason::Stop
+        })
+    ));
+}

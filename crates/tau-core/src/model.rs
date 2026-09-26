@@ -39,8 +39,33 @@ pub enum ModelEvent {
         name: Option<String>,
         arguments_delta: String,
     },
+    /// Incremental assistant audio (realtime-style providers). Chunks of
+    /// one contiguous segment share a media type; concatenating them in
+    /// order must yield valid content of that type. `data` is base64 on
+    /// the JSON wire, honest bytes in memory.
+    AudioDelta {
+        #[serde(
+            serialize_with = "audio_data_serialize",
+            deserialize_with = "audio_data_deserialize"
+        )]
+        data: Vec<u8>,
+        media_type: String,
+    },
     Done { stop: StopReason },
     Error { message: String },
+}
+
+fn audio_data_serialize<S: serde::Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
+    use base64::Engine;
+    s.serialize_str(&base64::engine::general_purpose::STANDARD.encode(bytes))
+}
+
+fn audio_data_deserialize<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
+    use base64::Engine;
+    let text = String::deserialize(d)?;
+    base64::engine::general_purpose::STANDARD
+        .decode(text)
+        .map_err(serde::de::Error::custom)
 }
 
 #[derive(Debug, Clone, Default)]

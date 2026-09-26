@@ -19,6 +19,10 @@ use crate::types::{Content, Message, Role};
 pub enum AgentEvent {
     RunStart,
     TextDelta(String),
+    /// A provider streamed audio (realtime-style): how many bytes just
+    /// arrived and of what media type. The bytes themselves are not on
+    /// the bus — they land in the assistant message as Content::Audio.
+    AudioDelta { bytes: usize, media_type: String },
     ToolCallStart { id: String, name: String },
     ToolCallEnd { id: String, name: String, is_error: bool },
     /// A probe fired; observers see the full decision trail.
@@ -498,6 +502,9 @@ impl Agent {
 
         let mut stream = self.model.stream(&request).await;
         let mut text = String::new();
+        // Contiguous audio segments: a new block starts when the media
+        // type changes; chunks within a block concatenate.
+        let mut audio: Vec<(String, Vec<u8>)> = Vec::new();
         let mut calls: HashMap<u32, (String, String, String)> = HashMap::new();
         let mut error = None;
         let mut stop = StopReason::Stop;
@@ -523,6 +530,16 @@ impl Agent {
                 ModelEvent::TextDelta { text: delta } => {
                     text.push_str(&delta);
                     self.emit(AgentEvent::TextDelta(delta));
+                }
+                ModelEvent::AudioDelta { data, media_type } => {
+                    self.emit(AgentEvent::AudioDelta {
+                        bytes: data.len(),
+                        media_type: media_type.clone(),
+                    });
+                    match audio.last_mut() {
+                        Some((ty, bytes)) if *ty == media_type => bytes.extend_from_slice(&data),
+                        _ => audio.push((media_type, data)),
+                    }
                 }
                 ModelEvent::ToolCallDelta {
                     index,
@@ -553,6 +570,11 @@ impl Agent {
         let mut content = Vec::new();
         if !text.is_empty() {
             content.push(Content::Text { text });
+        }
+        for (media_type, bytes) in audio {
+            content.push(Content::Audio {
+                media: crate::types::Media::bytes(media_type, bytes),
+            });
         }
         let mut ordered: Vec<_> = calls.into_iter().collect();
         ordered.sort_by_key(|(index, _)| *index);

@@ -58,7 +58,11 @@ interface hooks {
 interface events {
     /// One model event, JSON-serialized using tau's model-event wire shape:
     /// {"kind":"text-delta","text":"..."}
-    /// {"kind":"tool-call-delta","index":0,"id":"...","name":"...","arguments-delta":"..."}
+    /// {"kind":"audio-delta","data":"<base64>","media_type":"audio/pcm;rate=24000"}
+    ///   (realtime-style audio; chunks of one segment share a media type and
+    ///    concatenate in order — the host assembles them into the assistant
+    ///    message as an audio content block)
+    /// {"kind":"tool-call-delta","index":0,"id":"...","name":"...","arguments_delta":"..."}
     /// {"kind":"done","stop":"stop|tool-use|length|error|aborted"}
     /// {"kind":"error","message":"..."}
     emit: func(event-json: string);

@@ -46,6 +46,22 @@ impl Guest for Echo {
             .flatten();
 
         match last_user_text {
+            // "audio …" demos the realtime-style channel: two audio
+            // chunks then a text note.
+            Some(text) if text.starts_with("audio") => {
+                for data in ["AQID", "BAU="] {
+                    emit(&serde_json::json!({
+                        "kind": "audio-delta",
+                        "data": data,
+                        "media_type": "audio/pcm;rate=24000",
+                    }));
+                }
+                emit(&serde_json::json!({
+                    "kind": "text-delta",
+                    "text": "(two audio chunks emitted)",
+                }));
+                emit(&serde_json::json!({ "kind": "done", "stop": "stop" }));
+            }
             Some(text) => {
                 for word in text.split_inclusive(' ') {
                     emit(&serde_json::json!({

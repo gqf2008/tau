@@ -157,6 +157,71 @@ mod tests {
     use super::*;
 
     #[tokio::test]
+    async fn audio_deltas_assemble_into_content_blocks() {
+        use crate::model::StopReason;
+        use crate::types::{Content, MediaSource};
+        // Two chunks of pcm, then one of opus: two blocks, the pcm pair
+        // concatenated. Plus text, to check block order.
+        let model = FauxModel::scripted(vec![vec![
+            ModelEvent::TextDelta { text: "listen. ".into() },
+            ModelEvent::AudioDelta {
+                data: vec![1, 2],
+                media_type: "audio/pcm".into(),
+            },
+            ModelEvent::AudioDelta {
+                data: vec![3],
+                media_type: "audio/pcm".into(),
+            },
+            ModelEvent::AudioDelta {
+                data: vec![9, 9],
+                media_type: "audio/opus".into(),
+            },
+            ModelEvent::Done {
+                stop: StopReason::Stop,
+            },
+        ]]);
+        let agent = crate::Agent::new(Box::new(model), crate::ToolRegistry::new());
+        let produced = agent
+            .run(&[], crate::Message::user("play something"))
+            .await
+            .unwrap();
+        let assistant = produced
+            .iter()
+            .find(|m| m.role == crate::types::Role::Assistant)
+            .expect("assistant message");
+        assert!(matches!(&assistant.content[0], Content::Text { text } if text == "listen. "));
+        match &assistant.content[1] {
+            Content::Audio { media } => {
+                assert_eq!(media.media_type, "audio/pcm");
+                assert!(matches!(&media.source, MediaSource::Bytes(b) if b == &vec![1, 2, 3]));
+            }
+            other => panic!("expected audio, got {other:?}"),
+        }
+        match &assistant.content[2] {
+            Content::Audio { media } => {
+                assert_eq!(media.media_type, "audio/opus");
+                assert!(matches!(&media.source, MediaSource::Bytes(b) if b == &vec![9, 9]));
+            }
+            other => panic!("expected audio, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn audio_delta_wire_round_trip_is_base64() {
+        // The events.emit JSON channel carries base64, not a byte array.
+        let event = ModelEvent::AudioDelta {
+            data: vec![1, 2, 3],
+            media_type: "audio/pcm".into(),
+        };
+        let json = serde_json::to_string(&event).unwrap();
+        assert!(json.contains(r#""kind":"audio-delta""#), "{json}");
+        assert!(json.contains(r#""data":"AQID""#), "{json}");
+        assert!(json.contains(r#""media_type":"audio/pcm""#), "{json}");
+        let back: ModelEvent = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, event);
+    }
+
+    #[tokio::test]
     async fn demo_calls_the_first_tool_then_answers() {
         use crate::model::StopReason;
         use crate::tool::ToolDef;

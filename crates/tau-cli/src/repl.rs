@@ -129,6 +129,9 @@ pub(crate) async fn drive(
                         None => continue,
                     }
                 }
+                Ok(AgentEvent::AudioDelta { bytes, media_type }) => {
+                    format!("[tau] audio Δ {bytes} bytes ({media_type})")
+                }
                 Ok(AgentEvent::ToolCallStart { name, .. }) => format!("[tau] tool → {name}"),
                 Ok(AgentEvent::ToolCallEnd { name, is_error, .. }) => {
                     format!("[tau] tool ← {name}{}", if is_error { " (error)" } else { "" })

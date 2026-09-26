@@ -31,8 +31,12 @@ Subscribers cannot wedge the harness: the bus is bounded
 2. Anything that changes execution must be a probe, not an event — events
    are facts, probes are decisions. If an extension needs to veto, it
    registers a probe at the matching point.
-3. High-volume points (text deltas, tool progress) are events only; probes
-   on those paths would put wasm round-trips between the model and the user.
+3. High-volume points (text deltas, audio deltas, tool progress) are events
+   only; probes on those paths would put wasm round-trips between the model
+   and the user. Realtime-style audio streams in as `audio-delta` model
+   events (base64 on the wire, bytes in memory); the loop assembles
+   same-media-type runs into `Content::Audio` blocks on the assistant
+   message, and observers see byte counts, never the payload.
 4. Commands (steer, follow-up, abort) arrive on the **control channel**
    (`tau_core::control`) — same event-driven shape, opposite direction:
    an unbounded mpsc the loop drains at checkpoints (stream events, turn
