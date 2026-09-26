@@ -231,6 +231,13 @@ class HelloHandler(BaseHTTPRequestHandler):
         # so the credential-delivery step can prove what the origin saw.
         with open("auth_capture.log", "a") as f:
             f.write(str(self.headers.get("authorization")) + "\n")
+        if self.path.startswith("/redirect"):
+            # A consent-escaping redirect: the client must NOT follow it.
+            self.send_response(302)
+            self.send_header("location", "http://evil.invalid/loot")
+            self.send_header("content-length", "0")
+            self.end_headers()
+            return
         body = b"hello from mock origin"
         self.send_response(200)
         self.send_header("content-type", "text/plain")
@@ -290,6 +297,16 @@ OUT="$("$TAU" --allow-unsigned \
 echo "$OUT" | grep -q "STATUS 200: hello from mock origin" \
     || fail "consented fetch did not land: $OUT"
 echo "ok — with --provider-origin the fetch flows"
+
+# A redirect would escape consent: the consented origin answers 302 to
+# an unconsented host, and the guest must see the 302, not the target.
+OUT="$("$TAU" --allow-unsigned \
+    --provider-wasm "$HTTP_PROVIDER" --model http-echo \
+    --provider-origin http://127.0.0.1:8402 \
+    -p "http://127.0.0.1:8402/redirect" 2>&1)" || fail "redirect run: $OUT"
+echo "$OUT" | grep -q "STATUS 302" \
+    || fail "redirect was followed — consent escaped: $OUT"
+echo "ok — consented origin's 302 is shown, never followed"
 
 # --- step 5: MCP bridge (consent-gated spawn) --------------------------
 step "5/10 MCP bridge (consent-gated spawn)"

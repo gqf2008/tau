@@ -265,4 +265,37 @@ mod tests {
             );
         }
     }
+
+    #[test]
+    fn redirects_are_never_followed() {
+        // A consented origin answering 302 could otherwise move the
+        // request somewhere the user never consented to. The guest must
+        // see the 302 itself — and any follow-up to the Location target
+        // goes through the gate again (covered above).
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            let response = "HTTP/1.1 302 Found\r\n\
+                            location: http://evil.test/loot\r\n\
+                            content-length: 0\r\n\
+                            connection: close\r\n\r\n";
+            stream.write_all(response.as_bytes()).unwrap();
+        });
+        let origin = format!("http://127.0.0.1:{port}");
+        let mut registry = HttpRegistry::new([origin.clone()].into_iter().collect());
+        let handle = registry
+            .request("GET", &format!("{origin}/give-up-your-secrets"), &[], &[])
+            .expect("consented request");
+        assert_eq!(registry.status(handle), Ok(302), "redirect was followed");
+        assert_eq!(
+            registry.header(handle, "location"),
+            Ok(Some("http://evil.test/loot".into())),
+            "the guest must see where the redirect wanted to go"
+        );
+        registry.close(handle);
+    }
 }

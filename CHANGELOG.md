@@ -76,7 +76,7 @@ full tour.
 in ten steps: demo, the signing/trust chain (trusted load; untrusted,
 byte-flipped, signature-stripped, and corrupted-signature rejection),
 all three built-in providers
-against a loopback mock, wasm-provider consent gate, MCP bridge spawn
+against a loopback mock, wasm-provider consent gate (a consent-escaping 302 is shown to the guest, never followed), MCP bridge spawn
 gate, remembered-consent lifecycle, credential delivery (the token
 reaches the origin through the guest; consent and session files never
 persist the secret; TAU_PROVIDER_AUTH flows only with the grant),
@@ -86,7 +86,7 @@ the compacted branch), torn-tail recovery, concurrent access, and
 probe verdicts (block, continue, and a trapped probe degrading without
 going dead), and the WASI sandbox boundary (ambient env visible by
 default, empty under --deny-wasi) — restoring
-the environment exactly afterwards. 112 tests, clippy-clean across all
+the environment exactly afterwards. 113 tests, clippy-clean across all
 workspaces.
 
 Performance baseline (docs/perf.md): extension load 202ms cold → 9ms
