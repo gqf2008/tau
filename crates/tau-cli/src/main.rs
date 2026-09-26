@@ -304,6 +304,7 @@ async fn run_sub(sub: Sub) -> Result<()> {
             let path = session.unwrap_or_else(|| PathBuf::from(".tau/session.jsonl"));
             let store = tau_core::session::JsonlStore::open(&path)
                 .with_context(|| format!("opening {}", path.display()))?;
+            warn_torn_tail(&store);
             let head = store.head().map(|h| h.id.clone());
             let depths = entry_depths(store.entries());
             for (index, entry) in store.entries().iter().enumerate() {
@@ -715,6 +716,7 @@ async fn main() -> Result<()> {
     let mut store = JsonlStore::open(&cli.session)
         .with_context(|| format!("opening {}", cli.session.display()))?
         .with_blobs(tau_core::BlobStore::new(tau_core::BlobStore::default_dir()));
+    warn_torn_tail(&store);
     let mut history = if cli.r#continue {
         match store.head() {
             Some(head) => store.active_branch(&head.id)?,
@@ -859,6 +861,16 @@ async fn main() -> Result<()> {
 /// earlier in the vec than its children: depth(entry) = depth(parent)+1
 /// is O(n). Walking the parent chain per entry is O(n^2) and hung
 /// `tau tree` for ~21s on a 20k chain.
+/// Surface a discarded crash-torn tail once, where the user can see it.
+fn warn_torn_tail(store: &JsonlStore) {
+    if let Some(torn) = store.torn_tail() {
+        eprintln!(
+            "[tau] discarded a torn tail at line {} ({} bytes) — likely a crash mid-append; continuing from the last intact entry",
+            torn.line, torn.discarded_bytes
+        );
+    }
+}
+
 fn entry_depths(entries: &[SessionEntry]) -> Vec<usize> {
     let mut by_id: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     entries

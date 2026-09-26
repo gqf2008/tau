@@ -14,7 +14,10 @@ the extension unit instead of in-process scripts.
 - **Session as a tree**: append-only JSONL, entries with id + parent;
   the active branch supplies model history; fork by continuing from any
   earlier entry (`/fork`, `--continue-from`, `tau tree`). Compaction
-  condenses the branch into a summary entry; originals stay.
+  condenses the branch into a summary entry; originals stay. A crash
+  mid-append leaves a torn tail that is discarded with a warning —
+  never a bricked session — while real corruption refuses with a named
+  line.
 - **Agent loop**: prompt → model stream → tool calls → results →
   repeat. Mid-run steering (`!text`) and queued follow-ups; Ctrl-C
   aborts through the control channel.
@@ -65,9 +68,10 @@ all three built-in providers
 against a loopback mock, wasm-provider consent gate, MCP bridge spawn
 gate, remembered-consent lifecycle, OCI push/pull/trust onboarding,
 blob GC, compaction (summary entry; originals stay; follow-ups run on
-the compacted branch), and probe verdicts (block, continue, and a
-trapped probe degrading without going dead) — restoring the environment exactly
-afterwards. 100 tests, clippy-clean across all workspaces.
+the compacted branch), torn-tail recovery, and probe verdicts (block,
+continue, and a trapped probe degrading without going dead) — restoring
+the environment exactly afterwards. 103 tests, clippy-clean across all
+workspaces.
 
 Performance baseline (docs/perf.md): extension load 202ms cold → 9ms
 warm (wasmtime compile cache); 10k-entry session opens in 66ms.

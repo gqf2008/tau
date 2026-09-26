@@ -454,6 +454,35 @@ echo "$TREE" | grep -q "after compact" \
     || fail "follow-up did not land on the compacted branch: $TREE"
 echo "ok — follow-up runs on the compacted branch"
 
+# --- step 9b: torn-tail recovery ------------------------------------------
+step "9b/10 torn-tail recovery (a crash mid-append must not brick the session)"
+# session.jsonl from step 9 is intact; tear its tail the way a crash
+# mid-append leaves it: a partial JSON line, no trailing newline.
+printf '{"id":"torn","parent":null,"kind":{"me' >> session.jsonl
+OUT="$("$TAU" tree --session session.jsonl 2>&1)" || fail "torn tail bricked the session: $OUT"
+echo "$OUT" | grep -q "discarded a torn tail at line" \
+    || fail "no recovery warning: $OUT"
+echo "$OUT" | grep -q "first exchange" \
+    || fail "intact entries lost to the tear: $OUT"
+if grep -q '"id":"torn"' session.jsonl; then
+    fail "torn bytes survived recovery — appends would stay corrupt"
+fi
+echo "ok — torn tail discarded with a warning, file truncated clean"
+
+# A bad line with GOOD lines after it is real corruption: refuse loudly,
+# never truncate.
+cp session.jsonl middle.jsonl
+sed -i '2i not json at all' middle.jsonl
+if "$TAU" tree --session middle.jsonl > /dev/null 2>&1; then
+    fail "middle-corrupt session loaded"
+fi
+OUT="$("$TAU" tree --session middle.jsonl 2>&1 || true)"
+echo "$OUT" | grep -q "corrupt session file .* line 2" \
+    || fail "corruption error does not name the line: $OUT"
+grep -q "not json at all" middle.jsonl \
+    || fail "refused file was truncated — forensics destroyed"
+echo "ok — middle corruption refuses with a named line, file untouched"
+
 # --- step 10: probe verdicts ---------------------------------------------
 step "10/10 probe verdicts (before_tool block reaches the model)"
 OUT="$("$TAU" --allow-unsigned -e "$UPPER" -e "$GUARD" \

@@ -6,8 +6,8 @@
 //! entries are never rewritten or deleted.
 
 use std::collections::HashMap;
-use std::fs::{File, OpenOptions};
-use std::io::{BufRead, BufReader, Write};
+use std::fs::OpenOptions;
+use std::io::Write;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -79,27 +79,85 @@ pub struct JsonlStore {
     entries: Vec<SessionEntry>,
     by_id: HashMap<String, usize>,
     blobs: Option<crate::blobs::BlobStore>,
+    torn_tail: Option<TornTail>,
+}
+
+/// What [`JsonlStore::open`] discarded from a crash-torn tail.
+#[derive(Debug, Clone)]
+pub struct TornTail {
+    /// 1-based physical line number of the first discarded line.
+    pub line: usize,
+    /// Bytes discarded from the end of the file.
+    pub discarded_bytes: usize,
 }
 
 impl JsonlStore {
     /// Open (or create) a session file, parsing every entry into memory.
+    ///
+    /// A crash between starting and finishing an append leaves a torn
+    /// tail: an unparseable line with nothing parseable after it. That
+    /// tail is discarded (the file is truncated to the last intact line,
+    /// so appends land cleanly and the warning does not repeat) and
+    /// reported via [`JsonlStore::torn_tail`] — instead of bricking every
+    /// intact entry before it. A bad line with GOOD lines after it is
+    /// real corruption, not a tear: the file fails with
+    /// [`SessionError::Corrupt`]. So does a file whose first line is bad —
+    /// recovering there would silently empty a file tau was pointed at by
+    /// mistake.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, SessionError> {
         let path = path.as_ref().to_path_buf();
         let mut entries = Vec::new();
+        let mut torn_tail = None;
         if path.exists() {
-            let file = File::open(&path)?;
-            for (i, line) in BufReader::new(file).lines().enumerate() {
-                let line = line?;
-                if line.trim().is_empty() {
-                    continue;
+            let bytes = std::fs::read(&path)?;
+            // Non-empty physical lines as (byte offset, 1-based line
+            // number, bytes). Byte-level splitting tolerates a tear that
+            // cut a multi-byte UTF-8 char.
+            let mut segments: Vec<(usize, usize, &[u8])> = Vec::new();
+            let mut offset = 0usize;
+            for (n, segment) in bytes.split(|b| *b == b'\n').enumerate() {
+                let start = offset;
+                offset += segment.len() + 1;
+                let line = segment.strip_suffix(b"\r").unwrap_or(segment);
+                if !line.trim_ascii().is_empty() {
+                    segments.push((start, n + 1, line));
                 }
-                let entry: SessionEntry =
-                    serde_json::from_str(&line).map_err(|e| SessionError::Corrupt {
+            }
+            let mut first_bad: Option<usize> = None; // index into segments
+            for (i, (_, _, line)) in segments.iter().enumerate() {
+                match serde_json::from_slice::<SessionEntry>(line) {
+                    Ok(entry) => entries.push(entry),
+                    Err(_) => {
+                        first_bad = Some(i);
+                        break;
+                    }
+                }
+            }
+            if let Some(i) = first_bad {
+                let (bad_offset, bad_line_no, _) = segments[i];
+                let recoverable = !entries.is_empty()
+                    && segments[i + 1..]
+                        .iter()
+                        .all(|(_, _, line)| serde_json::from_slice::<SessionEntry>(line).is_err());
+                if recoverable {
+                    let file = std::fs::OpenOptions::new().write(true).open(&path)?;
+                    file.set_len(bad_offset as u64)?;
+                    torn_tail = Some(TornTail {
+                        line: bad_line_no,
+                        discarded_bytes: bytes.len() - bad_offset,
+                    });
+                } else {
+                    let (_, line_no, line) = segments[i];
+                    let reason = serde_json::from_slice::<SessionEntry>(line)
+                        .err()
+                        .map(|e| e.to_string())
+                        .unwrap_or_default();
+                    return Err(SessionError::Corrupt {
                         path: path.clone(),
-                        line: i + 1,
-                        reason: e.to_string(),
-                    })?;
-                entries.push(entry);
+                        line: line_no,
+                        reason,
+                    });
+                }
             }
         }
         let by_id = entries
@@ -112,7 +170,13 @@ impl JsonlStore {
             entries,
             by_id,
             blobs: None,
+            torn_tail,
         })
+    }
+
+    /// The torn tail [`JsonlStore::open`] discarded, if any.
+    pub fn torn_tail(&self) -> Option<&TornTail> {
+        self.torn_tail.as_ref()
     }
 
     /// Attach a blob store: large media is externalized to
@@ -566,6 +630,85 @@ mod tests {
         let mut store = JsonlStore::open(&path).unwrap();
         let err = store.append(entry("x", Some("missing"), "hi")).unwrap_err();
         assert!(matches!(err, SessionError::NotFound(_)));
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn torn_tail_is_discarded_and_the_file_truncated() {
+        let path = temp_path("torn.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let mut store = JsonlStore::open(&path).unwrap();
+        store.append(entry("a", None, "first")).unwrap();
+        store.append(entry("b", Some("a"), "second")).unwrap();
+        drop(store);
+
+        // A crash mid-append: a partial JSON line, no trailing newline.
+        let mut file = OpenOptions::new().append(true).open(&path).unwrap();
+        file.write_all(b"{\"id\":\"torn\",\"parent\":\"a\",\"kind\":{\"me")
+            .unwrap();
+        drop(file);
+
+        let mut store = JsonlStore::open(&path).unwrap();
+        assert_eq!(store.entries().len(), 2, "intact entries survive");
+        let torn = store.torn_tail().expect("the tear is reported");
+        assert_eq!(torn.line, 3);
+        assert!(torn.discarded_bytes > 0);
+
+        // The garbage is gone from disk: appends land cleanly, the next
+        // open reports nothing.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        assert!(!raw.contains("torn"), "torn bytes truncated: {raw}");
+        store.append(entry("c", Some("b"), "third")).unwrap();
+        let store = JsonlStore::open(&path).unwrap();
+        assert_eq!(store.entries().len(), 3);
+        assert!(store.torn_tail().is_none());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn middle_corruption_is_an_error_not_a_tear() {
+        let path = temp_path("middle-corrupt.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let mut store = JsonlStore::open(&path).unwrap();
+        store.append(entry("a", None, "first")).unwrap();
+        store.append(entry("b", Some("a"), "second")).unwrap();
+        drop(store);
+
+        // A bad line with GOOD lines after it is real corruption:
+        // refuse, and leave the file untouched for forensics.
+        let raw = std::fs::read_to_string(&path).unwrap();
+        let mut lines: Vec<&str> = raw.lines().collect();
+        lines.insert(1, "not json at all");
+        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
+        let before = std::fs::read(&path).unwrap();
+
+        let err = JsonlStore::open(&path)
+            .err()
+            .expect("corrupt session refuses");
+        assert!(
+            matches!(err, SessionError::Corrupt { line: 2, .. }),
+            "got: {err}"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), before, "file untouched");
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn corrupt_first_line_is_an_error_never_a_truncation() {
+        // Recovering an all-bad file would silently empty whatever file
+        // tau was pointed at by mistake. Refuse instead.
+        let path = temp_path("all-bad.jsonl");
+        std::fs::write(&path, b"definitely not a session\n").unwrap();
+        let err = JsonlStore::open(&path).err().expect("all-bad file refuses");
+        assert!(
+            matches!(err, SessionError::Corrupt { line: 1, .. }),
+            "got: {err}"
+        );
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"definitely not a session\n",
+            "a refused file is never truncated"
+        );
         let _ = std::fs::remove_file(&path);
     }
 }
