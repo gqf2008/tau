@@ -186,6 +186,31 @@ pub struct ExtensionHost {
     wasi: WasiPolicy,
 }
 
+/// Engine with the module compile cache enabled when it initializes:
+/// components load from precompiled machine code on every run after the
+/// first instead of recompiling. Best-effort — a cache that fails to
+/// initialize (read-only config dir, exotic filesystem) just disables
+/// itself; loads still work, only slower.
+fn engine() -> Engine {
+    let mut config = Config::new();
+    let dir = compile_cache_dir();
+    if std::fs::create_dir_all(&dir).is_ok() {
+        let mut cache_config = wasmtime::CacheConfig::new();
+        cache_config.with_directory(dir);
+        if let Ok(cache) = wasmtime::Cache::new(cache_config) {
+            config.cache(Some(cache));
+        }
+    }
+    Engine::new(&config).expect("wasmtime engine")
+}
+
+/// Where the module compile cache lives (`~/.tau/cache/wasmtime`).
+/// Public so tests and operators can assert the cache is actually
+/// populating — a silently-disabled cache is a silent perf loss.
+pub fn compile_cache_dir() -> std::path::PathBuf {
+    sign::config_dir().join("cache").join("wasmtime")
+}
+
 impl Default for ExtensionHost {
     fn default() -> Self {
         Self::new()
@@ -201,7 +226,7 @@ impl ExtensionHost {
 
     pub fn with_policy(policy: sign::TrustPolicy) -> Self {
         Self {
-            engine: Engine::new(&Config::new()).expect("wasmtime engine"),
+            engine: engine(),
             policy,
             wasi: WasiPolicy::default(),
         }

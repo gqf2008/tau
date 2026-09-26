@@ -442,6 +442,49 @@ mod tests {
     }
 
     #[test]
+    fn open_parses_large_sessions_quickly() {
+        // 10k entries; the generous bound guards pathological (e.g.
+        // quadratic) regressions, not micro-perf. The actual time is
+        // printed for docs/perf.md.
+        let dir = std::env::temp_dir().join(format!(
+            "tau-test-perf-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("big.jsonl");
+        {
+            let mut store = JsonlStore::open(&path).unwrap();
+            let mut parent = None;
+            for i in 0..10_000 {
+                let entry = SessionEntry {
+                    id: new_id(),
+                    parent,
+                    kind: EntryKind::Message {
+                        message: Message::user(format!("message number {i}")),
+                    },
+                };
+                parent = Some(entry.id.clone());
+                store.append(entry).unwrap();
+            }
+        }
+        let start = std::time::Instant::now();
+        let store = JsonlStore::open(&path).unwrap();
+        let elapsed = start.elapsed();
+        let head = store.head().unwrap().id.clone();
+        assert_eq!(store.active_branch(&head).unwrap().len(), 10_000);
+        eprintln!("open 10k-entry session: {elapsed:?}");
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "session open regressed pathologically: {elapsed:?}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn append_rejects_unknown_parent() {
         let path = temp_path("orphan.jsonl");
         let _ = std::fs::remove_file(&path);

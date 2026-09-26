@@ -22,5 +22,5 @@ sha2 = "0.10"
 base64 = "0.23"
 rand = "0.8"
 dirs = "6"
-wasmtime = "49.0.1"
+wasmtime = { version = "49.0.1", features = ["cache"] }
 wasmtime-wasi = "49.0.1"
