@@ -208,7 +208,12 @@ pub(crate) async fn drive(
                         }
                         let control = agent.control();
                         if let Some(steer) = text.strip_prefix('!') {
-                            let _ = control.send(Control::Steer(Message::user(steer.trim())));
+                            let steer = steer.trim();
+                            if steer.is_empty() {
+                                print("!text steers — `!` alone sends nothing");
+                            } else {
+                                let _ = control.send(Control::Steer(Message::user(steer)));
+                            }
                         } else {
                             let _ = control.send(Control::FollowUp(Message::user(text)));
                         }
@@ -217,7 +222,7 @@ pub(crate) async fn drive(
                     match text {
                         "/quit" | "/exit" => break,
                         "/help" => {
-                            print("commands: /help /compact /fork [id-prefix] /quit /exit");
+                            print("commands: /help /compact /fork [#index|id-prefix] /quit /exit");
                             print("  !<text> while running: steer; plain text while running: follow-up");
                             continue;
                         }
@@ -248,8 +253,12 @@ pub(crate) async fn drive(
                         _ if text == "/fork" || text.starts_with("/fork ") => {
                             let arg = text.strip_prefix("/fork").unwrap().trim();
                             if arg.is_empty() {
-                                print("recent entries (fork target = #index or id prefix):");
                                 let entries = store.entries();
+                                if entries.is_empty() {
+                                    print("(empty session — nothing to fork yet)");
+                                    continue;
+                                }
+                                print("recent entries (fork target = #index or id prefix):");
                                 let start = entries.len().saturating_sub(8);
                                 for (index, entry) in entries.iter().enumerate().skip(start) {
                                     let here = if Some(&entry.id) == parent.as_ref() {
@@ -265,7 +274,10 @@ pub(crate) async fn drive(
                                 }
                                 continue;
                             }
-                            match agent.navigate(&store, arg).await {
+                            // The listing prints #index targets; bare
+                            // indexes keep working too.
+                            let target = arg.strip_prefix('#').unwrap_or(arg);
+                            match agent.navigate(&store, target).await {
                                 Ok((id, branch)) => {
                                     let summary = store
                                         .get(&id)
@@ -315,7 +327,19 @@ pub(crate) async fn drive(
             }
             result = done_rx.recv(), if running => {
                 running = false;
-                let produced = result.context("run channel closed")??;
+                let produced = match result {
+                    Some(Ok(produced)) => produced,
+                    // A failed run (model error, vetoed run) produced
+                    // nothing — history and parent stand; the session
+                    // must survive a flaky provider.
+                    Some(Err(e)) => {
+                        print(&format!(
+                            "[tau] run failed: {e} — session intact, keep going"
+                        ));
+                        continue;
+                    }
+                    None => return Err(anyhow::anyhow!("run channel closed")),
+                };
                 for message in produced {
                     let entry = tau_core::SessionEntry {
                         id: tau_core::session::new_id(),
@@ -616,5 +640,98 @@ mod tests {
         let text = capture.text();
         assert!(text.contains("commands:"), "output: {text}");
         assert!(text.contains("unknown command /bogus"), "output: {text}");
+    }
+
+    /// Poll until `needle` shows up in the captured output.
+    async fn wait_for(capture: &Capture, needle: &str) {
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            loop {
+                if capture.text().contains(needle) {
+                    break;
+                }
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("output gains {needle:?}: {}", capture.text()));
+    }
+
+    #[tokio::test]
+    async fn run_failure_keeps_the_repl_alive() {
+        let (_dir, store) = store();
+        // First turn errors (flaky provider), second answers.
+        let model = FauxModel::scripted(vec![
+            vec![
+                ModelEvent::Error {
+                    message: "boom".into(),
+                },
+                ModelEvent::Done {
+                    stop: StopReason::Error,
+                },
+            ],
+            vec![
+                ModelEvent::TextDelta {
+                    text: "recovered".into(),
+                },
+                ModelEvent::Done {
+                    stop: StopReason::Stop,
+                },
+            ],
+        ]);
+        let agent = Arc::new(Agent::new(Box::new(model), ToolRegistry::new()));
+        let capture = Arc::new(Capture {
+            lines: Mutex::new(Vec::new()),
+            ready: Notify::new(),
+        });
+        let (tx, rx) = unbounded_channel();
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer()));
+        tx.send(LineEvent::Line("hi".into())).unwrap();
+        wait_for(&capture, "run failed: model error: boom").await;
+        // The loop survived: the next prompt runs and completes.
+        tx.send(LineEvent::Line("again".into())).unwrap();
+        wait_for(&capture, "[tau] ready").await;
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        // The failed turn produced nothing; the session holds only the
+        // successful exchange.
+        let store = JsonlStore::open(_dir.path().join("session.jsonl")).unwrap();
+        let branch: Vec<String> = store
+            .active_branch(&store.head().unwrap().id)
+            .unwrap()
+            .iter()
+            .map(|m| m.text())
+            .collect();
+        assert_eq!(branch, vec!["again", "recovered"]);
+    }
+
+    #[tokio::test]
+    async fn fork_accepts_the_hash_index_form_it_lists() {
+        let (_dir, store) = store();
+        let agent = Arc::new(Agent::new(Box::new(StaticModel), ToolRegistry::new()));
+        let capture = Arc::new(Capture {
+            lines: Mutex::new(Vec::new()),
+            ready: Notify::new(),
+        });
+        let (tx, rx) = unbounded_channel();
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer()));
+        tx.send(LineEvent::Line("one".into())).unwrap();
+        capture.ready.notified().await;
+        tx.send(LineEvent::Line("two".into())).unwrap();
+        capture.ready.notified().await;
+
+        // The listing prints #index targets; the command must accept them.
+        tx.send(LineEvent::Line("/fork #0".into())).unwrap();
+        wait_for(&capture, "forked at").await;
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        let store = JsonlStore::open(_dir.path().join("session.jsonl")).unwrap();
+        let first = store.entries()[0].id.clone();
+        let text = capture.text();
+        assert!(
+            text.contains(&format!("forked at {}", &first[..12.min(first.len())])),
+            "output: {text}"
+        );
     }
 }
