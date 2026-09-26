@@ -18,6 +18,8 @@ TAU="$ROOT/target/release/tau"
 [ -f "$ROOT/target/release/tau.exe" ] && TAU="$ROOT/target/release/tau.exe"
 WORK="$ROOT/target/validate"
 MOCK_PID=""
+REG_PID=""
+OCI_BLOB=""
 THROWAWAY_FP=""
 
 step() { echo; echo "== $1"; }
@@ -25,6 +27,8 @@ fail() { echo "FAIL: $1" >&2; exit 1; }
 
 cleanup() {
     [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null || true
+    [ -n "$REG_PID" ] && kill "$REG_PID" 2>/dev/null || true
+    [ -n "$OCI_BLOB" ] && rm -f "$HOME/.tau/oci/blobs/$OCI_BLOB"
     cd "$ROOT" # cannot remove the workdir while standing in it (Windows)
     if [ -n "$THROWAWAY_FP" ]; then
         rm -f "$HOME/.tau/keys/$THROWAWAY_FP.key"             "$HOME/.tau/trust/$THROWAWAY_FP.pub"             "$HOME/.tau/trust/$THROWAWAY_FP.pub.aside"             "$HOME/.tau/consent/$THROWAWAY_FP.json"
@@ -52,13 +56,13 @@ mkdir -p "$WORK"
 cd "$WORK"
 
 # --- step 1: demo -----------------------------------------------------
-step "1/6 demo"
+step "1/7 demo"
 OUT="$("$TAU" --demo -p "hello from validation" 2>&1)" || fail "demo exited $?"
 echo "$OUT" | grep -q "tau is alive" || fail "demo answer missing: $OUT"
 echo "ok — faux model answered"
 
 # --- step 2: signing + trust chain ------------------------------------
-step "2/6 signing and trust chain"
+step "2/7 signing and trust chain"
 GEN="$("$TAU" keygen)" || fail "keygen: $GEN"
 THROWAWAY_FP=$(echo "$GEN" | sed -n 's/^key generated and trusted: //p')
 [ -n "$THROWAWAY_FP" ] || fail "no fingerprint in keygen output: $GEN"
@@ -83,7 +87,7 @@ mv "$HOME/.tau/trust/$THROWAWAY_FP.pub.aside" "$HOME/.tau/trust/$THROWAWAY_FP.pu
 echo "ok — untrusted component rejected"
 
 # --- step 3: built-in provider against a loopback SSE mock -------------
-step "3/6 built-in providers (loopback SSE mock)"
+step "3/7 built-in providers (loopback SSE mock)"
 cat > mock.py << 'PYEOF'
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -178,7 +182,7 @@ echo "$OUT" | grep -q "mock anthropic ok" || fail "Anthropic SSE stream did not 
 echo "ok — Anthropic Messages SSE streamed end to end"
 
 # --- step 4: wasm provider consent gate --------------------------------
-step "4/6 wasm provider consent gate"
+step "4/7 wasm provider consent gate"
 if "$TAU" --allow-unsigned \
     --provider-wasm "$HTTP_PROVIDER" --model http-echo \
     -p "http://127.0.0.1:8402/" 2>&1 | grep -q "STATUS 200"; then
@@ -195,7 +199,7 @@ echo "$OUT" | grep -q "STATUS 200: hello from mock origin" \
 echo "ok — with --provider-origin the fetch flows"
 
 # --- step 5: MCP bridge (consent-gated spawn) --------------------------
-step "5/6 MCP bridge (consent-gated spawn)"
+step "5/7 MCP bridge (consent-gated spawn)"
 # Without --mcp-command the bridge has nothing it may spawn: the load
 # must fail, not silently degrade.
 if "$TAU" --allow-unsigned --mcp-bridge "$MCP_BRIDGE" --demo -p hi > /dev/null 2>&1; then
@@ -215,7 +219,7 @@ echo "$OUT" | grep -q "tool ← echo: bridge validation ok" \
 echo "ok — consent-gated spawn served the echo tool through the MCP bridge"
 
 # --- step 6: remembered consent lifecycle ------------------------------
-step "6/6 remembered consent (--remember / --list / --revoke)"
+step "6/7 remembered consent (--remember / --list / --revoke)"
 # Consent is keyed by signing fingerprint, so the provider copy is
 # signed with the throwaway key — the real trust store and any real
 # consent records stay untouched.
@@ -249,4 +253,43 @@ if "$TAU" --provider-wasm prov.wasm --model http-echo \
 fi
 echo "ok — revoked grant is gone and the gate closes again"
 
-step "ALL SIX STEPS PASSED — the release candidate stands"
+# --- step 7: OCI distribution ------------------------------------------
+step "7/7 OCI distribution (push / pull / trust onboarding)"
+# ext.wasm from step 2 is signed with the throwaway key: signature and
+# trust must apply to pulled bytes unchanged.
+OCI_REF="oci://127.0.0.1:8403/test/component:v1"
+python "$ROOT/crates/tau-ext/tests/mock_oci_registry.py" 8403 ext.wasm > reg.log 2>&1 &
+REG_PID=$!
+for _ in $(seq 1 20); do
+    curl -sf http://127.0.0.1:8403/v2/test/component/manifests/latest \
+        -H "accept: application/vnd.oci.image.manifest.v1+json" > /dev/null 2>&1 && break
+    sleep 0.5
+done
+curl -sf http://127.0.0.1:8403/v2/test/component/manifests/latest \
+    -H "accept: application/vnd.oci.image.manifest.v1+json" > /dev/null \
+    || fail "mock OCI registry did not start: $(cat reg.log)"
+
+OUT="$("$TAU" push ext.wasm "$OCI_REF" 2>&1)" || fail "push: $OUT"
+DIGEST=$(echo "$OUT" | sed -n 's/^pushed .*(\(sha256:[0-9a-f]*\)).*/\1/p')
+[ -n "$DIGEST" ] || fail "no digest in push output: $OUT"
+OCI_BLOB=$(echo "$DIGEST" | tr ':' '_')
+echo "ok — pushed ($DIGEST)"
+
+OUT="$("$TAU" -e "$OCI_REF" --demo -p "shout oci" 2>&1)" || fail "pull+load: $OUT"
+echo "$OUT" | grep -q "tool ← upper: SHOUT OCI" \
+    || fail "pulled component did not close the loop: $OUT"
+[ -f "$HOME/.tau/oci/blobs/$OCI_BLOB" ] || fail "pull did not populate the cache"
+echo "ok — pulled, digest-cached, and the trusted signature loads"
+
+# Trust onboarding from the component itself: set the verified key
+# aside, onboard it back from the pulled bytes.
+mv "$HOME/.tau/trust/$THROWAWAY_FP.pub" "$HOME/.tau/trust/$THROWAWAY_FP.pub.aside"
+OUT="$("$TAU" trust --from-component "$OCI_REF" 2>&1)" \
+    || { mv "$HOME/.tau/trust/$THROWAWAY_FP.pub.aside" "$HOME/.tau/trust/$THROWAWAY_FP.pub"; fail "trust --from-component: $OUT"; }
+echo "$OUT" | grep -q "$THROWAWAY_FP" \
+    || fail "onboarding did not print the fingerprint: $OUT"
+[ -f "$HOME/.tau/trust/$THROWAWAY_FP.pub" ] || fail "onboarding did not trust the key"
+rm -f "$HOME/.tau/trust/$THROWAWAY_FP.pub.aside"
+echo "ok — trust --from-component onboards the verified key from oci://"
+
+step "ALL SEVEN STEPS PASSED — the release candidate stands"
