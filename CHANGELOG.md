@@ -40,7 +40,9 @@ the extension unit instead of in-process scripts.
 - **MCP without MCP in core**: external protocols are translated by
   bridge components over consent-gated spawn/http capabilities; the
   reference bridge speaks stdio + streamable HTTP with protocol-version
-  negotiation.
+  negotiation, and reconnects (respawn + re-handshake) after a
+  mid-session server death instead of erroring on the dead pipe
+  forever.
 
 ### Install & try
 
@@ -62,7 +64,7 @@ against a loopback mock, wasm-provider consent gate, MCP bridge spawn
 gate, remembered-consent lifecycle, OCI push/pull/trust onboarding,
 blob GC, and probe verdicts (block, continue, and a trapped probe
 degrading without going dead) — restoring the environment exactly
-afterwards. 98 tests, clippy-clean across all workspaces.
+afterwards. 99 tests, clippy-clean across all workspaces.
 
 Performance baseline (docs/perf.md): extension load 202ms cold → 9ms
 warm (wasmtime compile cache); 10k-entry session opens in 66ms.

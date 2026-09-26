@@ -242,3 +242,62 @@ fn origin_of_parses_schemes_hosts_ports() {
     assert_eq!(origin_of("ftp://example.com/x"), None);
     assert_eq!(origin_of("not a url"), None);
 }
+
+#[tokio::test]
+async fn bridge_reconnects_after_server_death() {
+    // A server that dies mid-session must not wedge the bridge for the
+    // rest of the process: the call that notices the death errors, and
+    // the next call respawns + re-handshakes instead of writing to a
+    // dead pipe forever.
+    let (Some(path), Some(python)) = (artifact(), python()) else {
+        eprintln!("skipping: mcp_bridge.wasm not built or no python");
+        return;
+    };
+    let server = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/mcp-bridge/mock_server.py")
+        .canonicalize()
+        .expect("mock server exists");
+    let command = vec![
+        python,
+        server.to_string_lossy().into_owned(),
+        "--die-after-call".into(),
+    ];
+
+    let host = ExtensionHost::new();
+    let tools = host
+        .load_bridge(
+            &path,
+            BridgeConsent {
+                command: Some(command),
+                ..BridgeConsent::default()
+            },
+        )
+        .expect("load bridge");
+    let echo = tools
+        .iter()
+        .find(|tool| tool.def().name == "echo")
+        .expect("echo tool registered");
+
+    // The mock exits right after replying to this first call.
+    let out = echo.execute(serde_json::json!({ "text": "one" })).await;
+    assert!(
+        !out.is_error && out.content == "one",
+        "first call must work: {out:?}"
+    );
+
+    // This call meets the dead pipe and must report the error (no
+    // silent retry of a possibly non-idempotent tool).
+    let out = echo.execute(serde_json::json!({ "text": "two" })).await;
+    assert!(
+        out.is_error,
+        "the call that meets the dead server must error, got: {out:?}"
+    );
+
+    // The connection was dropped: a fresh server is spawned and
+    // re-handshaked, and the bridge works again.
+    let out = echo.execute(serde_json::json!({ "text": "three" })).await;
+    assert!(
+        !out.is_error && out.content == "three",
+        "the bridge must reconnect after server death: {out:?}"
+    );
+}

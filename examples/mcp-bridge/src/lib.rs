@@ -85,9 +85,9 @@ impl Tools for McpBridge {
     fn execute(name: String, arguments_json: String) -> ToolResult {
         let arguments = serde_json::from_str::<serde_json::Value>(&arguments_json)
             .unwrap_or_else(|_| serde_json::json!({}));
-        let call = || -> Result<ToolResult, String> {
-            let mut guard = CONNECTION.lock().map_err(|e| e.to_string())?;
-            let conn = connect(&mut guard)?;
+        let call = || -> Result<ToolResult, Failure> {
+            let mut guard = CONNECTION.lock().map_err(|e| Failure::Rpc(e.to_string()))?;
+            let conn = connect(&mut guard).map_err(Failure::Transport)?;
             let result = conn.request(
                 "tools/call",
                 serde_json::json!({ "name": name, "arguments": arguments }),
@@ -113,10 +113,25 @@ impl Tools for McpBridge {
                 is_error: result["isError"].as_bool().unwrap_or(false),
             })
         };
-        call().unwrap_or_else(|e| ToolResult {
-            content: format!("mcp-bridge: {e}"),
-            is_error: true,
-        })
+        match call() {
+            Ok(result) => result,
+            Err(failure) => {
+                if matches!(failure, Failure::Transport(_)) {
+                    // The server is gone; drop the cached connection so
+                    // the next call respawns and re-handshakes instead of
+                    // erroring on the dead pipe for the rest of the
+                    // session. (This call still reports the error — no
+                    // silent retry of a possibly non-idempotent tool.)
+                    if let Ok(mut guard) = CONNECTION.lock() {
+                        *guard = None;
+                    }
+                }
+                ToolResult {
+                    content: format!("mcp-bridge: {}", failure.into_message()),
+                    is_error: true,
+                }
+            }
+        }
     }
 }
 
@@ -153,14 +168,16 @@ fn connect<'a>(
             transport,
             next_id: 0,
         };
-        let init = conn.request(
-            "initialize",
-            serde_json::json!({
-                "protocolVersion": PROTOCOL_VERSION,
-                "capabilities": {},
-                "clientInfo": { "name": "tau-mcp-bridge", "version": env!("CARGO_PKG_VERSION") },
-            }),
-        )?;
+        let init = conn
+            .request(
+                "initialize",
+                serde_json::json!({
+                    "protocolVersion": PROTOCOL_VERSION,
+                    "capabilities": {},
+                    "clientInfo": { "name": "tau-mcp-bridge", "version": env!("CARGO_PKG_VERSION") },
+                }),
+            )
+            .map_err(Failure::into_message)?;
         // Version negotiation: the server picks; if it picked one we do
         // not speak, refuse the connection (spec: disconnect). A server
         // that omits the field is tolerated — older implementations do.
@@ -175,6 +192,24 @@ fn connect<'a>(
         **guard = Some(conn);
     }
     guard.as_mut().ok_or_else(|| "connection lost".to_string())
+}
+
+/// Why a request failed. `Transport` means the connection is dead and
+/// must be rebuilt (the server exited, the pipe broke, HTTP is
+/// unreachable); `Rpc` means the server answered an error and the
+/// connection is fine.
+#[derive(Debug)]
+enum Failure {
+    Transport(String),
+    Rpc(String),
+}
+
+impl Failure {
+    fn into_message(self) -> String {
+        match self {
+            Self::Transport(message) | Self::Rpc(message) => message,
+        }
+    }
 }
 
 impl Connection {
@@ -206,7 +241,7 @@ impl Connection {
         &mut self,
         method: &str,
         params: serde_json::Value,
-    ) -> Result<serde_json::Value, String> {
+    ) -> Result<serde_json::Value, Failure> {
         self.next_id += 1;
         let id = self.next_id;
         let message = serde_json::json!({
@@ -217,16 +252,19 @@ impl Connection {
         });
         let response = match &mut self.transport {
             Transport::Stdio(conn) => {
-                conn.send(&message)?;
-                conn.read_response(id)?
+                conn.send(&message).map_err(Failure::Transport)?;
+                conn.read_response(id).map_err(Failure::Transport)?
             }
-            Transport::Http(conn) => conn.post(&message).and_then(|h| conn.read_response(h, id))?,
+            Transport::Http(conn) => conn
+                .post(&message)
+                .and_then(|h| conn.read_response(h, id))
+                .map_err(Failure::Transport)?,
         };
         if let Some(error) = response.get("error") {
-            return Err(format!(
+            return Err(Failure::Rpc(format!(
                 "{method}: {}",
                 error["message"].as_str().unwrap_or("rpc error")
-            ));
+            )));
         }
         Ok(response["result"].clone())
     }

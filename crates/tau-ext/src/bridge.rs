@@ -14,12 +14,12 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tau_core::tool::{Tool, ToolDef, ToolOutput};
-use wasmtime::Store;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
+use wasmtime::{Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::http::HttpRegistry;
-use crate::{ExtError, ExtensionHost, bridge_bindings};
+use crate::{ExtError, ExtensionHost, WasiPolicy, bridge_bindings};
 
 struct BridgeState {
     ctx: WasiCtx,
@@ -209,7 +209,59 @@ struct BridgeInstance {
     bindings: bridge_bindings::Bridge,
 }
 
-type SharedBridge = Arc<Mutex<BridgeInstance>>;
+/// Everything needed to (re)create a bridge instance. A trapped guest
+/// poisons its instance, so the host re-instantiates after a trap: the
+/// fresh guest respawns its server on first use (its connection cache
+/// starts empty), and dropping the poisoned instance kills its leftover
+/// child processes (ProcessRegistry::drop).
+struct BridgeFactory {
+    engine: Engine,
+    component: Component,
+    linker: Linker<BridgeState>,
+    wasi: WasiPolicy,
+    consent: BridgeConsent,
+}
+
+impl BridgeFactory {
+    fn instantiate(&self) -> Result<BridgeInstance, wasmtime::Error> {
+        let mut ctx = self.wasi.ctx_builder();
+        if let Some(command) = &self.consent.command {
+            let command_json = serde_json::to_string(command).unwrap_or_else(|_| "[]".into());
+            ctx.env("TAU_MCP_COMMAND", &command_json);
+        }
+        if let Some(url) = &self.consent.mcp_url {
+            ctx.env("TAU_MCP_URL", url);
+        }
+        let state = BridgeState {
+            ctx: ctx.build(),
+            table: ResourceTable::new(),
+            processes: ProcessRegistry::default(),
+            http: HttpRegistry::new(self.consent.origins.clone()),
+        };
+        let mut store = Store::new(&self.engine, state);
+        let bindings =
+            bridge_bindings::Bridge::instantiate(&mut store, &self.component, &self.linker)?;
+        Ok(BridgeInstance { store, bindings })
+    }
+}
+
+struct SharedBridgeInstance {
+    instance: BridgeInstance,
+    factory: BridgeFactory,
+}
+
+impl SharedBridgeInstance {
+    /// Drop a poisoned instance and build a fresh one. Best-effort: if
+    /// re-instantiation somehow fails, the poisoned instance stays and
+    /// calls keep surfacing trap errors.
+    fn revive(&mut self) {
+        if let Ok(fresh) = self.factory.instantiate() {
+            self.instance = fresh;
+        }
+    }
+}
+
+type SharedBridge = Arc<Mutex<SharedBridgeInstance>>;
 
 impl ExtensionHost {
     /// Load a bridge component. `consent` carries everything the bridge is
@@ -240,41 +292,33 @@ impl ExtensionHost {
         let mut linker: Linker<BridgeState> = Linker::new(&self.engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         bridge_bindings::Bridge::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
-        let mut ctx = self.wasi.ctx_builder();
-        if let Some(command) = &consent.command {
-            let command_json = serde_json::to_string(command).unwrap_or_else(|_| "[]".into());
-            ctx.env("TAU_MCP_COMMAND", &command_json);
-        }
-        if let Some(url) = &consent.mcp_url {
-            ctx.env("TAU_MCP_URL", url);
-        }
-        let state = BridgeState {
-            ctx: ctx.build(),
-            table: ResourceTable::new(),
-            processes: ProcessRegistry::default(),
-            http: HttpRegistry::new(consent.origins),
+        let factory = BridgeFactory {
+            engine: self.engine.clone(),
+            component,
+            linker,
+            wasi: self.wasi,
+            consent,
         };
-        let mut store = Store::new(&self.engine, state);
-        let bindings = bridge_bindings::Bridge::instantiate(&mut store, &component, &linker)
-            .map_err(|e| ExtError::Load {
-                path: path.display().to_string(),
-                reason: format!(
-                    "bridge instantiation failed: {}",
-                    crate::compact_wasm_error(&e)
-                ),
-            })?;
+        let mut instance = factory.instantiate().map_err(|e| ExtError::Load {
+            path: path.display().to_string(),
+            reason: format!(
+                "bridge instantiation failed: {}",
+                crate::compact_wasm_error(&e)
+            ),
+        })?;
 
         // definitions() performs the protocol handshake (MCP initialize +
         // tools/list); failure here means the server is unusable.
-        let definitions = bindings
+        let definitions = instance
+            .bindings
             .tau_extension_tools()
-            .call_definitions(&mut store)
+            .call_definitions(&mut instance.store)
             .map_err(|e| ExtError::Load {
                 path: path.display().to_string(),
                 reason: format!("bridge handshake failed: {}", crate::compact_wasm_error(&e)),
             })?;
 
-        let shared: SharedBridge = Arc::new(Mutex::new(BridgeInstance { store, bindings }));
+        let shared: SharedBridge = Arc::new(Mutex::new(SharedBridgeInstance { instance, factory }));
         Ok(definitions
             .into_iter()
             .map(|def| {
@@ -310,10 +354,18 @@ impl Tool for BridgeTool {
             let mut guard = shared
                 .lock()
                 .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let BridgeInstance { store, bindings } = &mut *guard;
-            bindings
-                .tau_extension_tools()
-                .call_execute(store, &name, &arguments.to_string())
+            let BridgeInstance { store, bindings } = &mut guard.instance;
+            let result =
+                bindings
+                    .tau_extension_tools()
+                    .call_execute(store, &name, &arguments.to_string());
+            if result.is_err() {
+                // The trap poisoned the guest; rebuild so the next call
+                // reaches a fresh instance (which respawns its server)
+                // instead of trapping forever.
+                guard.revive();
+            }
+            result
         })
         .await;
         match result {

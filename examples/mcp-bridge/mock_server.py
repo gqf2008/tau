@@ -15,6 +15,10 @@ if "--protocol-version" in sys.argv:
     i = sys.argv.index("--protocol-version")
     FORCED_VERSION = sys.argv[i + 1]
 
+# Test hook: --die-after-call makes the server exit right after replying
+# to the first tools/call — the fixture for mid-session server death.
+DIE_AFTER_CALL = "--die-after-call" in sys.argv
+
 TOOLS = [
     {
         "name": "echo",
@@ -89,6 +93,8 @@ def main():
                 )
             else:
                 reply(request_id, error=f"unknown tool: {name}")
+            if DIE_AFTER_CALL:
+                sys.exit(0)
         else:
             if request_id is not None:
                 reply(request_id, error=f"unknown method: {method}")
