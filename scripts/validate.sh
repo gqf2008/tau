@@ -45,29 +45,31 @@ trap cleanup EXIT
 # --- pre-flight -------------------------------------------------------
 step "build release binary + wasm examples"
 cargo build --release -p tau-cli --quiet
-for ex in upper http-provider mcp-bridge; do
+for ex in upper http-provider mcp-bridge guard; do
     cargo build --manifest-path "examples/${ex}/Cargo.toml" \
         --target wasm32-wasip2 --release --quiet
 done
 UPPER="$ROOT/examples/upper/target/wasm32-wasip2/release/upper.wasm"
 HTTP_PROVIDER="$ROOT/examples/http-provider/target/wasm32-wasip2/release/http_provider.wasm"
 MCP_BRIDGE="$ROOT/examples/mcp-bridge/target/wasm32-wasip2/release/mcp_bridge.wasm"
+GUARD="$ROOT/examples/guard/target/wasm32-wasip2/release/guard.wasm"
 [ -f "$UPPER" ] || fail "upper example missing"
 [ -f "$HTTP_PROVIDER" ] || fail "http-provider example missing"
 [ -f "$MCP_BRIDGE" ] || fail "mcp-bridge example missing"
+[ -f "$GUARD" ] || fail "guard example missing"
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
 cd "$WORK"
 
 # --- step 1: demo -----------------------------------------------------
-step "1/8 demo"
+step "1/9 demo"
 OUT="$("$TAU" --demo -p "hello from validation" 2>&1)" || fail "demo exited $?"
 echo "$OUT" | grep -q "tau is alive" || fail "demo answer missing: $OUT"
 echo "ok — faux model answered"
 
 # --- step 2: signing + trust chain ------------------------------------
-step "2/8 signing and trust chain"
+step "2/9 signing and trust chain"
 GEN="$("$TAU" keygen)" || fail "keygen: $GEN"
 THROWAWAY_FP=$(echo "$GEN" | sed -n 's/^key generated and trusted: //p')
 [ -n "$THROWAWAY_FP" ] || fail "no fingerprint in keygen output: $GEN"
@@ -92,7 +94,7 @@ mv "$HOME/.tau/trust/$THROWAWAY_FP.pub.aside" "$HOME/.tau/trust/$THROWAWAY_FP.pu
 echo "ok — untrusted component rejected"
 
 # --- step 3: built-in provider against a loopback SSE mock -------------
-step "3/8 built-in providers (loopback SSE mock)"
+step "3/9 built-in providers (loopback SSE mock)"
 cat > mock.py << 'PYEOF'
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -187,7 +189,7 @@ echo "$OUT" | grep -q "mock anthropic ok" || fail "Anthropic SSE stream did not 
 echo "ok — Anthropic Messages SSE streamed end to end"
 
 # --- step 4: wasm provider consent gate --------------------------------
-step "4/8 wasm provider consent gate"
+step "4/9 wasm provider consent gate"
 if "$TAU" --allow-unsigned \
     --provider-wasm "$HTTP_PROVIDER" --model http-echo \
     -p "http://127.0.0.1:8402/" 2>&1 | grep -q "STATUS 200"; then
@@ -204,7 +206,7 @@ echo "$OUT" | grep -q "STATUS 200: hello from mock origin" \
 echo "ok — with --provider-origin the fetch flows"
 
 # --- step 5: MCP bridge (consent-gated spawn) --------------------------
-step "5/8 MCP bridge (consent-gated spawn)"
+step "5/9 MCP bridge (consent-gated spawn)"
 # Without --mcp-command the bridge has nothing it may spawn: the load
 # must fail, not silently degrade.
 if "$TAU" --allow-unsigned --mcp-bridge "$MCP_BRIDGE" --demo -p hi > /dev/null 2>&1; then
@@ -224,7 +226,7 @@ echo "$OUT" | grep -q "tool ← echo: bridge validation ok" \
 echo "ok — consent-gated spawn served the echo tool through the MCP bridge"
 
 # --- step 6: remembered consent lifecycle ------------------------------
-step "6/8 remembered consent (--remember / --list / --revoke)"
+step "6/9 remembered consent (--remember / --list / --revoke)"
 # Consent is keyed by signing fingerprint, so the provider copy is
 # signed with the throwaway key — the real trust store and any real
 # consent records stay untouched.
@@ -259,7 +261,7 @@ fi
 echo "ok — revoked grant is gone and the gate closes again"
 
 # --- step 7: OCI distribution ------------------------------------------
-step "7/8 OCI distribution (push / pull / trust onboarding)"
+step "7/9 OCI distribution (push / pull / trust onboarding)"
 # ext.wasm from step 2 is signed with the throwaway key: signature and
 # trust must apply to pulled bytes unchanged.
 OCI_REF="oci://127.0.0.1:8403/test/component:v1"
@@ -298,7 +300,7 @@ rm -f "$HOME/.tau/trust/$THROWAWAY_FP.pub.aside"
 echo "ok — trust --from-component onboards the verified key from oci://"
 
 # --- step 8: blob GC ----------------------------------------------------
-step "8/8 blob GC (dry-run reports, --yes deletes, live blobs kept)"
+step "8/9 blob GC (dry-run reports, --yes deletes, live blobs kept)"
 # Seed the real blob store with two blobs only this run could own
 # (random content, unique digests): one referenced by a crafted
 # session, one orphan. A gc bug that eats live blobs would eat real
@@ -346,4 +348,22 @@ echo "ok — --yes frees exactly the orphan; the live blob survives"
 rm -f "$HOME/.tau/blobs/$GC_BLOB"
 GC_BLOB=""
 
-step "ALL EIGHT STEPS PASSED — the release candidate stands"
+# --- step 9: probe verdicts ---------------------------------------------
+step "9/9 probe verdicts (before_tool block reaches the model)"
+OUT="$("$TAU" --allow-unsigned -e "$UPPER" -e "$GUARD" \
+    --demo -p "shout forbidden" 2>&1)" || fail "guard run: $OUT"
+echo "$OUT" | grep -q "probe before_tool: block" \
+    || fail "block verdict not on the decision trail: $OUT"
+echo "$OUT" | grep -q "tool ← upper (error): blocked: the guard said no" \
+    || fail "block reason did not become the tool result: $OUT"
+echo "$OUT" | grep -q "The tool failed: blocked: the guard said no" \
+    || fail "block reason did not reach the model: $OUT"
+echo "ok — block: probe → tool result → the model sees the reason"
+
+OUT="$("$TAU" --allow-unsigned -e "$UPPER" -e "$GUARD" \
+    --demo -p "shout allowed" 2>&1)" || fail "guard pass run: $OUT"
+echo "$OUT" | grep -q "tool ← upper: SHOUT ALLOWED" \
+    || fail "allowed call did not pass through: $OUT"
+echo "ok — continue: clean calls pass untouched"
+
+step "ALL NINE STEPS PASSED — the release candidate stands"

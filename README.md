@@ -108,6 +108,7 @@ and prebuilt (unsigned) example components.
 | `examples/echo-provider` | example wasm provider (push-mode streaming) |
 | `examples/http-provider` | example wasm provider (consent-gated http) |
 | `examples/mcp-bridge` | example MCP bridge (stdio + streamable HTTP) |
+| `examples/guard` | example probe extension (`before_tool` block verdicts) |
 
 ## Interactive mode
 
