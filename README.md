@@ -49,6 +49,11 @@ extensible — but extensions are **wasm components**, not in-process scripts.
 ## Try it
 
 ```bash
+# once 0.1.0 is live on crates.io: cargo install tau-cli --locked
+# from a checkout:
+cargo install --path crates/tau-cli --locked   # provides `tau`
+tau --demo -p "hello"
+# or without installing:
 cargo run -p tau-cli -- --demo -p "hello"
 
 # with a real endpoint:
