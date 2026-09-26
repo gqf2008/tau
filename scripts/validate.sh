@@ -20,6 +20,7 @@ WORK="$ROOT/target/validate"
 MOCK_PID=""
 REG_PID=""
 OCI_BLOB=""
+GC_BLOB=""
 THROWAWAY_FP=""
 
 step() { echo; echo "== $1"; }
@@ -29,6 +30,7 @@ cleanup() {
     [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null || true
     [ -n "$REG_PID" ] && kill "$REG_PID" 2>/dev/null || true
     [ -n "$OCI_BLOB" ] && rm -f "$HOME/.tau/oci/blobs/$OCI_BLOB"
+    [ -n "$GC_BLOB" ] && rm -f "$HOME/.tau/blobs/$GC_BLOB"
     cd "$ROOT" # cannot remove the workdir while standing in it (Windows)
     if [ -n "$THROWAWAY_FP" ]; then
         rm -f "$HOME/.tau/keys/$THROWAWAY_FP.key"             "$HOME/.tau/trust/$THROWAWAY_FP.pub"             "$HOME/.tau/trust/$THROWAWAY_FP.pub.aside"             "$HOME/.tau/consent/$THROWAWAY_FP.json"
@@ -56,13 +58,13 @@ mkdir -p "$WORK"
 cd "$WORK"
 
 # --- step 1: demo -----------------------------------------------------
-step "1/7 demo"
+step "1/8 demo"
 OUT="$("$TAU" --demo -p "hello from validation" 2>&1)" || fail "demo exited $?"
 echo "$OUT" | grep -q "tau is alive" || fail "demo answer missing: $OUT"
 echo "ok — faux model answered"
 
 # --- step 2: signing + trust chain ------------------------------------
-step "2/7 signing and trust chain"
+step "2/8 signing and trust chain"
 GEN="$("$TAU" keygen)" || fail "keygen: $GEN"
 THROWAWAY_FP=$(echo "$GEN" | sed -n 's/^key generated and trusted: //p')
 [ -n "$THROWAWAY_FP" ] || fail "no fingerprint in keygen output: $GEN"
@@ -87,7 +89,7 @@ mv "$HOME/.tau/trust/$THROWAWAY_FP.pub.aside" "$HOME/.tau/trust/$THROWAWAY_FP.pu
 echo "ok — untrusted component rejected"
 
 # --- step 3: built-in provider against a loopback SSE mock -------------
-step "3/7 built-in providers (loopback SSE mock)"
+step "3/8 built-in providers (loopback SSE mock)"
 cat > mock.py << 'PYEOF'
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -182,7 +184,7 @@ echo "$OUT" | grep -q "mock anthropic ok" || fail "Anthropic SSE stream did not 
 echo "ok — Anthropic Messages SSE streamed end to end"
 
 # --- step 4: wasm provider consent gate --------------------------------
-step "4/7 wasm provider consent gate"
+step "4/8 wasm provider consent gate"
 if "$TAU" --allow-unsigned \
     --provider-wasm "$HTTP_PROVIDER" --model http-echo \
     -p "http://127.0.0.1:8402/" 2>&1 | grep -q "STATUS 200"; then
@@ -199,7 +201,7 @@ echo "$OUT" | grep -q "STATUS 200: hello from mock origin" \
 echo "ok — with --provider-origin the fetch flows"
 
 # --- step 5: MCP bridge (consent-gated spawn) --------------------------
-step "5/7 MCP bridge (consent-gated spawn)"
+step "5/8 MCP bridge (consent-gated spawn)"
 # Without --mcp-command the bridge has nothing it may spawn: the load
 # must fail, not silently degrade.
 if "$TAU" --allow-unsigned --mcp-bridge "$MCP_BRIDGE" --demo -p hi > /dev/null 2>&1; then
@@ -219,7 +221,7 @@ echo "$OUT" | grep -q "tool ← echo: bridge validation ok" \
 echo "ok — consent-gated spawn served the echo tool through the MCP bridge"
 
 # --- step 6: remembered consent lifecycle ------------------------------
-step "6/7 remembered consent (--remember / --list / --revoke)"
+step "6/8 remembered consent (--remember / --list / --revoke)"
 # Consent is keyed by signing fingerprint, so the provider copy is
 # signed with the throwaway key — the real trust store and any real
 # consent records stay untouched.
@@ -254,7 +256,7 @@ fi
 echo "ok — revoked grant is gone and the gate closes again"
 
 # --- step 7: OCI distribution ------------------------------------------
-step "7/7 OCI distribution (push / pull / trust onboarding)"
+step "7/8 OCI distribution (push / pull / trust onboarding)"
 # ext.wasm from step 2 is signed with the throwaway key: signature and
 # trust must apply to pulled bytes unchanged.
 OCI_REF="oci://127.0.0.1:8403/test/component:v1"
@@ -292,4 +294,53 @@ echo "$OUT" | grep -q "$THROWAWAY_FP" \
 rm -f "$HOME/.tau/trust/$THROWAWAY_FP.pub.aside"
 echo "ok — trust --from-component onboards the verified key from oci://"
 
-step "ALL SEVEN STEPS PASSED — the release candidate stands"
+# --- step 8: blob GC ----------------------------------------------------
+step "8/8 blob GC (dry-run reports, --yes deletes, live blobs kept)"
+# Seed the real blob store with two blobs only this run could own
+# (random content, unique digests): one referenced by a crafted
+# session, one orphan. A gc bug that eats live blobs would eat real
+# user data, so this checks the live-set math against the real store.
+mkdir -p "$HOME/.tau/blobs"
+HASHES=$(python - << 'PYEOF'
+import hashlib, os, random
+
+random.seed()
+blobs = os.path.expanduser("~/.tau/blobs")
+out = []
+for _ in range(2):
+    data = random.randbytes(300 * 1024)
+    digest = "sha256:" + hashlib.sha256(data).hexdigest()
+    with open(os.path.join(blobs, digest.replace(":", "_")), "wb") as f:
+        f.write(data)
+    out.append(digest)
+print(" ".join(out))
+PYEOF
+)
+LIVE_HASH=$(echo "$HASHES" | cut -d' ' -f1)
+ORPHAN_HASH=$(echo "$HASHES" | cut -d' ' -f2)
+GC_BLOB=$(echo "$LIVE_HASH" | tr ':' '_')
+ORPHAN_FILE="$HOME/.tau/blobs/$(echo "$ORPHAN_HASH" | tr ':' '_')"
+
+cat > gc-session.jsonl << EOF
+{"id":"a","parent":null,"type":"message","message":{"role":"user","content":[{"type":"text","text":"look"},{"type":"image","media":{"media_type":"image/png","source":"blob","hash":"$LIVE_HASH"}}]}}
+EOF
+
+OUT="$("$TAU" gc --session gc-session.jsonl 2>&1)" || fail "gc dry-run: $OUT"
+echo "$OUT" | grep -q "would free 1 blob(s)" || fail "dry-run report: $OUT"
+echo "$OUT" | grep -q "$ORPHAN_HASH" || fail "dry-run hides the orphan: $OUT"
+if echo "$OUT" | grep -q "$LIVE_HASH"; then
+    fail "dry-run marks the live blob for removal: $OUT"
+fi
+[ -f "$ORPHAN_FILE" ] || fail "dry-run deleted the orphan"
+echo "ok — dry-run reports the orphan, keeps the live blob, deletes nothing"
+
+OUT="$("$TAU" gc --session gc-session.jsonl --yes 2>&1)" || fail "gc --yes: $OUT"
+echo "$OUT" | grep -q "freed 1 blob(s)" || fail "--yes report: $OUT"
+[ ! -f "$ORPHAN_FILE" ] || fail "--yes left the orphan"
+[ -f "$HOME/.tau/blobs/$GC_BLOB" ] || fail "--yes deleted the LIVE blob"
+echo "ok — --yes frees exactly the orphan; the live blob survives"
+
+rm -f "$HOME/.tau/blobs/$GC_BLOB"
+GC_BLOB=""
+
+step "ALL EIGHT STEPS PASSED — the release candidate stands"
