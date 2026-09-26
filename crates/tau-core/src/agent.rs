@@ -50,6 +50,9 @@ pub struct Agent {
     max_turns: usize,
     control_tx: ControlTx,
     control_rx: tokio::sync::Mutex<ControlRx>,
+    /// Blob store for materializing externalized media at the request
+    /// edge; sessions may carry `MediaSource::Blob` references.
+    blobs: Option<crate::blobs::BlobStore>,
 }
 
 impl Agent {
@@ -64,7 +67,15 @@ impl Agent {
             max_turns: 64,
             control_tx,
             control_rx: tokio::sync::Mutex::new(control_rx),
+            blobs: None,
         }
+    }
+
+    /// Attach the blob store used to resolve `MediaSource::Blob` media
+    /// back to bytes before each model request.
+    pub fn blobs(mut self, store: crate::blobs::BlobStore) -> Self {
+        self.blobs = Some(store);
+        self
     }
 
     /// Subscribe to the event stream. Call before `run`.
@@ -202,6 +213,15 @@ impl Agent {
                 Verdict::Block { reason } => return Err(AgentError::Model(reason)),
                 Verdict::Continue => request,
             };
+            // Materialize externalized media at the request edge: the
+            // model contract is bytes-only (missing blobs degrade to text
+            // notes, they do not fail the run).
+            let mut request = request;
+            if let Some(blobs) = &self.blobs {
+                for message in &mut request.messages {
+                    crate::blobs::materialize(message, blobs);
+                }
+            }
             let (assistant, stop) = self
                 .stream_turn(request, &mut control_rx, &mut pending)
                 .await?;

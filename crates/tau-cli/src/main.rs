@@ -382,7 +382,8 @@ async fn main() -> Result<()> {
     };
 
     let mut store = JsonlStore::open(&cli.session)
-        .with_context(|| format!("opening {}", cli.session.display()))?;
+        .with_context(|| format!("opening {}", cli.session.display()))?
+        .with_blobs(tau_core::BlobStore::new(tau_core::BlobStore::default_dir()));
     let history = if cli.r#continue {
         match store.head() {
             Some(head) => store.active_branch(&head.id)?,
@@ -392,7 +393,9 @@ async fn main() -> Result<()> {
         Vec::new()
     };
 
-    let mut agent = Agent::new(model, tools).probes(probes);
+    let mut agent = Agent::new(model, tools)
+        .probes(probes)
+        .blobs(tau_core::BlobStore::new(tau_core::BlobStore::default_dir()));
     if let Some(system) = cli.system {
         agent = agent.system(system);
     }

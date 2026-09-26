@@ -45,11 +45,13 @@ pub enum SessionError {
 }
 
 /// Append-only JSONL session store. Loads the whole file into memory;
-/// session files are small (a long session is a few MB).
+/// session files are small (a long session is a few MB) — large media is
+/// externalized into the blob store at write time when one is attached.
 pub struct JsonlStore {
     path: PathBuf,
     entries: Vec<SessionEntry>,
     by_id: HashMap<String, usize>,
+    blobs: Option<crate::blobs::BlobStore>,
 }
 
 impl JsonlStore {
@@ -81,14 +83,25 @@ impl JsonlStore {
             path,
             entries,
             by_id,
+            blobs: None,
         })
     }
 
-    pub fn append(&mut self, entry: SessionEntry) -> Result<(), SessionError> {
+    /// Attach a blob store: large media is externalized to
+    /// `MediaSource::Blob` at append time (see `blobs` module).
+    pub fn with_blobs(mut self, store: crate::blobs::BlobStore) -> Self {
+        self.blobs = Some(store);
+        self
+    }
+
+    pub fn append(&mut self, mut entry: SessionEntry) -> Result<(), SessionError> {
         if let Some(parent) = &entry.parent {
             if !self.by_id.contains_key(parent) {
                 return Err(SessionError::NotFound(parent.clone()));
             }
+        }
+        if let (Some(blobs), EntryKind::Message { message }) = (&self.blobs, &mut entry.kind) {
+            crate::blobs::externalize(message, blobs)?;
         }
         let mut line = serde_json::to_string(&entry).map_err(|e| SessionError::Corrupt {
             path: self.path.clone(),
@@ -168,6 +181,52 @@ mod tests {
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("tau-test-{}-{}", std::process::id(), name))
+    }
+
+    #[test]
+    fn append_externalizes_large_media_and_reload_reads_blob() {
+        let path = temp_path("blobs.jsonl");
+        let blob_dir = temp_path("blobs-store");
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&blob_dir);
+        let mut store = JsonlStore::open(&path)
+            .unwrap()
+            .with_blobs(crate::blobs::BlobStore::new(&blob_dir));
+        let mut media_entry = entry("a", None, "look");
+        #[allow(irrefutable_let_patterns)] // EntryKind grows beyond Message later
+        let EntryKind::Message { message } = &mut media_entry.kind
+        else {
+            unreachable!()
+        };
+        message.content.push(crate::types::Content::Image {
+            media: crate::types::Media::bytes(
+                "image/png",
+                vec![9u8; crate::blobs::INLINE_LIMIT + 1],
+            ),
+        });
+        store.append(media_entry).unwrap();
+
+        // The JSONL line carries a hash, not the bytes.
+        let line = std::fs::read_to_string(&path).unwrap();
+        assert!(line.contains("\"source\":\"blob\""), "line: {line}");
+        assert!(!line.contains("base64"), "line: {line}");
+
+        // Reload: the reference survives the round trip.
+        let store = JsonlStore::open(&path).unwrap();
+        let branch = store.active_branch("a").unwrap();
+        let crate::types::Content::Image { media } = &branch[0].content[1] else {
+            panic!("expected image, got {:?}", branch[0].content);
+        };
+        let crate::types::MediaSource::Blob { hash } = &media.source else {
+            panic!("expected blob, got {:?}", media.source);
+        };
+        let bytes = crate::blobs::BlobStore::new(&blob_dir)
+            .get(hash)
+            .unwrap()
+            .unwrap();
+        assert_eq!(bytes, vec![9u8; crate::blobs::INLINE_LIMIT + 1]);
+        let _ = std::fs::remove_file(&path);
+        let _ = std::fs::remove_dir_all(&blob_dir);
     }
 
     #[test]

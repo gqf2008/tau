@@ -115,6 +115,9 @@ fn media_source(media: &Media) -> Option<Json> {
             "type": "url",
             "url": url,
         })),
+        // The agent materializes blobs to bytes before the request; a
+        // blob reaching the wire means no store was attached — omit.
+        MediaSource::Blob { .. } => None,
     }
 }
 

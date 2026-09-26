@@ -5,6 +5,7 @@
 //! the current entry is the active branch and supplies model history.
 
 pub mod agent;
+pub mod blobs;
 pub mod bus;
 pub mod control;
 pub mod faux;
@@ -16,6 +17,7 @@ pub mod tool;
 pub mod types;
 
 pub use agent::{Agent, AgentError, AgentEvent};
+pub use blobs::{BlobStore, INLINE_LIMIT};
 pub use bus::{new_bus, EventBus, EventStream};
 pub use control::{Control, ControlTx};
 pub use model::{Model, ModelEvent, Request, StopReason};

@@ -17,6 +17,9 @@ extensible — but extensions are **wasm components**, not in-process scripts.
 - **Signing**: components must carry an embedded ed25519 signature from a
   trusted key (`tau keygen` / `tau sign` / `tau trust`); `--allow-unsigned`
   is the explicit dev escape. See `docs/signing.md`.
+- **Media**: bytes in the model, base64 only at JSON edges; media past
+  256KB is externalized to a content-addressed blob store at session
+  write and materialized back at the request edge. See `docs/media.md`.
 - **Distribution**: components pull from any OCI registry
   (`oci://ghcr.io/org/ext:tag`), content-addressed cache, digest-verified;
   signature/trust/consent apply to pulled bytes unchanged. Pull-only —

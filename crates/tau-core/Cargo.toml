@@ -14,3 +14,9 @@ async-trait.workspace = true
 async-stream = "0.3"
 tokio = { workspace = true, features = ["sync"] }
 base64 = "0.23.1"
+sha2 = "0.10"
+dirs = "6"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

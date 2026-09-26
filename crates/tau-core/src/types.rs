@@ -31,6 +31,10 @@ pub enum MediaSource {
     Bytes(Vec<u8>),
     /// Remote reference; providers that accept URLs use it directly.
     Url(String),
+    /// Content-addressed reference into the blob store (`sha256:<hex>`);
+    /// large media is externalized to keep session JSONL small (see
+    /// `blobs` module). Materialized back to bytes at the request edge.
+    Blob { hash: String },
 }
 
 impl MediaSource {
@@ -42,7 +46,7 @@ impl MediaSource {
             Self::Bytes(bytes) => {
                 Some(base64::engine::general_purpose::STANDARD.encode(bytes))
             }
-            Self::Url(_) => None,
+            Self::Url(_) | Self::Blob { .. } => None,
         }
     }
 }
@@ -54,12 +58,14 @@ impl Serialize for MediaSource {
         enum Repr<'a> {
             Base64 { data: String },
             Url { url: &'a str },
+            Blob { hash: &'a str },
         }
         match self {
             Self::Bytes(_) => Repr::Base64 {
                 data: self.encode_base64().unwrap_or_default(),
             },
             Self::Url(url) => Repr::Url { url },
+            Self::Blob { hash } => Repr::Blob { hash },
         }
         .serialize(serializer)
     }
@@ -73,6 +79,7 @@ impl<'de> Deserialize<'de> for MediaSource {
         enum Repr {
             Base64 { data: String },
             Url { url: String },
+            Blob { hash: String },
         }
         match Repr::deserialize(deserializer)? {
             Repr::Base64 { data } => base64::engine::general_purpose::STANDARD
@@ -80,6 +87,7 @@ impl<'de> Deserialize<'de> for MediaSource {
                 .map(MediaSource::Bytes)
                 .map_err(|e| serde::de::Error::custom(format!("invalid base64 media: {e}"))),
             Repr::Url { url } => Ok(MediaSource::Url(url)),
+            Repr::Blob { hash } => Ok(MediaSource::Blob { hash }),
         }
     }
 }
@@ -99,6 +107,15 @@ impl Media {
         }
     }
 
+    pub fn blob(media_type: impl Into<String>, hash: impl Into<String>) -> Self {
+        Self {
+            media_type: media_type.into(),
+            source: MediaSource::Blob {
+                hash: hash.into(),
+            },
+        }
+    }
+
     /// Data URL form ("data:image/png;base64,...") for APIs that take one.
     pub fn data_url(&self) -> Option<String> {
         match &self.source {
@@ -108,6 +125,9 @@ impl Media {
                 self.source.encode_base64()?
             )),
             MediaSource::Url(url) => Some(url.clone()),
+            // No bytes on hand — a data URL cannot be formed. The agent
+            // materializes blobs before providers see them.
+            MediaSource::Blob { .. } => None,
         }
     }
 }

@@ -541,3 +541,89 @@ mod control_tests {
         assert_eq!(produced[3].text(), "answer two");
     }
 }
+
+#[cfg(test)]
+mod blob_edge_tests {
+    use crate::blobs::{externalize, BlobStore, INLINE_LIMIT};
+    use crate::model::{Model, ModelEvent, Request, StopReason};
+    use crate::types::{Content, Media, MediaSource};
+    use crate::{Agent, Message, ToolRegistry};
+    use async_trait::async_trait;
+
+    /// Records the media-source kinds the request arrived with.
+    struct Capture(std::sync::Mutex<Vec<String>>);
+
+    #[async_trait]
+    impl Model for Capture {
+        async fn stream(
+            &self,
+            req: &Request,
+        ) -> futures::stream::BoxStream<'static, ModelEvent> {
+            use futures::StreamExt;
+            for message in &req.messages {
+                for content in &message.content {
+                    let kind = match content {
+                        Content::Image { media } => match &media.source {
+                            MediaSource::Bytes(_) => "bytes",
+                            MediaSource::Url(_) => "url",
+                            MediaSource::Blob { .. } => "blob",
+                        },
+                        _ => continue,
+                    };
+                    self.0.lock().unwrap().push(kind.to_string());
+                }
+            }
+            futures::stream::iter([ModelEvent::Done {
+                stop: StopReason::Stop,
+            }])
+            .boxed()
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_materializes_blobs_before_the_model() {
+        let dir = tempfile::tempdir().unwrap();
+        let store = BlobStore::new(dir.path().join("blobs"));
+        // A history message as it comes back from a session read: large
+        // media externalized to a blob reference.
+        let mut history_message = Message::user("what is in this image");
+        history_message.content.push(Content::Image {
+            media: Media::bytes("image/png", vec![3u8; INLINE_LIMIT + 1]),
+        });
+        externalize(&mut history_message, &store).unwrap();
+        assert!(matches!(
+            history_message.content[1],
+            Content::Image {
+                media: Media {
+                    source: MediaSource::Blob { .. },
+                    ..
+                }
+            }
+        ));
+
+        let capture = std::sync::Arc::new(Capture(std::sync::Mutex::new(Vec::new())));
+        struct Shared(std::sync::Arc<Capture>);
+        #[async_trait]
+        impl Model for Shared {
+            async fn stream(
+                &self,
+                req: &Request,
+            ) -> futures::stream::BoxStream<'static, ModelEvent> {
+                self.0.stream(req).await
+            }
+        }
+        let agent = Agent::new(Box::new(Shared(capture.clone())), ToolRegistry::new())
+            .blobs(BlobStore::new(dir.path().join("blobs")));
+        agent
+            .run(&[history_message], Message::user("well?"))
+            .await
+            .unwrap();
+
+        let kinds = capture.0.lock().unwrap();
+        assert!(
+            kinds.iter().all(|k| k == "bytes"),
+            "model must see bytes, got: {kinds:?}"
+        );
+        assert_eq!(kinds.len(), 1);
+    }
+}
