@@ -3,10 +3,12 @@ name = "tau-ext"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
-description = "Wasm component extension host for tau (wasmtime, sandboxed by default)"
+keywords.workspace = true
+categories.workspace = true
+description = "Wasm component extension host for tau (wasmtime; ambient WASI open by default, consent-gated capabilities)"
 
 [dependencies]
-tau-core = { path = "../tau-core" }
+tau-core = { path = "../tau-core", version = "0.1.0" }
 serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true

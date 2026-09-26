@@ -13,6 +13,9 @@ exclude = ["examples/upper"]
 version = "0.1.0"
 edition = "2024"
 license = "MIT"
+keywords = ["agent", "llm", "wasm", "ai", "cli"]
+categories = ["command-line-utilities"]
+# repository/homepage: set when the repo gets a public remote (docs/release.md).
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

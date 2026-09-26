@@ -3,6 +3,8 @@ name = "tau-cli"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+keywords.workspace = true
+categories.workspace = true
 description = "tau command line: print-mode agent with wasm extensions"
 
 [[bin]]
@@ -10,10 +12,10 @@ name = "tau"
 path = "src/main.rs"
 
 [dependencies]
-tau-core = { path = "../tau-core" }
-tau-openai = { path = "../tau-openai" }
-tau-anthropic = { path = "../tau-anthropic" }
-tau-ext = { path = "../tau-ext" }
+tau-core = { path = "../tau-core", version = "0.1.0" }
+tau-openai = { path = "../tau-openai", version = "0.1.0" }
+tau-anthropic = { path = "../tau-anthropic", version = "0.1.0" }
+tau-ext = { path = "../tau-ext", version = "0.1.0" }
 serde_json = "1"
 anyhow.workspace = true
 tokio.workspace = true
@@ -21,7 +23,7 @@ clap = { version = "4", features = ["derive"] }
 rustyline = "18.0.1"
 
 [dev-dependencies]
-tau-core = { path = "../tau-core" }
+tau-core = { path = "../tau-core", version = "0.1.0" }
 futures.workspace = true
 async-stream = "0.3"
 async-trait.workspace = true

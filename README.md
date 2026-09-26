@@ -80,10 +80,10 @@ and prebuilt (unsigned) example components.
 | `crates/tau-core` | domain model, session tree, agent loop, probe registry, faux model |
 | `crates/tau-openai` | OpenAI chat completions + Responses API providers |
 | `crates/tau-anthropic` | Anthropic Messages API provider |
-| `crates/tau-ext` | wasmtime component host (sandboxed) |
+| `crates/tau-ext` | wasmtime component host (WASI open by default) |
 | `crates/tau-cli` | `tau` binary (print + interactive modes) |
 | `wit/tau.wit` | the extension contract, versioned |
-| `docs/` | probes, events, bridges, signing, oci, media |
+| `docs/` | probes, events, bridges, signing, oci, media, release |
 | `examples/upper` | example wasm extension (tool) |
 | `examples/echo-provider` | example wasm provider (push-mode streaming) |
 | `examples/http-provider` | example wasm provider (consent-gated http) |

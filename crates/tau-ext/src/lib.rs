@@ -21,21 +21,30 @@ use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 mod bindings {
     wasmtime::component::bindgen!({
-        path: "../../wit/tau.wit",
+        // Vendored copy so the packaged crate builds outside the
+        // workspace; drift-checked against the canonical wit/tau.wit
+        // by the wit_vendored test below.
+        path: "wit/tau.wit",
         world: "extension",
     });
 }
 
 mod provider_bindings {
     wasmtime::component::bindgen!({
-        path: "../../wit/tau.wit",
+        // Vendored copy so the packaged crate builds outside the
+        // workspace; drift-checked against the canonical wit/tau.wit
+        // by the wit_vendored test below.
+        path: "wit/tau.wit",
         world: "provider",
     });
 }
 
 mod bridge_bindings {
     wasmtime::component::bindgen!({
-        path: "../../wit/tau.wit",
+        // Vendored copy so the packaged crate builds outside the
+        // workspace; drift-checked against the canonical wit/tau.wit
+        // by the wit_vendored test below.
+        path: "wit/tau.wit",
         world: "bridge",
     });
 }
@@ -619,6 +628,21 @@ impl tau_core::Model for WasmModel {
             }
         }
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod wit_vendored {
+    // The packaged crate vendors wit/tau.wit (bindgen paths are relative
+    // to the manifest; the canonical copy lives at the workspace root
+    // for the examples). They must never drift.
+    #[test]
+    fn vendored_wit_matches_canonical() {
+        assert_eq!(
+            include_str!("../wit/tau.wit"),
+            include_str!("../../../wit/tau.wit"),
+            "crates/tau-ext/wit/tau.wit drifted from wit/tau.wit — sync the vendored copy"
+        );
     }
 }
 
