@@ -3,7 +3,11 @@
 //! the word "forbidden" — the block reason goes back to the model as
 //! the tool result, so the run continues instead of dying. Arguments
 //! carrying "crash" make the probe panic instead: the host degrades a
-//! broken probe to continue, so the call still goes through.
+//! broken probe to continue, so the call still goes through. Arguments
+//! carrying "wasicheck" make the probe read the ambient environment:
+//! under the default allow-all WASI it sees the host's TAU_AMBIENT and
+//! blocks (proving the leak); under --deny-wasi the guest env is empty
+//! and the call passes (proving the sandbox).
 //!
 //! Build:
 //!   cargo build --manifest-path examples/guard/Cargo.toml \
@@ -62,6 +66,19 @@ impl Hooks for Guard {
         // this panic is the fixture that proves it end to end.
         if text.as_deref().is_some_and(|t| t.contains("crash")) {
             panic!("the guard blew up");
+        }
+        // The sandbox boundary, observable from inside: read an ambient
+        // env var. Default ambient WASI inherits the host env (block to
+        // prove the leak); --deny-wasi leaves the guest env empty.
+        if text.as_deref().is_some_and(|t| t.contains("wasicheck")) {
+            if std::env::var("TAU_AMBIENT").is_ok() {
+                return Verdict {
+                    action: Action::Block,
+                    payload_json: None,
+                    reason: Some("ambient env leaked into the guest".into()),
+                };
+            }
+            return continue_();
         }
         if text.is_some_and(|text| text.contains("forbidden")) {
             Verdict {

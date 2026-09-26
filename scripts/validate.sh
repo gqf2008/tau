@@ -556,4 +556,18 @@ echo "$OUT" | grep -q "the guard blew up" \
     || fail "guest panic did not reach stderr: $OUT"
 echo "ok — degrade: trapped probe continues, the call goes through"
 
+# The WASI sandbox boundary, observable from inside the guest: the
+# guard's "wasicheck" probe reads the ambient TAU_AMBIENT env var.
+OUT="$(TAU_AMBIENT=hunter2 "$TAU" --allow-unsigned -e "$UPPER" -e "$GUARD" \
+    --demo -p "shout wasicheck" 2>&1)" || fail "wasicheck run: $OUT"
+echo "$OUT" | grep -q "ambient env leaked" \
+    || fail "ambient env was not visible under the default WASI policy: $OUT"
+echo "ok — ambient WASI: the guest inherits the host env by default"
+
+OUT="$(TAU_AMBIENT=hunter2 "$TAU" --allow-unsigned --deny-wasi -e "$UPPER" -e "$GUARD" \
+    --demo -p "shout wasicheck" 2>&1)" || fail "deny-wasi run: $OUT"
+echo "$OUT" | grep -q "tool ← upper: SHOUT WASICHECK" \
+    || fail "--deny-wasi did not hide the ambient env from the guest: $OUT"
+echo "ok — --deny-wasi: the guest env is empty, the sandbox holds"
+
 step "ALL TEN STEPS PASSED — the release candidate stands"

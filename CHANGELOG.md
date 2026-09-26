@@ -77,8 +77,9 @@ gate, remembered-consent lifecycle, OCI push/pull/trust onboarding,
 blob GC, compaction (summary entry; originals stay; follow-ups run on
 the compacted branch), torn-tail recovery, concurrent access, and
 probe verdicts (block, continue, and a trapped probe degrading without
-going dead) — restoring
-the environment exactly afterwards. 107 tests, clippy-clean across all
+going dead), and the WASI sandbox boundary (ambient env visible by
+default, empty under --deny-wasi) — restoring
+the environment exactly afterwards. 108 tests, clippy-clean across all
 workspaces.
 
 Performance baseline (docs/perf.md): extension load 202ms cold → 9ms

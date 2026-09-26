@@ -209,8 +209,9 @@ pub enum WasiPolicy {
     /// on Windows, `/` elsewhere), inherit network + DNS.
     #[default]
     AllowAll,
-    /// The old default: WASI interfaces link but every capability call
-    /// fails permission-denied.
+    /// The old default: WASI interfaces still link, but no capabilities
+    /// are granted — fs and network calls fail permission-denied, env
+    /// and args come back empty, stdio goes nowhere.
     DenyAll,
 }
 
