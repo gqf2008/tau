@@ -481,7 +481,6 @@ mod tests {
     }
 
     #[test]
-    #[test]
     #[ignore = "scale evidence for docs/perf.md, run on demand"]
     fn scale_evidence_100k() {
         // 100k-entry chain, written directly (append per entry would
@@ -517,6 +516,7 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    #[test]
     fn open_parses_large_sessions_quickly() {
         // 10k entries; the generous bound guards pathological (e.g.
         // quadratic) regressions, not micro-perf. The actual time is
