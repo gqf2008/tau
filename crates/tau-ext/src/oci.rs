@@ -27,7 +27,9 @@ const MANIFEST_MEDIA_TYPE: &str = "application/vnd.oci.image.manifest.v1+json";
 
 #[derive(Debug, Error)]
 pub enum OciError {
-    #[error("bad oci reference {0:?} (want oci://registry/repo:tag or oci://registry/repo@sha256:...)")]
+    #[error(
+        "bad oci reference {0:?} (want oci://registry/repo:tag or oci://registry/repo@sha256:...)"
+    )]
     BadReference(String),
     #[error("registry {0}")]
     Registry(String),
@@ -125,12 +127,7 @@ impl Registry {
         self.send(reqwest::Method::POST, url, &[], None)
     }
 
-    fn put(
-        &mut self,
-        url: &str,
-        body: Vec<u8>,
-        content_type: &str,
-    ) -> Result<Reply, OciError> {
+    fn put(&mut self, url: &str, body: Vec<u8>, content_type: &str) -> Result<Reply, OciError> {
         self.send(
             reqwest::Method::PUT,
             url,
@@ -263,15 +260,12 @@ pub fn pull_into(reference: &str, cache: &Path) -> Result<Pulled, OciError> {
 
     let manifest = registry
         .get_json(
-            &format!(
-                "{base}/v2/{}/manifests/{}",
-                oci_ref.repo, oci_ref.reference
-            ),
-            &[
-                ("accept",
-                 "application/vnd.oci.image.manifest.v1+json, \
-                  application/vnd.docker.distribution.manifest.v2+json"),
-            ],
+            &format!("{base}/v2/{}/manifests/{}", oci_ref.repo, oci_ref.reference),
+            &[(
+                "accept",
+                "application/vnd.oci.image.manifest.v1+json, \
+                  application/vnd.docker.distribution.manifest.v2+json",
+            )],
         )
         .map_err(|e| OciError::Manifest {
             reference: reference.into(),
@@ -426,10 +420,15 @@ mod tests {
                 reference: "sha256:abc".into(),
             }
         );
-        assert_eq!(parse("oci://ghcr.io/org/upper").unwrap().reference, "latest");
-        assert!(parse("oci://ghcr.io/org/upper:0.1.0")
-            .map(|r| !r.is_digest())
-            .unwrap());
+        assert_eq!(
+            parse("oci://ghcr.io/org/upper").unwrap().reference,
+            "latest"
+        );
+        assert!(
+            parse("oci://ghcr.io/org/upper:0.1.0")
+                .map(|r| !r.is_digest())
+                .unwrap()
+        );
         assert!(parse("not-oci").is_err());
         assert!(parse("oci://norepo").is_err());
         assert!(parse("oci:///repo:tag").is_err());
@@ -442,7 +441,10 @@ mod tests {
             challenge_param(challenge, "realm"),
             Some("https://ghcr.io/token".into())
         );
-        assert_eq!(challenge_param(challenge, "service"), Some("ghcr.io".into()));
+        assert_eq!(
+            challenge_param(challenge, "service"),
+            Some("ghcr.io".into())
+        );
         assert_eq!(challenge_param(challenge, "missing"), None);
     }
 }

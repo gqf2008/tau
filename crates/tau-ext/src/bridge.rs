@@ -14,12 +14,12 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tau_core::tool::{Tool, ToolDef, ToolOutput};
-use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::Store;
+use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::http::HttpRegistry;
-use crate::{bridge_bindings, ExtError, ExtensionHost};
+use crate::{ExtError, ExtensionHost, bridge_bindings};
 
 struct BridgeState {
     ctx: WasiCtx,
@@ -229,10 +229,11 @@ impl ExtensionHost {
         consent: BridgeConsent,
     ) -> Result<Vec<Box<dyn Tool>>, ExtError> {
         let bytes = self.read_verified(path)?;
-        let component = Component::from_binary(&self.engine, &bytes).map_err(|e| ExtError::Load {
-            path: path.display().to_string(),
-            reason: e.to_string(),
-        })?;
+        let component =
+            Component::from_binary(&self.engine, &bytes).map_err(|e| ExtError::Load {
+                path: path.display().to_string(),
+                reason: e.to_string(),
+            })?;
         let mut linker: Linker<BridgeState> = Linker::new(&self.engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         bridge_bindings::Bridge::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
@@ -254,7 +255,10 @@ impl ExtensionHost {
         let bindings = bridge_bindings::Bridge::instantiate(&mut store, &component, &linker)
             .map_err(|e| ExtError::Load {
                 path: path.display().to_string(),
-                reason: format!("bridge instantiation failed: {}", crate::compact_wasm_error(&e)),
+                reason: format!(
+                    "bridge instantiation failed: {}",
+                    crate::compact_wasm_error(&e)
+                ),
             })?;
 
         // definitions() performs the protocol handshake (MCP initialize +
@@ -264,10 +268,7 @@ impl ExtensionHost {
             .call_definitions(&mut store)
             .map_err(|e| ExtError::Load {
                 path: path.display().to_string(),
-                reason: format!(
-                    "bridge handshake failed: {}",
-                    crate::compact_wasm_error(&e)
-                ),
+                reason: format!("bridge handshake failed: {}", crate::compact_wasm_error(&e)),
             })?;
 
         let shared: SharedBridge = Arc::new(Mutex::new(BridgeInstance { store, bindings }));
@@ -303,7 +304,9 @@ impl Tool for BridgeTool {
         let name = self.def.name.clone();
         let shared = self.shared.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let mut guard = shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let BridgeInstance { store, bindings } = &mut *guard;
             bindings
                 .tau_extension_tools()
@@ -315,7 +318,9 @@ impl Tool for BridgeTool {
                 content: r.content,
                 is_error: r.is_error,
             },
-            Ok(Err(e)) => ToolOutput::err(format!("bridge trap: {}", crate::compact_wasm_error(&e))),
+            Ok(Err(e)) => {
+                ToolOutput::err(format!("bridge trap: {}", crate::compact_wasm_error(&e)))
+            }
             Err(e) => ToolOutput::err(format!("bridge task failed: {e}")),
         }
     }

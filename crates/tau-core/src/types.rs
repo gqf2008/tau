@@ -1,12 +1,24 @@
+//! Core data model: messages, content blocks, and media.
+//!
+//! The rule that shapes everything here: **bytes are the model, base64 is
+//! an encoding of the JSON edges only** — session files and provider HTTP
+//! APIs speak JSON, so serde encodes there; in memory media is honest
+//! `Vec<u8>`.
+
 use serde::{Deserialize, Serialize};
 
+/// Free-form JSON (tool call arguments, provider-specific fields).
 pub type Json = serde_json::Value;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+/// Who produced a [`Message`].
 pub enum Role {
+    /// The human (or the harness on their behalf).
     User,
+    /// The model.
     Assistant,
+    /// A tool result message (content is [`Content::ToolResult`] blocks).
     Tool,
 }
 
@@ -21,10 +33,12 @@ pub enum Role {
 pub struct Media {
     /// MIME type, e.g. "image/png", "audio/wav", "video/mp4", "application/pdf".
     pub media_type: String,
+    /// Where the bytes live.
     #[serde(flatten)]
     pub source: MediaSource,
 }
 
+/// Where a [`Media`]'s bytes live.
 #[derive(Debug, Clone, PartialEq)]
 pub enum MediaSource {
     /// Raw bytes. Serialized to session JSON as base64.
@@ -34,7 +48,10 @@ pub enum MediaSource {
     /// Content-addressed reference into the blob store (`sha256:<hex>`);
     /// large media is externalized to keep session JSONL small (see
     /// `blobs` module). Materialized back to bytes at the request edge.
-    Blob { hash: String },
+    Blob {
+        /// `sha256:<hex>` of the content.
+        hash: String,
+    },
 }
 
 impl MediaSource {
@@ -43,9 +60,7 @@ impl MediaSource {
     pub fn encode_base64(&self) -> Option<String> {
         use base64::Engine;
         match self {
-            Self::Bytes(bytes) => {
-                Some(base64::engine::general_purpose::STANDARD.encode(bytes))
-            }
+            Self::Bytes(bytes) => Some(base64::engine::general_purpose::STANDARD.encode(bytes)),
             Self::Url(_) | Self::Blob { .. } => None,
         }
     }
@@ -93,6 +108,7 @@ impl<'de> Deserialize<'de> for MediaSource {
 }
 
 impl Media {
+    /// A media payload from in-memory bytes.
     pub fn bytes(media_type: impl Into<String>, data: impl Into<Vec<u8>>) -> Self {
         Self {
             media_type: media_type.into(),
@@ -100,6 +116,7 @@ impl Media {
         }
     }
 
+    /// A media payload by remote reference.
     pub fn url(media_type: impl Into<String>, url: impl Into<String>) -> Self {
         Self {
             media_type: media_type.into(),
@@ -107,12 +124,11 @@ impl Media {
         }
     }
 
+    /// A media payload by blob-store hash (`sha256:<hex>`).
     pub fn blob(media_type: impl Into<String>, hash: impl Into<String>) -> Self {
         Self {
             media_type: media_type.into(),
-            source: MediaSource::Blob {
-                hash: hash.into(),
-            },
+            source: MediaSource::Blob { hash: hash.into() },
         }
     }
 
@@ -132,46 +148,72 @@ impl Media {
     }
 }
 
+/// One block of a [`Message`]'s content.
+///
+/// Wire shape is internally tagged (`{"type":"text",...}`,
+/// `{"type":"toolCall",...}`) — the same shape pi sessions use.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Content {
+    /// A plain text block.
     Text {
+        /// The text.
         text: String,
     },
+    /// An image (screenshot, photo, diagram).
     Image {
+        /// The image payload.
         media: Media,
     },
+    /// An audio clip.
     Audio {
+        /// The audio payload.
         media: Media,
     },
+    /// A video clip.
     Video {
+        /// The video payload.
         media: Media,
     },
     /// An arbitrary file attachment (PDF, archive, source bundle, ...).
     File {
+        /// The file payload.
         media: Media,
+        /// Original filename, when known.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         name: Option<String>,
     },
+    /// A tool invocation requested by the assistant.
     ToolCall {
+        /// Provider-assigned call id (echoed back by [`Content::ToolResult`]).
         id: String,
+        /// Registered tool name.
         name: String,
+        /// Arguments matching the tool's JSON schema.
         arguments: Json,
     },
+    /// The outcome of one [`Content::ToolCall`].
     ToolResult {
+        /// The call this answers.
         call_id: String,
+        /// Textual result content.
         content: String,
+        /// True when the tool reported failure.
         is_error: bool,
     },
 }
 
+/// One message in the conversation: a role plus ordered content blocks.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {
+    /// Who produced it.
     pub role: Role,
+    /// Ordered blocks: text, media, tool calls/results.
     pub content: Vec<Content>,
 }
 
 impl Message {
+    /// Shorthand for a single-text-block user message.
     pub fn user(text: impl Into<String>) -> Self {
         Self {
             role: Role::User,

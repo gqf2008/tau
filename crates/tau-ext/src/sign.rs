@@ -29,7 +29,9 @@ pub enum SignError {
     BadSignature(String),
     #[error("component is unsigned (sign it with `tau sign`, or load with --allow-unsigned)")]
     Unsigned,
-    #[error("signing key {0} is not in the trust store ({1}) — trust it with `tau trust --from-component <component>` after verifying the fingerprint out-of-band")]
+    #[error(
+        "signing key {0} is not in the trust store ({1}) — trust it with `tau trust --from-component <component>` after verifying the fingerprint out-of-band"
+    )]
     Untrusted(String, String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
@@ -149,7 +151,11 @@ pub fn fingerprint(key: &VerifyingKey) -> String {
 }
 
 fn hex_prefix(bytes: &[u8], chars: usize) -> String {
-    bytes.iter().map(|b| format!("{b:02x}")).take(chars / 2).collect()
+    bytes
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .take(chars / 2)
+        .collect()
 }
 
 struct SignaturePayload {
@@ -314,7 +320,10 @@ pub fn load_key(fp: Option<&str>) -> Result<(String, SigningKey), SignError> {
                     keys.len()
                 )));
             }
-            keys.remove(0).file_name().to_string_lossy().replace(".key", "")
+            keys.remove(0)
+                .file_name()
+                .to_string_lossy()
+                .replace(".key", "")
         }
     };
     let bytes = std::fs::read(dir.join(format!("{chosen}.key")))?;
@@ -339,8 +348,7 @@ pub fn trust_key_in(dir: &Path, pubkey_b64: &str) -> Result<String, SignError> {
         .as_slice()
         .try_into()
         .map_err(|_| SignError::Malformed("pubkey must be 32 bytes".into()))?;
-    let key = VerifyingKey::from_bytes(&bytes)
-        .map_err(|e| SignError::Malformed(e.to_string()))?;
+    let key = VerifyingKey::from_bytes(&bytes).map_err(|e| SignError::Malformed(e.to_string()))?;
     let fp = fingerprint(&key);
     std::fs::create_dir_all(dir)?;
     std::fs::write(dir.join(format!("{fp}.pub")), pubkey_b64.trim())?;
@@ -465,6 +473,8 @@ mod tests {
     }
 
     fn trust_dir_is_empty(dir: &Path) -> bool {
-        std::fs::read_dir(dir).map(|mut rd| rd.next().is_none()).unwrap_or(true)
+        std::fs::read_dir(dir)
+            .map(|mut rd| rd.next().is_none())
+            .unwrap_or(true)
     }
 }

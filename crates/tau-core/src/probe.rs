@@ -4,15 +4,21 @@
 use async_trait::async_trait;
 use serde_json::Value as Json;
 
+/// A lifecycle point where a probe may fire. Payload shapes and verdict
+/// semantics per point: [`CATALOG`] (rendered by `tau probes --json`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum ProbePoint {
+    /// A run is starting; payload is the prompt.
     BeforeRun,
+    /// The assembled context may be rewritten before the request is built.
     TransformContext,
     /// The final request (messages + system + tools) before it hits the wire.
     BeforeRequest,
     /// One assistant response just assembled, before tool execution.
     AfterResponse,
+    /// A tool call is about to execute; block vetoes, replace rewrites args.
     BeforeTool,
+    /// A tool result came back; replace rewrites the recorded output.
     AfterTool,
     /// Natural run end, before the produced messages are returned.
     BeforeRunEnd,
@@ -24,6 +30,7 @@ pub enum ProbePoint {
 }
 
 impl ProbePoint {
+    /// The wire name (`before_tool`, ...), as used in WIT and the catalog.
     pub fn name(self) -> &'static str {
         match self {
             Self::BeforeRun => "before_run",
@@ -38,6 +45,7 @@ impl ProbePoint {
         }
     }
 
+    /// Parse a wire name back into a point.
     pub fn from_name(name: &str) -> Option<Self> {
         match name {
             "before_run" => Some(Self::BeforeRun),
@@ -53,6 +61,7 @@ impl ProbePoint {
         }
     }
 
+    /// Every point, in lifecycle order.
     pub const ALL: [ProbePoint; 9] = [
         Self::BeforeRun,
         Self::TransformContext,
@@ -66,25 +75,33 @@ impl ProbePoint {
     ];
 }
 
+/// A probe's decision for one firing.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Verdict {
+    /// No opinion; the run proceeds with the current payload.
     Continue,
     /// Replacement payload, point-specific.
     Replace(Json),
     /// Veto the action; reason goes back to the model (tool points) or user.
-    Block { reason: String },
+    Block {
+        /// Human-readable justification for the veto.
+        reason: String,
+    },
 }
 
+/// A probe implementation (native or wasm-backed).
 #[async_trait]
 pub trait ProbeHandler: Send + Sync {
     /// Which points this handler answers; others are never routed to it.
     fn points(&self) -> &[ProbePoint];
+    /// Decide one firing: the point and its payload.
     async fn probe(&self, point: ProbePoint, payload: Json) -> Verdict;
 }
 
 /// Sequential fold: each handler sees the previous handler's replacement;
 /// first block wins; a panicking/failing handler degrades to `Continue`
 /// (a broken extension must not wedge the harness).
+/// The agent's probe set. See the fold semantics note above.
 pub struct ProbeRegistry {
     handlers: Vec<Box<dyn ProbeHandler>>,
 }
@@ -96,16 +113,19 @@ impl Default for ProbeRegistry {
 }
 
 impl ProbeRegistry {
+    /// An empty registry.
     pub fn new() -> Self {
         Self {
             handlers: Vec::new(),
         }
     }
 
+    /// Add a handler; firing order is registration order.
     pub fn register(&mut self, handler: Box<dyn ProbeHandler>) {
         self.handlers.push(handler);
     }
 
+    /// True when no handlers are registered.
     pub fn is_empty(&self) -> bool {
         self.handlers.is_empty()
     }
@@ -146,7 +166,9 @@ impl ProbeRegistry {
 pub struct PointInfo {
     /// Present when wired; reserved points have no variant yet.
     pub point: Option<ProbePoint>,
+    /// Stable wire name.
     pub name: &'static str,
+    /// Whether the point fires today (vs. reserved for a future feature).
     pub wired: bool,
     /// JSON shape of the payload handed to the probe.
     pub payload: &'static str,
@@ -154,6 +176,8 @@ pub struct PointInfo {
     pub verdicts: &'static str,
 }
 
+/// Every probe point the harness knows: wired ones plus reserved slots
+/// whose features have not landed yet.
 pub const CATALOG: &[PointInfo] = &[
     PointInfo {
         point: Some(ProbePoint::BeforeRun),

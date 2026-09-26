@@ -1,8 +1,8 @@
 //! Minimal SSE parser: `data:` lines, blank line terminates an event,
 //! `data: [DONE]` ends the stream.
 
-use futures::stream::{BoxStream, Stream};
 use futures::StreamExt;
+use futures::stream::{BoxStream, Stream};
 
 /// Parse a byte stream into parsed SSE payloads (the part after `data: `).
 pub fn parse<S, B, E>(bytes: S) -> BoxStream<'static, Result<String, String>>
@@ -58,21 +58,21 @@ mod tests {
 
     fn feed(chunks: &[&str]) -> Vec<Result<String, String>> {
         let owned: Vec<Vec<u8>> = chunks.iter().map(|c| c.as_bytes().to_vec()).collect();
-        let stream = futures::stream::iter(
-            owned.into_iter().map(Ok::<_, std::io::Error>),
-        );
+        let stream = futures::stream::iter(owned.into_iter().map(Ok::<_, std::io::Error>));
         futures::executor::block_on_stream(parse(stream)).collect()
     }
 
     #[test]
     fn parses_events_across_chunk_boundaries() {
-        let events = feed(&["data: {\"a\":1", "}\n\ndata: {\"b\"", ":2}\n", "\ndata: [DONE]\n"]);
+        let events = feed(&[
+            "data: {\"a\":1",
+            "}\n\ndata: {\"b\"",
+            ":2}\n",
+            "\ndata: [DONE]\n",
+        ]);
         assert_eq!(
             events,
-            vec![
-                Ok(r#"{"a":1}"#.to_string()),
-                Ok(r#"{"b":2}"#.to_string()),
-            ]
+            vec![Ok(r#"{"a":1}"#.to_string()), Ok(r#"{"b":2}"#.to_string()),]
         );
     }
 

@@ -6,14 +6,34 @@
 //! ([`WasiPolicy::AllowAll`]); [`WasiPolicy::DenyAll`] (CLI `--deny-wasi`)
 //! restores the old deny-all sandbox. Custom capabilities — bridge
 //! process/http, provider origins — stay consent-gated either way.
+//!
+//! Adjacent subsystems behind the same host: [`sign`] (ed25519 signatures
+//! and the trust store), [`consent`] (per-fingerprint remembered capability
+//! grants), [`oci`] (pull/push components through OCI registries), and
+//! [`bridge`] (MCP-over-stdio/HTTP bridges).
+//!
+//! ## Loading a component
+//!
+//! ```no_run
+//! use tau_ext::ExtensionHost;
+//!
+//! // Library default loads unsigned components; the tau CLI builds the
+//! // host with sign::TrustPolicy::RequireTrusted instead.
+//! let host = ExtensionHost::new();
+//! let extension = host.load("upper.wasm").expect("load extension");
+//! println!("loaded {}", extension.name);
+//! let (tools, probes) = extension.into_parts();
+//! // register `tools` into a tau_core::ToolRegistry, `probes` into a
+//! // tau_core::ProbeRegistry, then build the Agent as usual.
+//! ```
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use futures::StreamExt;
 use tau_core::probe::{ProbeHandler, ProbePoint, Verdict};
 use tau_core::tool::{Tool, ToolDef, ToolOutput};
-use futures::StreamExt;
 use thiserror::Error;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
@@ -50,17 +70,25 @@ mod bridge_bindings {
 }
 
 pub mod bridge;
-mod http;
 pub mod consent;
+mod http;
 pub mod oci;
 pub mod sign;
 
+/// Failures loading or running a component.
 #[derive(Debug, Error)]
 pub enum ExtError {
+    /// Wasmtime itself failed (compile, instantiate, trap).
     #[error("wasmtime: {0}")]
     Wasmtime(#[from] wasmtime::Error),
+    /// The component could not be read or validated.
     #[error("extension {path}: {reason}")]
-    Load { path: String, reason: String },
+    Load {
+        /// Where the component was loaded from.
+        path: String,
+        /// Why loading failed.
+        reason: String,
+    },
 }
 
 /// Compact a wasmtime execution error for user-facing messages. A trap's
@@ -117,12 +145,14 @@ pub type LoadedParts = (Vec<Box<dyn Tool>>, Vec<Box<dyn ProbeHandler>>);
 
 /// Everything one loaded component contributes.
 pub struct LoadedExtension {
+    /// The extension's self-declared name.
     pub name: String,
     tools: Vec<Box<dyn Tool>>,
     probes: Vec<Box<dyn ProbeHandler>>,
 }
 
 impl LoadedExtension {
+    /// Consume into the tools and probes the component contributed.
     pub fn into_parts(self) -> LoadedParts {
         (self.tools, self.probes)
     }
@@ -180,6 +210,8 @@ fn preopen_host_fs(ctx: &mut WasiCtxBuilder) {
     let _ = ctx.preopened_dir("/", "/", wasmtime_wasi::FsPerms::ReadWrite);
 }
 
+/// Loads wasm components and exposes their contributions as tau
+/// tools and probe handlers. One host = one wasmtime engine.
 pub struct ExtensionHost {
     engine: Engine,
     policy: sign::TrustPolicy,
@@ -224,6 +256,7 @@ impl ExtensionHost {
         Self::with_policy(sign::TrustPolicy::AllowUnsigned)
     }
 
+    /// A host enforcing `policy` on every loaded component.
     pub fn with_policy(policy: sign::TrustPolicy) -> Self {
         Self {
             engine: engine(),
@@ -260,9 +293,7 @@ impl ExtensionHost {
         let bytes = loop {
             match std::fs::read(path) {
                 Ok(bytes) => break bytes,
-                Err(e)
-                    if e.kind() == std::io::ErrorKind::PermissionDenied && attempt < 10 =>
-                {
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied && attempt < 10 => {
                     attempt += 1;
                     std::thread::sleep(std::time::Duration::from_millis(100));
                 }
@@ -270,7 +301,7 @@ impl ExtensionHost {
                     return Err(ExtError::Load {
                         path: path.display().to_string(),
                         reason: e.to_string(),
-                    })
+                    });
                 }
             }
         };
@@ -302,10 +333,11 @@ impl ExtensionHost {
 
     fn load_inner(&self, path: &Path) -> Result<LoadedExtension, ExtError> {
         let bytes = self.read_verified(path)?;
-        let component = Component::from_binary(&self.engine, &bytes).map_err(|e| ExtError::Load {
-            path: path.display().to_string(),
-            reason: e.to_string(),
-        })?;
+        let component =
+            Component::from_binary(&self.engine, &bytes).map_err(|e| ExtError::Load {
+                path: path.display().to_string(),
+                reason: e.to_string(),
+            })?;
         // WASI interfaces are linked so wasip2-std components instantiate;
         // what they may actually do follows the host's WasiPolicy.
         let mut linker: Linker<ComponentState> = Linker::new(&self.engine);
@@ -396,7 +428,9 @@ impl Tool for WasmTool {
         let name = self.def.name.clone();
         let shared = self.shared.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let mut guard = shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let ComponentInstance { store, bindings } = &mut *guard;
             bindings
                 .tau_extension_tools()
@@ -429,7 +463,9 @@ impl ProbeHandler for WasmProbes {
         let shared = self.shared.clone();
         let point_name = point.name().to_string();
         let result = tokio::task::spawn_blocking(move || {
-            let mut guard = shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let ComponentInstance { store, bindings } = &mut *guard;
             bindings
                 .tau_extension_hooks()
@@ -506,7 +542,7 @@ pub struct WasmModel {
 impl ExtensionHost {
     /// Load a provider component and select one of its models by id.
     /// Load a provider component. `origins` is the HTTP egress allowlist
-    /// ("scheme://host[:port]") this component may reach — passing it IS
+    /// (`scheme://host[:port]`) this component may reach — passing it IS
     /// the consent; empty means every http call fails permission-denied.
     /// `auth`, when given, is handed to the component inside every
     /// request payload (`{"auth": {"bearer": ...}}`) — passing it IS the
@@ -532,10 +568,11 @@ impl ExtensionHost {
         auth: Option<String>,
     ) -> Result<WasmModel, ExtError> {
         let bytes = self.read_verified(path)?;
-        let component = Component::from_binary(&self.engine, &bytes).map_err(|e| ExtError::Load {
-            path: path.display().to_string(),
-            reason: e.to_string(),
-        })?;
+        let component =
+            Component::from_binary(&self.engine, &bytes).map_err(|e| ExtError::Load {
+                path: path.display().to_string(),
+                reason: e.to_string(),
+            })?;
         let mut linker: Linker<ProviderState> = Linker::new(&self.engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         provider_bindings::Provider::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
@@ -619,7 +656,9 @@ impl tau_core::Model for WasmModel {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let shared = self.shared.clone();
         let call = tokio::task::spawn_blocking(move || {
-            let mut guard = shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let mut guard = shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
             let instance = &mut *guard;
             instance.store.data_mut().event_tx = Some(tx);
             let result = instance

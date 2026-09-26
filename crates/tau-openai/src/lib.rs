@@ -4,6 +4,26 @@
 //! OpenAI, OpenRouter, and most proxies. Configuration is by environment:
 //! `OPENAI_API_KEY` (required), `OPENAI_BASE_URL` (default
 //! `https://api.openai.com/v1`).
+//!
+//! ```no_run
+//! use tau_core::{Message, Model, ModelEvent, Request};
+//! use tau_openai::OpenAiModel;
+//! # use futures::StreamExt;
+//!
+//! # async fn demo() {
+//! let model = OpenAiModel::from_env("gpt-4o-mini").expect("OPENAI_API_KEY");
+//! let request = Request {
+//!     messages: vec![Message::user("hello")],
+//!     ..Request::default()
+//! };
+//! let mut stream = model.stream(&request).await;
+//! while let Some(event) = stream.next().await {
+//!     if let ModelEvent::TextDelta { text } = event {
+//!         print!("{text}");
+//!     }
+//! }
+//! # }
+//! ```
 
 mod responses;
 mod wire;
@@ -24,6 +44,8 @@ pub enum Api {
     Responses,
 }
 
+/// An OpenAI-compatible API as a tau [`Model`](tau_core::Model) —
+/// works with any provider speaking one of the [`Api`] wire formats.
 pub struct OpenAiModel {
     client: reqwest::Client,
     base_url: String,
@@ -33,17 +55,21 @@ pub struct OpenAiModel {
 }
 
 impl OpenAiModel {
+    /// Configure from `OPENAI_API_KEY` and optional `OPENAI_BASE_URL`,
+    /// using the chat-completions wire format.
     pub fn from_env(model: impl Into<String>) -> Result<Self, std::env::VarError> {
         Self::from_env_with(model, Api::ChatCompletions)
     }
 
+    /// [`from_env`](Self::from_env) with an explicit wire format.
     pub fn from_env_with(model: impl Into<String>, api: Api) -> Result<Self, std::env::VarError> {
         let api_key = std::env::var("OPENAI_API_KEY")?;
-        let base_url = std::env::var("OPENAI_BASE_URL")
-            .unwrap_or_else(|_| "https://api.openai.com/v1".into());
+        let base_url =
+            std::env::var("OPENAI_BASE_URL").unwrap_or_else(|_| "https://api.openai.com/v1".into());
         Ok(Self::new(base_url, api_key, model).api(api))
     }
 
+    /// Bearer-key auth against `base_url` (trailing slashes trimmed).
     pub fn new(
         base_url: impl Into<String>,
         api_key: impl Into<String>,
@@ -58,6 +84,7 @@ impl OpenAiModel {
         }
     }
 
+    /// Select the wire format (default [`Api::ChatCompletions`]).
     pub fn api(mut self, api: Api) -> Self {
         self.api = api;
         self
@@ -89,9 +116,7 @@ impl Model for OpenAiModel {
             return error_stream(format!("HTTP {status}: {}", truncate(&body, 500)));
         }
 
-        let byte_stream = response
-            .bytes_stream()
-            .map_err(std::io::Error::other);
+        let byte_stream = response.bytes_stream().map_err(std::io::Error::other);
         let mut events = sse::parse(byte_stream);
         let api = self.api;
 

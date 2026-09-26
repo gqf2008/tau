@@ -15,37 +15,58 @@ use thiserror::Error;
 
 use crate::types::Message;
 
+/// One node of the session tree. `parent` links make the file a tree:
+/// appending under an older entry forks a branch in the same file.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SessionEntry {
+    /// Unique id (time-based; see [`new_id`]).
     pub id: String,
+    /// The entry this one follows; none for the root.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub parent: Option<String>,
+    /// What the entry carries.
     #[serde(flatten)]
     pub kind: EntryKind,
 }
 
+/// The payload of a [`SessionEntry`].
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum EntryKind {
-    Message { message: Message },
+    /// A conversation message (user, assistant, tool result).
+    Message {
+        /// The message.
+        message: Message,
+    },
     /// A compaction: future branch walks yield `summary` instead of
     /// everything before this entry. The original messages stay in the
     /// tree — older branches still walk through them.
-    Compaction { summary: Message },
+    Compaction {
+        /// The replacement message yielded by future branch walks.
+        summary: Message,
+    },
 }
 
+/// Session store failures.
 #[derive(Debug, Error)]
 pub enum SessionError {
+    /// Filesystem error.
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// A session file line is not valid JSON for a [`SessionEntry`].
     #[error("corrupt session file {path} line {line}: {reason}")]
     Corrupt {
+        /// The offending file.
         path: PathBuf,
+        /// 1-based line number.
         line: usize,
+        /// The parse error.
         reason: String,
     },
+    /// An id (or `#index`) matched no entry.
     #[error("entry not found: {0}")]
     NotFound(String),
+    /// An id prefix matched more than one entry.
     #[error("ambiguous id prefix {0} — matches more than one entry")]
     Ambiguous(String),
 }
@@ -61,6 +82,7 @@ pub struct JsonlStore {
 }
 
 impl JsonlStore {
+    /// Open (or create) a session file, parsing every entry into memory.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, SessionError> {
         let path = path.as_ref().to_path_buf();
         let mut entries = Vec::new();
@@ -100,11 +122,14 @@ impl JsonlStore {
         self
     }
 
+    /// Append an entry (externalizing large media when a blob store is
+    /// attached). The parent, if any, must already exist.
     pub fn append(&mut self, mut entry: SessionEntry) -> Result<(), SessionError> {
         if let Some(parent) = &entry.parent
-            && !self.by_id.contains_key(parent) {
-                return Err(SessionError::NotFound(parent.clone()));
-            }
+            && !self.by_id.contains_key(parent)
+        {
+            return Err(SessionError::NotFound(parent.clone()));
+        }
         if let (Some(blobs), EntryKind::Message { message }) = (&self.blobs, &mut entry.kind) {
             crate::blobs::externalize(message, blobs)?;
         }
@@ -144,22 +169,27 @@ impl JsonlStore {
         live
     }
 
+    /// The most recently appended entry (tip of the latest branch).
     pub fn head(&self) -> Option<&SessionEntry> {
         self.entries.last()
     }
 
+    /// Look an entry up by exact id.
     pub fn get(&self, id: &str) -> Option<&SessionEntry> {
         self.by_id.get(id).map(|&i| &self.entries[i])
     }
 
     /// All entries, in append order (for `tau tree` and fork-target
     /// pickers).
+    /// Every entry in append order.
     pub fn entries(&self) -> &[SessionEntry] {
         &self.entries
     }
 
     /// Resolve a full id, an unambiguous prefix, or a `#index` into
     /// append order (what `tau tree` and `/fork` display) to the full id.
+    /// Resolve a user-typed reference to an entry id: exact id, unique
+    /// prefix, or `#index` into append order. Ambiguous prefixes fail.
     pub fn resolve_id(&self, prefix_or_id: &str) -> Result<String, SessionError> {
         if let Ok(index) = prefix_or_id.parse::<usize>() {
             return self
@@ -189,7 +219,9 @@ impl JsonlStore {
         let mut messages = Vec::new();
         let mut current = Some(head_id.to_string());
         while let Some(id) = current {
-            let entry = self.get(&id).ok_or_else(|| SessionError::NotFound(id.clone()))?;
+            let entry = self
+                .get(&id)
+                .ok_or_else(|| SessionError::NotFound(id.clone()))?;
             match &entry.kind {
                 EntryKind::Message { message } => messages.push(message.clone()),
                 // Compaction boundary: the summary stands in for everything
@@ -228,7 +260,11 @@ pub fn entry_summary(entry: &SessionEntry) -> String {
                 return format!("{marker}[tool call: {name}]");
             }
             crate::types::Content::ToolResult { is_error, .. } => {
-                let label = if *is_error { "tool result (error)" } else { "tool result" };
+                let label = if *is_error {
+                    "tool result (error)"
+                } else {
+                    "tool result"
+                };
                 return format!("{marker}[{label}]");
             }
             _ => {}
@@ -237,6 +273,9 @@ pub fn entry_summary(entry: &SessionEntry) -> String {
     format!("{marker}(no text)")
 }
 
+/// Monotonic-ish unique entry id: timestamp prefix plus randomness, no
+/// external deps. Displayed truncated; [`JsonlStore::resolve_id`] accepts
+/// unique prefixes and `#index` forms.
 pub fn new_id() -> String {
     use std::sync::atomic::{AtomicU64, Ordering};
     use std::time::{SystemTime, UNIX_EPOCH};

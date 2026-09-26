@@ -1,6 +1,6 @@
 //! Mapping between tau's message model and the Messages API wire format.
 
-use serde_json::{json, Value as Json};
+use serde_json::{Value as Json, json};
 use tau_core::model::{ModelEvent, Request, StopReason};
 use tau_core::types::{Content, Media, MediaSource, Message, Role};
 
@@ -145,9 +145,10 @@ pub fn chunk_events(data: &str) -> Vec<ModelEvent> {
             match delta["type"].as_str().unwrap_or_default() {
                 "text_delta" => {
                     if let Some(text) = delta["text"].as_str()
-                        && !text.is_empty() {
-                            events.push(ModelEvent::TextDelta { text: text.into() });
-                        }
+                        && !text.is_empty()
+                    {
+                        events.push(ModelEvent::TextDelta { text: text.into() });
+                    }
                 }
                 "input_json_delta" => events.push(ModelEvent::ToolCallDelta {
                     index,
@@ -198,7 +199,9 @@ mod tests {
                 Message {
                     role: Role::User,
                     content: vec![
-                        Content::Text { text: "what is this?".into() },
+                        Content::Text {
+                            text: "what is this?".into(),
+                        },
                         Content::Image {
                             media: Media::bytes("image/png", b"hello"),
                         },
@@ -241,10 +244,7 @@ mod tests {
         assert_eq!(body["messages"][1]["content"][0]["type"], "tool_use");
         // tool result becomes a user-role tool_result block
         assert_eq!(body["messages"][2]["role"], "user");
-        assert_eq!(
-            body["messages"][2]["content"][0]["type"],
-            "tool_result"
-        );
+        assert_eq!(body["messages"][2]["content"][0]["type"], "tool_result");
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
     }
 
@@ -285,7 +285,9 @@ mod tests {
             }]
         );
         assert_eq!(
-            chunk_events(r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#),
+            chunk_events(
+                r#"{"type":"error","error":{"type":"overloaded_error","message":"Overloaded"}}"#
+            ),
             vec![
                 ModelEvent::Error {
                     message: "Overloaded".into()

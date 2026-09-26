@@ -50,7 +50,13 @@ impl StaticServer {
             .unwrap()
             .port();
         let child = std::process::Command::new(python)
-            .args(["-m", "http.server", &port.to_string(), "--bind", "127.0.0.1"])
+            .args([
+                "-m",
+                "http.server",
+                &port.to_string(),
+                "--bind",
+                "127.0.0.1",
+            ])
             .current_dir(&dir)
             .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
@@ -85,10 +91,7 @@ impl Drop for StaticServer {
     }
 }
 
-async fn run_provider(
-    model: &dyn Model,
-    url: &str,
-) -> (String, Option<String>) {
+async fn run_provider(model: &dyn Model, url: &str) -> (String, Option<String>) {
     let request = Request {
         messages: vec![Message::user(url)],
         ..Request::default()

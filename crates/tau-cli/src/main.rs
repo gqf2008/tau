@@ -8,13 +8,17 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tau_core::agent::AgentEvent;
 use tau_core::faux::FauxModel;
-use tau_core::session::{new_id, EntryKind, JsonlStore, SessionEntry};
+use tau_core::session::{EntryKind, JsonlStore, SessionEntry, new_id};
 use tau_core::{Agent, Message, Model, ProbeRegistry, ToolRegistry};
 
 mod repl;
 
 #[derive(Parser)]
-#[command(name = "tau", version, about = "Minimal agent harness with wasm extensions")]
+#[command(
+    name = "tau",
+    version,
+    about = "Minimal agent harness with wasm extensions"
+)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Sub>,
@@ -197,10 +201,7 @@ async fn run_sub(sub: Sub) -> Result<()> {
         Sub::Consent { list, revoke } => {
             let store = tau_ext::consent::ConsentStore::default();
             if let Some(fp) = revoke {
-                anyhow::ensure!(
-                    store.revoke(&fp)?,
-                    "no remembered consent for {fp}"
-                );
+                anyhow::ensure!(store.revoke(&fp)?, "no remembered consent for {fp}");
                 println!("revoked: {fp}");
                 return Ok(());
             }
@@ -282,9 +283,12 @@ async fn run_sub(sub: Sub) -> Result<()> {
             }
         }
         Sub::Push { wasm, reference } => {
-            let bytes = std::fs::read(&wasm)
-                .with_context(|| format!("reading {}", wasm.display()))?;
-            if tau_ext::sign::verify(&bytes).map(|keys| keys.is_empty()).unwrap_or(true) {
+            let bytes =
+                std::fs::read(&wasm).with_context(|| format!("reading {}", wasm.display()))?;
+            if tau_ext::sign::verify(&bytes)
+                .map(|keys| keys.is_empty())
+                .unwrap_or(true)
+            {
                 eprintln!(
                     "[tau] warning: {} is unsigned — consumers will need --allow-unsigned",
                     wasm.display()
@@ -329,7 +333,12 @@ async fn run_sub(sub: Sub) -> Result<()> {
         Sub::Keygen => {
             let fp = tau_ext::sign::keygen()?;
             println!("key generated and trusted: {fp}");
-            println!("  secret: {}", tau_ext::sign::keys_dir().join(format!("{fp}.key")).display());
+            println!(
+                "  secret: {}",
+                tau_ext::sign::keys_dir()
+                    .join(format!("{fp}.key"))
+                    .display()
+            );
         }
         Sub::Sign { wasm, key } => {
             let (fp, key) = tau_ext::sign::load_key(key.as_deref())?;
@@ -344,15 +353,19 @@ async fn run_sub(sub: Sub) -> Result<()> {
         } => {
             if let Some(source) = from_component {
                 let path = resolve_component(&source).await?;
-                let bytes = std::fs::read(&path)
-                    .with_context(|| format!("reading {}", path.display()))?;
+                let bytes =
+                    std::fs::read(&path).with_context(|| format!("reading {}", path.display()))?;
                 let fps = tau_ext::sign::trust_component_keys(&bytes)?;
                 for fp in &fps {
                     println!("trusted: {fp} (from {})", source.display());
                 }
                 println!(
                     "verify {} out-of-band before relying on it",
-                    if fps.len() == 1 { "this fingerprint" } else { "these fingerprints" }
+                    if fps.len() == 1 {
+                        "this fingerprint"
+                    } else {
+                        "these fingerprints"
+                    }
                 );
                 return Ok(());
             }
@@ -363,7 +376,10 @@ async fn run_sub(sub: Sub) -> Result<()> {
                     .unwrap_or_default();
                 entries.sort_by_key(|e| e.file_name());
                 for entry in entries {
-                    println!("{}", entry.file_name().to_string_lossy().trim_end_matches(".pub"));
+                    println!(
+                        "{}",
+                        entry.file_name().to_string_lossy().trim_end_matches(".pub")
+                    );
                 }
                 return Ok(());
             }
@@ -401,10 +417,12 @@ async fn resolve_component(arg: &std::path::Path) -> Result<PathBuf> {
             .await
             .context("oci pull task")??
     };
-    eprintln!("[tau] oci: {} -> {} ({})",
+    eprintln!(
+        "[tau] oci: {} -> {} ({})",
         reference,
         pulled.digest,
-        pulled.path.display());
+        pulled.path.display()
+    );
     if pulled.mutable_tag {
         eprintln!(
             "[tau] note: mutable tag — pin @{} for reproducible loads",
@@ -532,7 +550,9 @@ async fn main() -> Result<()> {
         None if cli.compact => std::io::IsTerminal::is_terminal(&std::io::stdin()),
         None if std::io::IsTerminal::is_terminal(&std::io::stdin()) => true,
         None => {
-            eprintln!("tau: no prompt given and stdin is not a terminal. Try: tau --demo -p \"hello\"");
+            eprintln!(
+                "tau: no prompt given and stdin is not a terminal. Try: tau --demo -p \"hello\""
+            );
             std::process::exit(2);
         }
     };
@@ -548,8 +568,7 @@ async fn main() -> Result<()> {
     };
     for path in &cli.extensions {
         let path = &resolve_component(path).await?;
-        let bytes = std::fs::read(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let (_, fingerprint, remembered) =
             recall_consent(&bytes, tau_ext::bridge::BridgeConsent::default());
         let wasi = effective_wasi(cli.deny_wasi, &remembered);
@@ -583,13 +602,22 @@ async fn main() -> Result<()> {
             let command: Vec<String> = serde_json::from_str(command_json).with_context(|| {
                 format!("--mcp-command must be a JSON argv array, got: {command_json}")
             })?;
-            eprintln!("[tau] mcp bridge: {} (command: {})", path.display(), command_json);
+            eprintln!(
+                "[tau] mcp bridge: {} (command: {})",
+                path.display(),
+                command_json
+            );
             explicit.command = Some(command);
         }
         if let Some(url) = cli.mcp_url.as_deref() {
             let origin = tau_ext::bridge::origin_of(url)
                 .with_context(|| format!("--mcp-url is not a valid http(s) url: {url}"))?;
-            eprintln!("[tau] mcp bridge: {} (url: {}, origin: {})", path.display(), url, origin);
+            eprintln!(
+                "[tau] mcp bridge: {} (url: {}, origin: {})",
+                path.display(),
+                url,
+                origin
+            );
             explicit.origins.insert(origin);
             explicit.mcp_url = Some(url.to_string());
         }
@@ -597,8 +625,7 @@ async fn main() -> Result<()> {
         // Remembered consent: recalled per signing fingerprint; explicit
         // flags win per field, origins union. Unsigned components have no
         // fingerprint — no recall, no remembering.
-        let bytes = std::fs::read(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let (consent, fingerprint, remembered) = recall_consent(&bytes, explicit);
         anyhow::ensure!(
             consent.command.is_some() || consent.mcp_url.is_some(),
@@ -641,8 +668,7 @@ async fn main() -> Result<()> {
                 .with_context(|| format!("--provider-origin is not a valid http(s) url: {url}"))?;
             explicit.origins.insert(origin);
         }
-        let bytes = std::fs::read(path)
-            .with_context(|| format!("reading {}", path.display()))?;
+        let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let (consent, fingerprint, remembered) = recall_consent(&bytes, explicit);
         if !consent.origins.is_empty() {
             eprintln!("[tau] provider http origins: {:?}", consent.origins);
@@ -773,7 +799,10 @@ async fn main() -> Result<()> {
                 }
                 Ok(AgentEvent::ToolCallStart { name, .. }) => eprintln!("\n[tau] tool → {name}"),
                 Ok(AgentEvent::ToolCallEnd { name, is_error, .. }) => {
-                    eprintln!("[tau] tool ← {name}{}", if is_error { " (error)" } else { "" })
+                    eprintln!(
+                        "[tau] tool ← {name}{}",
+                        if is_error { " (error)" } else { "" }
+                    )
                 }
                 Ok(AgentEvent::Probe { point, action }) => {
                     eprintln!("[tau] probe {point}: {action}")

@@ -25,7 +25,9 @@ async fn loads_tool_and_executes() {
     assert_eq!(tools.len(), 1);
     assert_eq!(tools[0].def().name, "upper");
 
-    let out = tools[0].execute(serde_json::json!({ "text": "hello tau" })).await;
+    let out = tools[0]
+        .execute(serde_json::json!({ "text": "hello tau" }))
+        .await;
     assert!(!out.is_error);
     assert_eq!(out.content, "HELLO TAU");
 }

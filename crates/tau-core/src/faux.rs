@@ -9,6 +9,8 @@ use futures::stream::{self, BoxStream};
 
 use crate::model::{Model, ModelEvent, Request};
 
+/// A scripted model for tests and demos: plays back pre-recorded
+/// event rounds, or synthesizes a one-tool-call-then-text demo flow.
 pub struct FauxModel {
     rounds: Mutex<Vec<Vec<ModelEvent>>>,
     demo: std::sync::atomic::AtomicBool,
@@ -39,8 +41,13 @@ impl FauxModel {
     /// One round of plain text, for demos.
     pub fn echo() -> Self {
         Self::scripted(vec![vec![
-            ModelEvent::TextDelta { text: "tau is alive. ".into() },
-            ModelEvent::TextDelta { text: "(faux model — set ANTHROPIC_API_KEY or OPENAI_API_KEY for a real one)".into() },
+            ModelEvent::TextDelta {
+                text: "tau is alive. ".into(),
+            },
+            ModelEvent::TextDelta {
+                text: "(faux model — set ANTHROPIC_API_KEY or OPENAI_API_KEY for a real one)"
+                    .into(),
+            },
             ModelEvent::Done {
                 stop: crate::model::StopReason::Stop,
             },
@@ -62,7 +69,9 @@ impl Model for FauxModel {
             let mut rounds = self.rounds.lock().unwrap();
             if rounds.is_empty() {
                 vec![
-                    ModelEvent::TextDelta { text: "tau is alive. ".into() },
+                    ModelEvent::TextDelta {
+                        text: "tau is alive. ".into(),
+                    },
                     ModelEvent::TextDelta {
                         text: "(faux model — script exhausted)".into(),
                     },
@@ -103,7 +112,9 @@ fn demo_round(req: &Request) -> Vec<ModelEvent> {
         ];
     }
     vec![
-        ModelEvent::TextDelta { text: "tau is alive. ".into() },
+        ModelEvent::TextDelta {
+            text: "tau is alive. ".into(),
+        },
         ModelEvent::TextDelta {
             text: "(faux model — set ANTHROPIC_API_KEY or OPENAI_API_KEY for a real one)".into(),
         },
@@ -134,7 +145,9 @@ fn demo_tool_call(req: &Request) -> Option<(String, String, String)> {
     let mut args = serde_json::Map::new();
     for name in schema["required"].as_array().into_iter().flatten() {
         let Some(name) = name.as_str() else { continue };
-        let ty = schema["properties"][name]["type"].as_str().unwrap_or("string");
+        let ty = schema["properties"][name]["type"]
+            .as_str()
+            .unwrap_or("string");
         let value = match ty {
             "string" => serde_json::Value::String(prompt.clone()),
             "number" | "integer" => serde_json::json!(1),
@@ -163,7 +176,9 @@ mod tests {
         // Two chunks of pcm, then one of opus: two blocks, the pcm pair
         // concatenated. Plus text, to check block order.
         let model = FauxModel::scripted(vec![vec![
-            ModelEvent::TextDelta { text: "listen. ".into() },
+            ModelEvent::TextDelta {
+                text: "listen. ".into(),
+            },
             ModelEvent::AudioDelta {
                 data: vec![1, 2],
                 media_type: "audio/pcm".into(),
@@ -243,9 +258,11 @@ mod tests {
         };
         let events: Vec<_> = model.stream(&req).await.collect().await;
         let call = events.iter().find_map(|e| match e {
-            ModelEvent::ToolCallDelta { name, arguments_delta, .. } => {
-                Some((name.clone().unwrap(), arguments_delta.clone()))
-            }
+            ModelEvent::ToolCallDelta {
+                name,
+                arguments_delta,
+                ..
+            } => Some((name.clone().unwrap(), arguments_delta.clone())),
             _ => None,
         });
         let (name, args) = call.expect("demo emits a tool call");
@@ -274,7 +291,11 @@ mod tests {
             tools: vec![tool],
         };
         let events: Vec<_> = model.stream(&req2).await.collect().await;
-        assert!(events.iter().any(|e| matches!(e, ModelEvent::TextDelta { .. })));
+        assert!(
+            events
+                .iter()
+                .any(|e| matches!(e, ModelEvent::TextDelta { .. }))
+        );
         assert!(matches!(
             events.last(),
             Some(ModelEvent::Done {
@@ -358,7 +379,9 @@ mod tests {
         let model = FauxModel::scripted(vec![
             tool_call_round(),
             vec![
-                ModelEvent::TextDelta { text: "cba reversed is abc".into() },
+                ModelEvent::TextDelta {
+                    text: "cba reversed is abc".into(),
+                },
                 ModelEvent::Done {
                     stop: StopReason::Stop,
                 },
@@ -370,10 +393,7 @@ mod tests {
 
         let mut events = Vec::new();
         let mut stream = agent.events();
-        let produced = agent
-            .run(&[], Message::user("reverse abc"))
-            .await
-            .unwrap();
+        let produced = agent.run(&[], Message::user("reverse abc")).await.unwrap();
         while let Ok(e) = stream.try_recv() {
             events.push(e);
         }
@@ -486,10 +506,7 @@ mod tests {
         probes.register(Box::new(BlockDangerous));
         let agent = Agent::new(Box::new(model), tools).probes(probes);
 
-        let produced = agent
-            .run(&[], Message::user("reverse abc"))
-            .await
-            .unwrap();
+        let produced = agent.run(&[], Message::user("reverse abc")).await.unwrap();
 
         // The tool never ran; the model got a blocked tool result instead.
         assert_eq!(
@@ -517,10 +534,7 @@ mod probe_point_tests {
 
     #[async_trait]
     impl Model for EchoLast {
-        async fn stream(
-            &self,
-            req: &Request,
-        ) -> futures::stream::BoxStream<'static, ModelEvent> {
+        async fn stream(&self, req: &Request) -> futures::stream::BoxStream<'static, ModelEvent> {
             use futures::StreamExt;
             let text = req
                 .messages
@@ -588,16 +602,20 @@ mod probe_point_tests {
             ]
         );
         // before_request sees the final request incl. the user message.
-        assert!(fired[0].1["messages"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .any(|m| m["content"][0]["text"] == "hello probes"));
+        assert!(
+            fired[0].1["messages"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|m| m["content"][0]["text"] == "hello probes")
+        );
         // after_response sees the assembled assistant message.
-        assert!(fired[1].1["message"]["content"][0]["text"]
-            .as_str()
-            .unwrap()
-            .contains("hello probes"));
+        assert!(
+            fired[1].1["message"]["content"][0]["text"]
+                .as_str()
+                .unwrap()
+                .contains("hello probes")
+        );
         // before_run_end sees everything the run produced.
         assert!(fired[2].1["messages"].as_array().unwrap().len() >= 2);
     }
@@ -765,14 +783,8 @@ mod control_tests {
         let produced = agent.run(&[], Message::user("start")).await.unwrap();
         // prompt, assistant(tool_call), tool result, steer, assistant(text)
         assert_eq!(produced.len(), 5);
-        assert!(matches!(
-            produced[1].content[0],
-            Content::ToolCall { .. }
-        ));
-        assert!(matches!(
-            produced[2].content[0],
-            Content::ToolResult { .. }
-        ));
+        assert!(matches!(produced[1].content[0], Content::ToolCall { .. }));
+        assert!(matches!(produced[2].content[0], Content::ToolResult { .. }));
         assert_eq!(produced[3].text(), "steer message");
         assert_eq!(produced[3].role, Role::User);
         assert_eq!(produced[4].text(), "after steer");
@@ -786,7 +798,10 @@ mod control_tests {
             .control()
             .send(Control::FollowUp(Message::user("follow-up question")))
             .unwrap();
-        let produced = agent.run(&[], Message::user("first question")).await.unwrap();
+        let produced = agent
+            .run(&[], Message::user("first question"))
+            .await
+            .unwrap();
         assert_eq!(produced.len(), 4);
         assert_eq!(produced[1].text(), "answer one");
         assert_eq!(produced[2].text(), "follow-up question");
@@ -796,7 +811,7 @@ mod control_tests {
 
 #[cfg(test)]
 mod blob_edge_tests {
-    use crate::blobs::{externalize, BlobStore, INLINE_LIMIT};
+    use crate::blobs::{BlobStore, INLINE_LIMIT, externalize};
     use crate::model::{Model, ModelEvent, Request, StopReason};
     use crate::types::{Content, Media, MediaSource};
     use crate::{Agent, Message, ToolRegistry};
@@ -807,10 +822,7 @@ mod blob_edge_tests {
 
     #[async_trait]
     impl Model for Capture {
-        async fn stream(
-            &self,
-            req: &Request,
-        ) -> futures::stream::BoxStream<'static, ModelEvent> {
+        async fn stream(&self, req: &Request) -> futures::stream::BoxStream<'static, ModelEvent> {
             use futures::StreamExt;
             for message in &req.messages {
                 for content in &message.content {
@@ -892,10 +904,7 @@ mod compaction_tests {
 
     #[async_trait]
     impl Model for Summarizer {
-        async fn stream(
-            &self,
-            req: &Request,
-        ) -> futures::stream::BoxStream<'static, ModelEvent> {
+        async fn stream(&self, req: &Request) -> futures::stream::BoxStream<'static, ModelEvent> {
             use futures::StreamExt;
             *self.0.lock().unwrap() = Some(Request {
                 system: req.system.clone(),
@@ -917,10 +926,7 @@ mod compaction_tests {
     struct Shared(std::sync::Arc<Summarizer>);
     #[async_trait]
     impl Model for Shared {
-        async fn stream(
-            &self,
-            req: &Request,
-        ) -> futures::stream::BoxStream<'static, ModelEvent> {
+        async fn stream(&self, req: &Request) -> futures::stream::BoxStream<'static, ModelEvent> {
             self.0.stream(req).await
         }
     }
@@ -938,7 +944,11 @@ mod compaction_tests {
         let (agent, model) = agent();
         let history = vec![Message::user("hello"), Message::user("hi")];
         let summary = agent.compact(&history).await.unwrap();
-        assert!(summary.text().contains("[summary of the earlier conversation]"));
+        assert!(
+            summary
+                .text()
+                .contains("[summary of the earlier conversation]")
+        );
         assert!(summary.text().contains("goal: demo"));
         // The summarization request carried the history plus the ask.
         let request = model.0.lock().unwrap().take().unwrap();
@@ -965,10 +975,7 @@ mod compaction_tests {
         let mut probes = crate::ProbeRegistry::new();
         probes.register(Box::new(Veto));
         let agent = agent.probes(probes);
-        let err = agent
-            .compact(&[Message::user("hello")])
-            .await
-            .unwrap_err();
+        let err = agent.compact(&[Message::user("hello")]).await.unwrap_err();
         assert!(err.to_string().contains("not now"));
     }
 
@@ -1029,7 +1036,10 @@ mod navigation_tests {
     }
 
     fn agent() -> Agent {
-        Agent::new(Box::new(crate::faux::FauxModel::echo()), ToolRegistry::new())
+        Agent::new(
+            Box::new(crate::faux::FauxModel::echo()),
+            ToolRegistry::new(),
+        )
     }
 
     #[tokio::test]

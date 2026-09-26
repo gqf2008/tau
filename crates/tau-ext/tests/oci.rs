@@ -4,8 +4,8 @@
 
 use std::path::PathBuf;
 
-use tau_ext::oci;
 use tau_ext::ExtensionHost;
+use tau_ext::oci;
 
 fn artifact() -> Option<PathBuf> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -121,7 +121,9 @@ async fn pulls_loads_and_caches_from_registry() {
     let host = ExtensionHost::new();
     let extension = host.load(&pulled.path).expect("load pulled component");
     let (tools, _) = extension.into_parts();
-    let out = tools[0].execute(serde_json::json!({ "text": "from oci" })).await;
+    let out = tools[0]
+        .execute(serde_json::json!({ "text": "from oci" }))
+        .await;
     assert_eq!(out.content, "FROM OCI");
 
     let _ = std::fs::remove_dir_all(&cache);
@@ -184,7 +186,10 @@ fn push_to_a_digest_reference_is_an_error() {
     let wasm = std::env::temp_dir().join("tau-oci-push-digest.wasm");
     std::fs::write(&wasm, b"wasm").unwrap();
     let result = oci::push(
-        &format!("oci://127.0.0.1:1/test/component@sha256:{}", "00".repeat(32)),
+        &format!(
+            "oci://127.0.0.1:1/test/component@sha256:{}",
+            "00".repeat(32)
+        ),
         &wasm,
     );
     assert!(matches!(result, Err(oci::OciError::BadReference(_))));

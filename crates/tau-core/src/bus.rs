@@ -19,9 +19,13 @@ use crate::agent::AgentEvent;
 /// falls behind gets `RecvError::Lagged` and skips ahead.
 pub const BUS_CAPACITY: usize = 1024;
 
+/// The agent's event bus: every [`Agent::run`](crate::Agent::run)
+/// publishes its [`AgentEvent`]s here.
 pub type EventBus = broadcast::Sender<AgentEvent>;
+/// One subscription to an [`EventBus`].
 pub type EventStream = broadcast::Receiver<AgentEvent>;
 
+/// A fresh bus ([`BUS_CAPACITY`] ring; slow subscribers miss oldest events).
 pub fn new_bus() -> EventBus {
     broadcast::channel(BUS_CAPACITY).0
 }

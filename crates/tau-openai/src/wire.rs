@@ -1,6 +1,6 @@
 //! Mapping between tau's message model and the chat-completions wire format.
 
-use serde_json::{json, Value as Json};
+use serde_json::{Value as Json, json};
 use tau_core::model::{ModelEvent, Request, StopReason};
 use tau_core::types::{Content, Media, Message, Role};
 
@@ -149,9 +149,12 @@ pub fn chunk_events(data: &str) -> Vec<ModelEvent> {
     for choice in chunk["choices"].as_array().into_iter().flatten() {
         let delta = &choice["delta"];
         if let Some(text) = delta["content"].as_str()
-            && !text.is_empty() {
-                events.push(ModelEvent::TextDelta { text: text.to_string() });
-            }
+            && !text.is_empty()
+        {
+            events.push(ModelEvent::TextDelta {
+                text: text.to_string(),
+            });
+        }
         for call in delta["tool_calls"].as_array().into_iter().flatten() {
             let index = call["index"].as_u64().unwrap_or(0) as u32;
             events.push(ModelEvent::ToolCallDelta {

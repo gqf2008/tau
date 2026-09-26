@@ -15,39 +15,86 @@ use crate::probe::{ProbePoint, ProbeRegistry, Verdict};
 use crate::tool::ToolRegistry;
 use crate::types::{Content, Message, Role};
 
+/// Lifecycle events published on the agent's bus ([`Agent::events`]):
+/// the full observable trail of a run for UIs and loggers.
 #[derive(Debug, Clone, PartialEq)]
 pub enum AgentEvent {
+    /// A run began.
     RunStart,
+    /// A fragment of assistant text.
     TextDelta(String),
     /// A provider streamed audio (realtime-style): how many bytes just
     /// arrived and of what media type. The bytes themselves are not on
     /// the bus — they land in the assistant message as Content::Audio.
-    AudioDelta { bytes: usize, media_type: String },
-    ToolCallStart { id: String, name: String },
-    ToolCallEnd { id: String, name: String, is_error: bool },
+    AudioDelta {
+        /// How many bytes just arrived.
+        bytes: usize,
+        /// The media type of the segment they belong to.
+        media_type: String,
+    },
+    /// A tool call began executing.
+    ToolCallStart {
+        /// The call's id.
+        id: String,
+        /// The tool's name.
+        name: String,
+    },
+    /// A tool call finished.
+    ToolCallEnd {
+        /// The call's id.
+        id: String,
+        /// The tool's name.
+        name: String,
+        /// Whether the tool reported failure.
+        is_error: bool,
+    },
     /// A probe fired; observers see the full decision trail.
-    Probe { point: &'static str, action: &'static str },
+    Probe {
+        /// The probe point's wire name.
+        point: &'static str,
+        /// The verdict's action (`continue`/`replace`/`block`).
+        action: &'static str,
+    },
     /// A steering message was injected after the current turn's tool results.
     Steer(Message),
     /// A queued follow-up became the next prompt in the same run.
     FollowUp(Message),
     /// An abort command was honored at a checkpoint.
     Abort,
-    TurnEnd { stop: StopReason },
-    RunEnd { stop: StopReason },
-    RunError { message: String },
+    /// One model turn ended.
+    TurnEnd {
+        /// Why the model stopped.
+        stop: StopReason,
+    },
+    /// The whole run ended.
+    RunEnd {
+        /// Why the final turn stopped.
+        stop: StopReason,
+    },
+    /// The run failed.
+    RunError {
+        /// What failed.
+        message: String,
+    },
 }
 
+/// Failures of the agent loop and its session operations.
 #[derive(Debug, Error)]
 pub enum AgentError {
+    /// The model reported an error event.
     #[error("model error: {0}")]
     Model(String),
+    /// A `before_navigation` probe vetoed the navigation.
     #[error("navigation blocked: {0}")]
     NavigationBlocked(String),
+    /// Session store failure.
     #[error("session: {0}")]
     Session(#[from] crate::session::SessionError),
 }
 
+/// The agent: a [`Model`], a tool set, probes, and the event bus, run as
+/// the loop described at the module level. Build with [`Agent::new`] and
+/// the `with`-style setters, then [`Agent::run`].
 pub struct Agent {
     model: Box<dyn Model>,
     tools: ToolRegistry,
@@ -64,6 +111,8 @@ pub struct Agent {
 }
 
 impl Agent {
+    /// An agent over the given model and tools (probes empty, defaults
+    /// for everything else).
     pub fn new(model: Box<dyn Model>, tools: ToolRegistry) -> Self {
         let (control_tx, control_rx) = crate::control::channel();
         Self {
@@ -81,18 +130,23 @@ impl Agent {
 
     /// Attach the blob store used to resolve `MediaSource::Blob` media
     /// back to bytes before each model request.
+    /// Attach a blob store for materializing `MediaSource::Blob` media
+    /// at the request edge.
     pub fn blobs(mut self, store: crate::blobs::BlobStore) -> Self {
         self.blobs = Some(store);
         self
     }
 
     /// Subscribe to the event stream. Call before `run`.
+    /// Subscribe to this agent's [`AgentEvent`] stream.
     pub fn events(&self) -> crate::bus::EventStream {
         self.bus.subscribe()
     }
 
     /// The control channel into the loop: steer, follow-up, abort.
     /// Clone freely; safe to use from any task (see `control` module docs).
+    /// A handle for sending control commands (steer, follow-up, abort)
+    /// into a running loop.
     pub fn control(&self) -> ControlTx {
         self.control_tx.clone()
     }
@@ -122,16 +176,19 @@ impl Agent {
         verdict
     }
 
+    /// Set the system prompt for requests built by this agent.
     pub fn system(mut self, system: impl Into<String>) -> Self {
         self.system = Some(system.into());
         self
     }
 
+    /// Attach probe handlers (extension hooks observing/influencing runs).
     pub fn probes(mut self, probes: ProbeRegistry) -> Self {
         self.probes = probes;
         self
     }
 
+    /// Bound the consecutive model turns in one run (runaway-loop guard).
     pub fn max_turns(mut self, max_turns: usize) -> Self {
         self.max_turns = max_turns;
         self
@@ -180,8 +237,7 @@ impl Agent {
 
         let request = Request {
             system: Some(
-                "You condense conversation history into a compact continuation brief."
-                    .into(),
+                "You condense conversation history into a compact continuation brief.".into(),
             ),
             messages: [
                 messages,
@@ -265,10 +321,8 @@ impl Agent {
             )
             .await
         {
-            Verdict::Replace(payload) => {
-                serde_json::from_value(payload["prompt"].clone())
-                    .map_err(|e| AgentError::Model(format!("bad before_run payload: {e}")))?
-            }
+            Verdict::Replace(payload) => serde_json::from_value(payload["prompt"].clone())
+                .map_err(|e| AgentError::Model(format!("bad before_run payload: {e}")))?,
             Verdict::Block { reason } => return Err(AgentError::Model(reason)),
             Verdict::Continue => prompt,
         };
@@ -308,10 +362,12 @@ impl Agent {
             });
             let request = match self.probe(ProbePoint::BeforeRequest, request_json).await {
                 Verdict::Replace(payload) => Request {
-                    system: serde_json::from_value(payload["system"].clone())
-                        .map_err(|e| AgentError::Model(format!("bad before_request payload: {e}")))?,
-                    messages: serde_json::from_value(payload["messages"].clone())
-                        .map_err(|e| AgentError::Model(format!("bad before_request payload: {e}")))?,
+                    system: serde_json::from_value(payload["system"].clone()).map_err(|e| {
+                        AgentError::Model(format!("bad before_request payload: {e}"))
+                    })?,
+                    messages: serde_json::from_value(payload["messages"].clone()).map_err(|e| {
+                        AgentError::Model(format!("bad before_request payload: {e}"))
+                    })?,
                     tools: request.tools, // tools are registry-owned; not replaceable here
                 },
                 Verdict::Block { reason } => return Err(AgentError::Model(reason)),
@@ -343,8 +399,10 @@ impl Agent {
                 .await
             {
                 Verdict::Replace(payload) => {
-                    let message = serde_json::from_value(payload["message"].clone())
-                        .map_err(|e| AgentError::Model(format!("bad after_response payload: {e}")))?;
+                    let message =
+                        serde_json::from_value(payload["message"].clone()).map_err(|e| {
+                            AgentError::Model(format!("bad after_response payload: {e}"))
+                        })?;
                     let stop = serde_json::from_value(payload["stop"].clone()).unwrap_or(stop);
                     (message, stop)
                 }
@@ -391,8 +449,9 @@ impl Agent {
                     .await
                 {
                     Verdict::Replace(payload) => {
-                        serde_json::from_value(payload["messages"].clone())
-                            .map_err(|e| AgentError::Model(format!("bad before_run_end payload: {e}")))?
+                        serde_json::from_value(payload["messages"].clone()).map_err(|e| {
+                            AgentError::Model(format!("bad before_run_end payload: {e}"))
+                        })?
                     }
                     Verdict::Block { reason } => return Err(AgentError::Model(reason)),
                     Verdict::Continue => produced,
@@ -582,9 +641,8 @@ impl Agent {
             let arguments = if arguments.trim().is_empty() {
                 serde_json::json!({})
             } else {
-                serde_json::from_str(&arguments).unwrap_or_else(|_| {
-                    serde_json::json!({ "__invalidJson": arguments })
-                })
+                serde_json::from_str(&arguments)
+                    .unwrap_or_else(|_| serde_json::json!({ "__invalidJson": arguments }))
             };
             content.push(Content::ToolCall {
                 id,

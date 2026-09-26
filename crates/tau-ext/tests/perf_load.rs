@@ -32,7 +32,11 @@ fn compile_cache_populates_and_loads_stay_correct() {
     let populated = std::fs::read_dir(&dir)
         .map(|rd| rd.flatten().count() > 0)
         .unwrap_or(false);
-    assert!(populated, "compile cache did not populate {}", dir.display());
+    assert!(
+        populated,
+        "compile cache did not populate {}",
+        dir.display()
+    );
 }
 
 #[test]

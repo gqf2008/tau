@@ -13,7 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use tau_core::{Agent, AgentEvent, Control, JsonlStore, Message};
-use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver};
+use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
 /// What the input thread observed.
 pub(crate) enum LineEvent {
@@ -50,8 +50,7 @@ pub(crate) async fn interactive(
         // Route output through the external printer so streamed text and
         // status lines land above the line being edited. Fall back to
         // plain println if the terminal can't do it.
-        let printer: Box<dyn Fn(&str) + Send + Sync> = match editor.create_external_printer()
-        {
+        let printer: Box<dyn Fn(&str) + Send + Sync> = match editor.create_external_printer() {
             Ok(p) => {
                 let p = Mutex::new(p);
                 Box::new(move |line: &str| {
@@ -134,7 +133,10 @@ pub(crate) async fn drive(
                 }
                 Ok(AgentEvent::ToolCallStart { name, .. }) => format!("[tau] tool → {name}"),
                 Ok(AgentEvent::ToolCallEnd { name, is_error, .. }) => {
-                    format!("[tau] tool ← {name}{}", if is_error { " (error)" } else { "" })
+                    format!(
+                        "[tau] tool ← {name}{}",
+                        if is_error { " (error)" } else { "" }
+                    )
                 }
                 Ok(AgentEvent::Probe { point, action }) => format!("[tau] probe {point}: {action}"),
                 Ok(AgentEvent::Steer(message)) => format!("[tau] steer: {}", message.text()),
@@ -322,9 +324,9 @@ pub(crate) async fn drive(
 mod tests {
     use super::*;
     use std::sync::Mutex;
+    use tau_core::ToolRegistry;
     use tau_core::faux::FauxModel;
     use tau_core::model::{Model, ModelEvent, Request, StopReason};
-    use tau_core::ToolRegistry;
     use tokio::sync::Notify;
 
     struct Capture {
@@ -364,14 +366,9 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Model for GatedModel {
-        async fn stream(
-            &self,
-            _req: &Request,
-        ) -> futures::stream::BoxStream<'static, ModelEvent> {
+        async fn stream(&self, _req: &Request) -> futures::stream::BoxStream<'static, ModelEvent> {
             use futures::StreamExt;
-            let call = self
-                .calls
-                .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let call = self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
             let started = self.started.clone();
             let gate = self.gate.clone();
             async_stream::stream! {
@@ -393,10 +390,7 @@ mod tests {
 
     #[async_trait::async_trait]
     impl Model for StaticModel {
-        async fn stream(
-            &self,
-            _req: &Request,
-        ) -> futures::stream::BoxStream<'static, ModelEvent> {
+        async fn stream(&self, _req: &Request) -> futures::stream::BoxStream<'static, ModelEvent> {
             use futures::StreamExt;
             futures::stream::iter([
                 ModelEvent::TextDelta {
@@ -419,14 +413,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(
-            agent,
-            store,
-            Vec::new(),
-            None,
-            rx,
-            capture.printer(),
-        ));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer()));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("two".into())).unwrap();
@@ -465,14 +452,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(
-            agent,
-            store,
-            Vec::new(),
-            None,
-            rx,
-            capture.printer(),
-        ));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer()));
 
         tx.send(LineEvent::Line("start".into())).unwrap();
         started.notified().await; // model is mid-stream now
@@ -509,14 +489,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(
-            agent,
-            store,
-            Vec::new(),
-            None,
-            rx,
-            capture.printer(),
-        ));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer()));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("two".into())).unwrap();
@@ -564,14 +537,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(
-            agent,
-            store,
-            Vec::new(),
-            None,
-            rx,
-            capture.printer(),
-        ));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer()));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("/compact".into())).unwrap();
@@ -615,23 +581,13 @@ mod tests {
     #[tokio::test]
     async fn commands_and_unknown_slash() {
         let (_dir, store) = store();
-        let agent = Arc::new(Agent::new(
-            Box::new(FauxModel::echo()),
-            ToolRegistry::new(),
-        ));
+        let agent = Arc::new(Agent::new(Box::new(FauxModel::echo()), ToolRegistry::new()));
         let capture = Arc::new(Capture {
             lines: Mutex::new(Vec::new()),
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(
-            agent,
-            store,
-            Vec::new(),
-            None,
-            rx,
-            capture.printer(),
-        ));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer()));
         tx.send(LineEvent::Line("/help".into())).unwrap();
         tx.send(LineEvent::Line("/bogus".into())).unwrap();
         tx.send(LineEvent::Line("/quit".into())).unwrap();

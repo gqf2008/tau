@@ -19,16 +19,23 @@
 
 use crate::types::Message;
 
+/// A control command sent into a running agent loop.
 #[derive(Debug, Clone)]
 pub enum Control {
+    /// Inject a steering message after the current assistant turn.
     Steer(Message),
+    /// Queue a follow-up prompt for when the run finishes.
     FollowUp(Message),
+    /// Stop the run at the next checkpoint.
     Abort,
 }
 
+/// The sending half of an agent's control channel ([`Agent::control`](crate::Agent::control)).
 pub type ControlTx = tokio::sync::mpsc::UnboundedSender<Control>;
+/// The receiving half, held by the loop.
 pub type ControlRx = tokio::sync::mpsc::UnboundedReceiver<Control>;
 
+/// A fresh control channel pair.
 pub fn channel() -> (ControlTx, ControlRx) {
     tokio::sync::mpsc::unbounded_channel()
 }

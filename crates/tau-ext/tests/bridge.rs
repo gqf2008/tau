@@ -6,8 +6,8 @@
 
 use std::path::PathBuf;
 
-use tau_ext::bridge::BridgeConsent;
 use tau_ext::ExtensionHost;
+use tau_ext::bridge::BridgeConsent;
 
 fn artifact() -> Option<PathBuf> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -52,10 +52,13 @@ async fn bridge_rejects_unspeakable_protocol_version() {
     ];
 
     let host = ExtensionHost::new();
-    let result = host.load_bridge(&path, BridgeConsent {
-        command: Some(command),
-        ..BridgeConsent::default()
-    });
+    let result = host.load_bridge(
+        &path,
+        BridgeConsent {
+            command: Some(command),
+            ..BridgeConsent::default()
+        },
+    );
     let error = match result {
         Ok(_) => panic!("an unspeakable version must fail the handshake"),
         Err(error) => error,
@@ -80,16 +83,21 @@ async fn bridge_exposes_mcp_tools() {
 
     let host = ExtensionHost::new();
     let tools = host
-        .load_bridge(&path, BridgeConsent {
-            command: Some(command),
-            ..BridgeConsent::default()
-        })
+        .load_bridge(
+            &path,
+            BridgeConsent {
+                command: Some(command),
+                ..BridgeConsent::default()
+            },
+        )
         .expect("load bridge");
     let names: Vec<String> = tools.iter().map(|t| t.def().name).collect();
     assert_eq!(names, ["echo", "fail"]);
 
     let echo = &tools[0];
-    let out = echo.execute(serde_json::json!({ "text": "hello over stdio" })).await;
+    let out = echo
+        .execute(serde_json::json!({ "text": "hello over stdio" }))
+        .await;
     assert!(!out.is_error);
     assert_eq!(out.content, "hello over stdio");
 
@@ -112,10 +120,13 @@ async fn bridge_rejects_missing_command() {
     };
     let host = ExtensionHost::new();
     // A command that does not exist must fail at handshake, not silently.
-    let result = host.load_bridge(&path, BridgeConsent {
-        command: Some(vec!["definitely-not-a-real-program-xyz".into()]),
-        ..BridgeConsent::default()
-    });
+    let result = host.load_bridge(
+        &path,
+        BridgeConsent {
+            command: Some(vec!["definitely-not-a-real-program-xyz".into()]),
+            ..BridgeConsent::default()
+        },
+    );
     assert!(result.is_err());
 }
 
@@ -151,7 +162,7 @@ async fn bridge_exposes_mcp_tools_over_http() {
     while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
         if std::time::Instant::now() > deadline {
             let _ = child.kill();
-    let _ = child.wait();
+            let _ = child.wait();
             panic!("mock http server did not start");
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -160,16 +171,19 @@ async fn bridge_exposes_mcp_tools_over_http() {
     let url = format!("http://127.0.0.1:{port}/mcp");
     let origin = tau_ext::bridge::origin_of(&url).expect("origin");
     let host = ExtensionHost::new();
-    let tools = host.load_bridge(&path, BridgeConsent {
-        mcp_url: Some(url),
-        origins: [origin].into_iter().collect(),
-        ..BridgeConsent::default()
-    });
+    let tools = host.load_bridge(
+        &path,
+        BridgeConsent {
+            mcp_url: Some(url),
+            origins: [origin].into_iter().collect(),
+            ..BridgeConsent::default()
+        },
+    );
     let tools = match tools {
         Ok(tools) => tools,
         Err(e) => {
             let _ = child.kill();
-    let _ = child.wait();
+            let _ = child.wait();
             panic!("load bridge over http: {e}");
         }
     };
@@ -200,10 +214,13 @@ async fn http_origin_outside_allowlist_is_denied() {
     // allowlist is EMPTY: every http request must fail, so the handshake
     // fails and the load errors out. A bridge can never reach an origin the
     // user did not consent to.
-    let result = host.load_bridge(&path, BridgeConsent {
-        mcp_url: Some("http://127.0.0.1:9/mcp".into()),
-        ..BridgeConsent::default()
-    });
+    let result = host.load_bridge(
+        &path,
+        BridgeConsent {
+            mcp_url: Some("http://127.0.0.1:9/mcp".into()),
+            ..BridgeConsent::default()
+        },
+    );
     assert!(result.is_err());
 }
 

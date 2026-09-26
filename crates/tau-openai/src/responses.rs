@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use serde_json::{json, Value as Json};
+use serde_json::{Value as Json, json};
 use tau_core::model::{ModelEvent, Request, StopReason};
 use tau_core::types::{Content, Role};
 
@@ -154,9 +154,10 @@ impl ChunkMapper {
         match chunk["type"].as_str().unwrap_or_default() {
             "response.output_text.delta" => {
                 if let Some(text) = chunk["delta"].as_str()
-                    && !text.is_empty() {
-                        events.push(ModelEvent::TextDelta { text: text.into() });
-                    }
+                    && !text.is_empty()
+                {
+                    events.push(ModelEvent::TextDelta { text: text.into() });
+                }
             }
             "response.output_item.added" => {
                 let item = &chunk["item"];

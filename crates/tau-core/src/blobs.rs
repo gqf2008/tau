@@ -26,11 +26,14 @@ use crate::types::{Content, MediaSource, Message};
 /// Media larger than this is externalized at session write time.
 pub const INLINE_LIMIT: usize = 256 * 1024;
 
+/// Content-addressed blob store: session media above [`INLINE_LIMIT`]
+/// is externalized here, referenced by `sha256:<hex>`.
 pub struct BlobStore {
     dir: PathBuf,
 }
 
 impl BlobStore {
+    /// A store rooted at `dir` (created on first [`put`](Self::put)).
     pub fn new(dir: impl Into<PathBuf>) -> Self {
         Self { dir: dir.into() }
     }
@@ -60,6 +63,7 @@ impl BlobStore {
         Ok(hash)
     }
 
+    /// The bytes for `hash`, or `None` when absent.
     pub fn get(&self, hash: &str) -> io::Result<Option<Vec<u8>>> {
         match std::fs::read(self.path(hash)) {
             Ok(bytes) => Ok(Some(bytes)),
@@ -68,6 +72,7 @@ impl BlobStore {
         }
     }
 
+    /// Whether `hash` is stored.
     pub fn has(&self, hash: &str) -> bool {
         self.path(hash).is_file()
     }
@@ -89,7 +94,10 @@ impl BlobStore {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
-            let Some(hash) = name.split_once('_').map(|(tag, hex)| format!("{tag}:{hex}")) else {
+            let Some(hash) = name
+                .split_once('_')
+                .map(|(tag, hex)| format!("{tag}:{hex}"))
+            else {
                 continue;
             };
             report.scanned += 1;
@@ -118,7 +126,9 @@ pub struct GcReport {
     pub kept: usize,
     /// Unreferenced — deleted (or would be, on a dry run).
     pub removed: usize,
+    /// Total size of the removed blobs.
     pub bytes_freed: u64,
+    /// Hashes of the removed blobs, sorted.
     pub removed_hashes: Vec<String>,
 }
 
@@ -141,10 +151,11 @@ pub fn blob_hashes(message: &Message) -> impl Iterator<Item = &str> {
 pub fn externalize(message: &mut Message, store: &BlobStore) -> io::Result<()> {
     for media in media_mut(message) {
         if let MediaSource::Bytes(bytes) = &media.source
-            && bytes.len() > INLINE_LIMIT {
-                let hash = store.put(bytes)?;
-                media.source = MediaSource::Blob { hash };
-            }
+            && bytes.len() > INLINE_LIMIT
+        {
+            let hash = store.put(bytes)?;
+            media.source = MediaSource::Blob { hash };
+        }
     }
     Ok(())
 }
@@ -192,13 +203,16 @@ pub fn materialize(message: &mut Message, store: &BlobStore) {
 }
 
 fn media_mut(message: &mut Message) -> impl Iterator<Item = &mut crate::types::Media> {
-    message.content.iter_mut().filter_map(|content| match content {
-        Content::Image { media }
-        | Content::Audio { media }
-        | Content::Video { media }
-        | Content::File { media, .. } => Some(media),
-        _ => None,
-    })
+    message
+        .content
+        .iter_mut()
+        .filter_map(|content| match content {
+            Content::Image { media }
+            | Content::Audio { media }
+            | Content::Video { media }
+            | Content::File { media, .. } => Some(media),
+            _ => None,
+        })
 }
 
 fn hex(bytes: &[u8]) -> String {
@@ -310,6 +324,8 @@ mod tests {
             media: Media::blob("image/png", "sha256:gone"),
         });
         materialize(&mut lost, &store);
-        assert!(matches!(&lost.content[1], Content::Text { text } if text.contains("not in store")));
+        assert!(
+            matches!(&lost.content[1], Content::Text { text } if text.contains("not in store"))
+        );
     }
 }
