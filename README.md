@@ -85,7 +85,7 @@ tau is alive. The tool answered: SHOUT HELLO TAU. (faux model — …)
 
 ## Releases
 
-`scripts/validate.sh` proves the release candidate the way a first
+See `CHANGELOG.md` for what's in each version. `scripts/validate.sh` proves the release candidate the way a first
 user meets it (demo, signing/trust chain, built-in provider against a
 loopback mock, wasm-provider consent gate) and restores the environment
 afterwards. `scripts/release.sh` runs the full suite, rebuilds the wasm

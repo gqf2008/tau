@@ -35,7 +35,7 @@ mkdir -p "${DIST}/docs" "${DIST}/examples"
 EXE=target/release/tau
 [ -f target/release/tau.exe ] && EXE=target/release/tau.exe
 cp "${EXE}" "${DIST}/"
-cp README.md LICENSE "${DIST}/"
+cp README.md CHANGELOG.md LICENSE "${DIST}/"
 cp docs/*.md "${DIST}/docs/"
 for ex in upper echo_provider mcp_bridge http_provider guard; do
     wasm="examples/${ex//_/-}/target/wasm32-wasip2/release/${ex}.wasm"
