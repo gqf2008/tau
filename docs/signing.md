@@ -61,7 +61,11 @@ Caused by:
     extension mcp_bridge.wasm: component is unsigned (sign it with `tau sign`, or load with --allow-unsigned)
 ```
 
-`--allow-unsigned` is the explicit escape hatch for development. A signed
+`--allow-unsigned` is the explicit escape hatch for development. It only
+excuses *absent* signatures: a component whose signature section does not
+parse or verify is refused under every policy — unsigned is a developer's
+choice, a corrupt signature is evidence of tampering, and the escape hatch
+must not launder it. A signed
 component whose key is not in the trust store fails with the fingerprint
 and the exact `tau trust --from-component` command that would onboard it
 — signing proves authorship, trusting is a separate decision.

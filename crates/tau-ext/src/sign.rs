@@ -49,7 +49,12 @@ pub enum SignError {
 /// Load-time policy for component signatures.
 #[derive(Clone)]
 pub enum TrustPolicy {
-    /// Load anything. Library default; the CLI product defaults to
+    /// Load unsigned components (and validly-signed ones). A component
+    /// that carries a signature section which does not parse or verify
+    /// is still refused: unsigned is a developer's choice, a corrupt
+    /// signature is evidence of tampering, and a flag named
+    /// "allow unsigned" must not silently downgrade tampered bytes to
+    /// loadable. Library default; the CLI product defaults to
     /// RequireTrusted and exposes this as --allow-unsigned.
     AllowUnsigned,
     /// Require a valid signature whose key is in `trust_dir`.
@@ -262,6 +267,9 @@ pub fn sign(wasm: &[u8], key: &SigningKey) -> Result<Vec<u8>, SignError> {
 /// Enforce a trust policy on raw component bytes.
 pub fn check_policy(wasm: &[u8], policy: &TrustPolicy) -> Result<(), SignError> {
     let TrustPolicy::RequireTrusted { trust_dir } = policy else {
+        // Absent signature section: fine, that is what the flag allows.
+        // Present but unverifiable: refuse — see the variant's docs.
+        verify(wasm)?;
         return Ok(());
     };
     let keys = verify(wasm)?;
@@ -470,6 +478,26 @@ mod tests {
         trust_key_in(&dir, &b64().encode(key.verifying_key().to_bytes())).unwrap();
         check_policy(&signed, &policy).unwrap();
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn allow_unsigned_still_refuses_a_corrupt_signature() {
+        // Unsigned loads: that is the flag's whole point.
+        check_policy(&tiny_module(), &TrustPolicy::AllowUnsigned).unwrap();
+        // Validly signed loads (any key — no trust-dir consult).
+        let key = SigningKey::generate(&mut rand::rngs::OsRng);
+        let signed = sign(&tiny_module(), &key).unwrap();
+        check_policy(&signed, &TrustPolicy::AllowUnsigned).unwrap();
+        // Signature section present but bytes flipped: refused, not
+        // silently downgraded to "unsigned". Flip a byte deep inside
+        // the signature payload (near the end of the module).
+        let mut tampered = signed.clone();
+        let n = tampered.len();
+        tampered[n - 20] ^= 0xFF;
+        assert!(
+            check_policy(&tampered, &TrustPolicy::AllowUnsigned).is_err(),
+            "a corrupt signature section must never load, under any policy"
+        );
     }
 
     #[test]

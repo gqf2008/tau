@@ -166,6 +166,15 @@ grep -q "signature" tampered-sig.err \
     || fail "unexpected rejection: $(cat tampered-sig.err)"
 echo "ok — corrupted signature payload refused"
 
+# --allow-unsigned is no laundering path: a component that carries a
+# signature section which does not verify is tampered, not unsigned.
+if "$TAU" --allow-unsigned -e tampered-sig.wasm --demo -p hi 2> tampered-au.err; then
+    fail "--allow-unsigned loaded a corrupted signature — the escape hatch launders tampering"
+fi
+grep -q "signature" tampered-au.err \
+    || fail "unexpected rejection: $(cat tampered-au.err)"
+echo "ok — --allow-unsigned still refuses a corrupted signature"
+
 # --- step 3: built-in provider against a loopback SSE mock -------------
 step "3/10 built-in providers (loopback SSE mock)"
 cat > mock.py << 'PYEOF'
