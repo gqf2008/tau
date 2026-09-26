@@ -33,8 +33,9 @@ the extension unit instead of in-process scripts.
   never persisted. `tau trust --from-component` onboards keys from
   verified bytes.
 - **Distribution**: push/pull components through any OCI registry;
-  digest-addressed cache; signature/trust/consent apply to pulled bytes
-  unchanged.
+  digest-addressed cache that verifies hits and re-pulls a corrupted
+  entry instead of handing bad bytes to the load path;
+  signature/trust/consent apply to pulled bytes unchanged.
 - **Models**: built-in OpenAI chat completions, OpenAI Responses, and
   Anthropic Messages providers; wasm provider components with push-mode
   streaming and consent-gated HTTP egress — a trapped provider fails
@@ -73,7 +74,7 @@ blob GC, compaction (summary entry; originals stay; follow-ups run on
 the compacted branch), torn-tail recovery, concurrent access, and
 probe verdicts (block, continue, and a trapped probe degrading without
 going dead) — restoring
-the environment exactly afterwards. 105 tests, clippy-clean across all
+the environment exactly afterwards. 106 tests, clippy-clean across all
 workspaces.
 
 Performance baseline (docs/perf.md): extension load 202ms cold → 9ms

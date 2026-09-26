@@ -225,3 +225,45 @@ fn unknown_digest_is_an_error() {
     assert!(result.is_err());
     let _ = std::fs::remove_dir_all(&cache);
 }
+
+#[tokio::test]
+async fn corrupt_cache_entry_is_verified_and_re_pulled() {
+    // The cache is content-addressed: a hit must still verify. A
+    // corrupted entry (torn write, disk rot, tampering) self-heals by
+    // re-pulling instead of handing bad bytes to the load path.
+    let (Some(wasm), Some(python)) = (artifact(), python()) else {
+        eprintln!("skipping: upper.wasm not built or no python");
+        return;
+    };
+    let registry = MockRegistry::start(&python, &wasm, false);
+    let cache = cache();
+    let reference = format!("oci://127.0.0.1:{}/test/component:latest", registry.port);
+
+    let pulled = pull(&reference, &cache).await.expect("pull");
+    let good = std::fs::read(&pulled.path).unwrap();
+
+    // Corrupt the cache entry; the next pull must notice and re-pull.
+    std::fs::write(&pulled.path, b"torn").unwrap();
+    let healed = pull(&reference, &cache).await.expect("re-pull");
+    assert_eq!(healed.path, pulled.path);
+    assert_eq!(std::fs::read(&healed.path).unwrap(), good);
+
+    // And the healed entry loads through the normal path again.
+    let host = ExtensionHost::new();
+    let extension = host.load(&healed.path).expect("load healed component");
+    let (tools, _) = extension.into_parts();
+    let out = tools[0]
+        .execute(serde_json::json!({ "text": "healed" }))
+        .await;
+    assert_eq!(out.content, "HEALED");
+
+    // Atomic writes leave no temp-file litter in the cache.
+    let litter: Vec<_> = std::fs::read_dir(&cache)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .filter(|name| name.starts_with(".tmp-"))
+        .collect();
+    assert!(litter.is_empty(), "temp litter: {litter:?}");
+
+    let _ = std::fs::remove_dir_all(&cache);
+}

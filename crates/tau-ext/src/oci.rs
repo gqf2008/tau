@@ -316,7 +316,15 @@ pub fn pull_into(reference: &str, cache: &Path) -> Result<Pulled, OciError> {
         .to_string();
 
     let blob_path = cache.join(digest.replace(':', "_"));
-    if !blob_path.is_file() {
+    // The cache is content-addressed: a hit must still verify, or a torn
+    // write / disk rot / tampering would hand bad bytes to the load path
+    // (which would fail loudly but leave the user deleting the cache by
+    // hand). A mismatch self-heals by re-pulling.
+    let cached_ok = blob_path.is_file() && digest_of(&blob_path)? == digest;
+    if !cached_ok {
+        if blob_path.is_file() {
+            std::fs::remove_file(&blob_path)?;
+        }
         let reply = registry.get(&format!("{base}/v2/{}/blobs/{digest}", oci_ref.repo), &[])?;
         let bytes = reply.body;
         let actual = format!("sha256:{}", hex(&Sha256::digest(&bytes)));
@@ -327,7 +335,18 @@ pub fn pull_into(reference: &str, cache: &Path) -> Result<Pulled, OciError> {
             });
         }
         std::fs::create_dir_all(cache)?;
-        std::fs::write(&blob_path, bytes)?;
+        // Atomic write (temp file + rename): a crash mid-write tears the
+        // temp file, never the content-addressed cache entry.
+        let tmp = cache.join(format!(
+            ".tmp-{}-{}",
+            std::process::id(),
+            digest.replace(':', "-")
+        ));
+        std::fs::write(&tmp, &bytes)?;
+        if let Err(e) = std::fs::rename(&tmp, &blob_path) {
+            let _ = std::fs::remove_file(&tmp);
+            return Err(e.into());
+        }
     }
 
     Ok(Pulled {
@@ -415,6 +434,12 @@ pub fn push(reference: &str, wasm: &Path) -> Result<Pushed, OciError> {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// The `sha256:<hex>` of a cached file's current bytes.
+fn digest_of(path: &Path) -> Result<String, OciError> {
+    let bytes = std::fs::read(path)?;
+    Ok(format!("sha256:{}", hex(&Sha256::digest(&bytes))))
 }
 
 /// Parse one `key="value"` out of a WWW-Authenticate challenge.
