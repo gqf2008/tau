@@ -1,5 +1,6 @@
-//! tau CLI. v0 is print mode only: run one prompt to completion, stream the
-//! answer to stdout, persist the session as JSONL.
+//! tau CLI. Print mode (`-p`): run one prompt to completion, stream the
+//! answer to stdout, persist the session as JSONL. Interactive mode (no
+//! `-p` on a terminal): scrollback REPL — see `repl` module.
 
 use std::path::PathBuf;
 
@@ -9,6 +10,8 @@ use tau_core::agent::AgentEvent;
 use tau_core::faux::FauxModel;
 use tau_core::session::{new_id, EntryKind, JsonlStore, SessionEntry};
 use tau_core::{Agent, Message, Model, ProbeRegistry, ToolRegistry};
+
+mod repl;
 
 #[derive(Parser)]
 #[command(name = "tau", version, about = "Minimal agent harness with wasm extensions")]
@@ -297,9 +300,13 @@ async fn main() -> Result<()> {
     if let Some(sub) = cli.command {
         return run_sub(sub);
     }
-    let Some(prompt_text) = cli.print else {
-        eprintln!("tau v0 is print-mode only. Try: tau --demo -p \"hello\"");
-        std::process::exit(2);
+    let interactive = match &cli.print {
+        Some(_) => false,
+        None if std::io::IsTerminal::is_terminal(&std::io::stdin()) => true,
+        None => {
+            eprintln!("tau: no prompt given and stdin is not a terminal. Try: tau --demo -p \"hello\"");
+            std::process::exit(2);
+        }
     };
 
     let mut tools = ToolRegistry::new();
@@ -441,6 +448,11 @@ async fn main() -> Result<()> {
     if let Some(system) = cli.system {
         agent = agent.system(system);
     }
+
+    if interactive {
+        return repl::interactive(agent, store, history).await;
+    }
+    let prompt_text = cli.print.expect("print mode checked above");
 
     let parent = store.head().map(|h| h.id.clone());
 

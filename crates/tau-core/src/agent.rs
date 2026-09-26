@@ -262,11 +262,20 @@ impl Agent {
                     return Ok((produced, StopReason::Aborted));
                 }
                 // Follow-ups continue the same run: one trail, one RunEnd.
+                // A steer with no tool calls in flight is indistinguishable
+                // from a follow-up at the natural end — take both (steers
+                // first: they were sent as the more urgent correction)
+                // rather than dropping the steer on the floor.
+                let steers = take_steers(&mut pending);
                 let followups = take_followups(&mut pending);
-                if !followups.is_empty() {
+                if !steers.is_empty() || !followups.is_empty() {
+                    for message in &steers {
+                        self.emit(AgentEvent::Steer(message.clone()));
+                    }
                     for message in &followups {
                         self.emit(AgentEvent::FollowUp(message.clone()));
                     }
+                    produced.extend(steers);
                     produced.extend(followups);
                     continue;
                 }

@@ -61,11 +61,19 @@ cargo run -p tau-cli -- -e examples/upper/target/wasm32-wasip2/release/upper.was
 | `crates/tau-openai` | OpenAI chat completions + Responses API providers |
 | `crates/tau-anthropic` | Anthropic Messages API provider |
 | `crates/tau-ext` | wasmtime component host (sandboxed) |
-| `crates/tau-cli` | `tau` binary (print mode) |
+| `crates/tau-cli` | `tau` binary (print + interactive modes) |
 | `wit/tau.wit` | the extension contract, versioned |
 | `docs/probes.md` | lifecycle probe points and verdict semantics |
 | `examples/upper` | example wasm extension (tool) |
 | `examples/echo-provider` | example wasm provider (push-mode streaming) |
+
+## Interactive mode
+
+`tau` with no `-p` on a terminal starts a scrollback REPL (rustyline line
+editing, persisted history): streamed answers print inline while you can
+keep typing. Mid-run input is the control plane — plain text queues as a
+follow-up, `!text` steers after the current turn, Ctrl-C aborts, `/quit`
+exits. `tau -p "..."` stays one-shot print mode.
 
 ## Testing
 
