@@ -8,6 +8,13 @@ Tools: echo (returns its text), fail (returns an error result).
 import json
 import sys
 
+# Test hook: --protocol-version X makes the server choose X in the
+# initialize reply instead of echoing the client's request.
+FORCED_VERSION = None
+if "--protocol-version" in sys.argv:
+    i = sys.argv.index("--protocol-version")
+    FORCED_VERSION = sys.argv[i + 1]
+
 TOOLS = [
     {
         "name": "echo",
@@ -51,7 +58,8 @@ def main():
             reply(
                 request_id,
                 {
-                    "protocolVersion": request["params"]["protocolVersion"],
+                    "protocolVersion": FORCED_VERSION
+                    or request["params"]["protocolVersion"],
                     "capabilities": {"tools": {}},
                     "serverInfo": {"name": "tau-mock-mcp", "version": "0.1.0"},
                 },

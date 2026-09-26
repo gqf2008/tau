@@ -38,7 +38,12 @@ tau --mcp-bridge mcp_bridge.wasm \
 
 ## The reference bridge
 
-`examples/mcp-bridge` speaks newline-delimited JSON-RPC (MCP stdio transport):
+`examples/mcp-bridge` speaks newline-delimited JSON-RPC (MCP stdio transport).
+Protocol version negotiation follows the spec: the bridge asks for its
+newest (`2025-06-18`), the server picks, and a pick the bridge does not
+speak (supported: `2024-11-05`, `2025-03-26`, `2025-06-18`) fails the
+handshake with a clear message — muddling through divergent semantics is
+worse than a loud refusal. Servers that omit the field are tolerated.
 
 - `definitions()`: lazily spawns the server, runs `initialize` →
   `notifications/initialized` → `tools/list`, mapping each MCP tool's

@@ -21,7 +21,13 @@ use std::sync::{Mutex, MutexGuard};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
 use tau::extension::{http, process as proc};
 
+/// The version this bridge asks for (its newest).
 const PROTOCOL_VERSION: &str = "2025-06-18";
+/// Every version the bridge can actually speak for the
+/// initialize/tools-list/tools-call subset it uses. Per spec, a client
+/// that does not support the server's chosen version must disconnect
+/// rather than muddle through with possibly-divergent semantics.
+const SUPPORTED_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
 const READ_CHUNK: u32 = 65536;
 /// Cap on one JSON-RPC message (and one HTTP response body): a broken or
 /// hostile server flooding bytes without a newline would otherwise grow
@@ -147,7 +153,7 @@ fn connect<'a>(
             transport,
             next_id: 0,
         };
-        conn.request(
+        let init = conn.request(
             "initialize",
             serde_json::json!({
                 "protocolVersion": PROTOCOL_VERSION,
@@ -155,6 +161,16 @@ fn connect<'a>(
                 "clientInfo": { "name": "tau-mcp-bridge", "version": env!("CARGO_PKG_VERSION") },
             }),
         )?;
+        // Version negotiation: the server picks; if it picked one we do
+        // not speak, refuse the connection (spec: disconnect). A server
+        // that omits the field is tolerated — older implementations do.
+        let negotiated = init["protocolVersion"].as_str().unwrap_or_default();
+        if !negotiated.is_empty() && !SUPPORTED_VERSIONS.contains(&negotiated) {
+            return Err(format!(
+                "server chose protocol version {negotiated:?}, which this bridge does not speak (supported: {})",
+                SUPPORTED_VERSIONS.join(", ")
+            ));
+        }
         let _ = conn.notify("notifications/initialized", serde_json::json!({}));
         **guard = Some(conn);
     }

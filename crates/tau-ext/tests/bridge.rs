@@ -32,6 +32,41 @@ fn python() -> Option<String> {
 }
 
 #[tokio::test]
+async fn bridge_rejects_unspeakable_protocol_version() {
+    // A server that chooses a protocol version the bridge does not speak
+    // must fail the handshake (spec: the client disconnects) rather than
+    // register tools against divergent semantics.
+    let (Some(path), Some(python)) = (artifact(), python()) else {
+        eprintln!("skipping: mcp_bridge.wasm not built or no python");
+        return;
+    };
+    let server = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/mcp-bridge/mock_server.py")
+        .canonicalize()
+        .expect("mock server exists");
+    let command = vec![
+        python,
+        server.to_string_lossy().into_owned(),
+        "--protocol-version".into(),
+        "1999-01-01".into(),
+    ];
+
+    let host = ExtensionHost::new();
+    let result = host.load_bridge(&path, BridgeConsent {
+        command: Some(command),
+        ..BridgeConsent::default()
+    });
+    let error = match result {
+        Ok(_) => panic!("an unspeakable version must fail the handshake"),
+        Err(error) => error,
+    };
+    assert!(
+        error.to_string().contains("bridge handshake failed"),
+        "expected a handshake failure, got: {error}"
+    );
+}
+
+#[tokio::test]
 async fn bridge_exposes_mcp_tools() {
     let (Some(path), Some(python)) = (artifact(), python()) else {
         eprintln!("skipping: mcp_bridge.wasm not built or no python");
