@@ -308,6 +308,9 @@ async fn main() -> Result<()> {
     }
     let interactive = match &cli.print {
         Some(_) => false,
+        // --compact without -p is itself the action: never error out for a
+        // missing prompt; in a terminal it still drops into the REPL after.
+        None if cli.compact => std::io::IsTerminal::is_terminal(&std::io::stdin()),
         None if std::io::IsTerminal::is_terminal(&std::io::stdin()) => true,
         None => {
             eprintln!("tau: no prompt given and stdin is not a terminal. Try: tau --demo -p \"hello\"");
