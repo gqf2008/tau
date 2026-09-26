@@ -7,6 +7,7 @@ description = "Wasm component extension host for tau (wasmtime, sandboxed by def
 
 [dependencies]
 tau-core = { path = "../tau-core" }
+serde = { version = "1", features = ["derive"] }
 serde_json.workspace = true
 thiserror.workspace = true
 async-trait.workspace = true

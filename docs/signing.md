@@ -54,9 +54,12 @@ proves authorship, trusting is a separate decision.
 ## What this does and does not do
 
 - **Does**: tamper evidence (any byte change breaks verification), publisher
-  identity (the fingerprint is the component's author id), and the foundation
-  for remembered consent — capability grants can later be recorded per
-  fingerprint instead of re-asked per run.
+  identity (the fingerprint is the component's author id), and remembered
+  consent — capability grants are recorded per fingerprint
+  (`~/.tau/consent/<fingerprint>.json`): pass `--remember` once, later runs
+  recall the grants without the flags (`tau consent --list` / `--revoke`).
+  Explicit flags still win per field, and unsigned components can never be
+  remembered — no fingerprint, no memory.
 - **Does not**: replace the sandbox. A trusted component still gets no
   capabilities beyond its world's imports and the host's consent gates.
   Signature answers "who wrote this and was it modified", the sandbox answers

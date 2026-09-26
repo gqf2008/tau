@@ -75,6 +75,11 @@ struct Cli {
     /// bridge must carry a valid signature from a key in ~/.tau/trust.
     #[arg(long)]
     allow_unsigned: bool,
+
+    /// Persist this run's bridge consent under the component's signing
+    /// fingerprint; later runs recall it without the flags.
+    #[arg(long)]
+    remember: bool,
 }
 
 #[derive(clap::Subcommand)]
@@ -95,6 +100,15 @@ enum Sub {
         #[arg(long)]
         json: bool,
     },
+    /// Manage remembered capability consent (per signing fingerprint).
+    Consent {
+        /// List fingerprints with remembered grants.
+        #[arg(long)]
+        list: bool,
+        /// Revoke remembered grants for a fingerprint.
+        #[arg(long)]
+        revoke: Option<String>,
+    },
     /// Trust a base64 ed25519 pubkey (or list trusted keys).
     Trust {
         /// Base64 pubkey to add to ~/.tau/trust.
@@ -107,6 +121,35 @@ enum Sub {
 
 fn run_sub(sub: Sub) -> Result<()> {
     match sub {
+        Sub::Consent { list, revoke } => {
+            let store = tau_ext::consent::ConsentStore::default();
+            if let Some(fp) = revoke {
+                anyhow::ensure!(
+                    store.revoke(&fp)?,
+                    "no remembered consent for {fp}"
+                );
+                println!("revoked: {fp}");
+                return Ok(());
+            }
+            if list {
+                for fp in store.list() {
+                    println!("{fp}");
+                    if let Some(consent) = store.load(&fp) {
+                        if let Some(command) = &consent.command {
+                            println!("  command: {}", serde_json::to_string(command)?);
+                        }
+                        if let Some(url) = &consent.mcp_url {
+                            println!("  mcp_url: {url}");
+                        }
+                        for origin in &consent.origins {
+                            println!("  origin: {origin}");
+                        }
+                    }
+                }
+                return Ok(());
+            }
+            anyhow::bail!("usage: tau consent --list | tau consent --revoke <fingerprint>");
+        }
         Sub::Probes { json } => {
             if json {
                 let entries: Vec<serde_json::Value> = tau_core::probe::CATALOG
@@ -205,31 +248,65 @@ async fn main() -> Result<()> {
     }
 
     if let Some(path) = &cli.mcp_bridge {
-        anyhow::ensure!(
-            cli.mcp_command.is_some() || cli.mcp_url.is_some(),
-            "--mcp-bridge requires --mcp-command and/or --mcp-url (each granted capability is a consent)"
-        );
-        let mut consent = tau_ext::bridge::BridgeConsent::default();
+        let mut explicit = tau_ext::bridge::BridgeConsent::default();
         if let Some(command_json) = cli.mcp_command.as_deref() {
             let command: Vec<String> = serde_json::from_str(command_json).with_context(|| {
                 format!("--mcp-command must be a JSON argv array, got: {command_json}")
             })?;
             eprintln!("[tau] mcp bridge: {} (command: {})", path.display(), command_json);
-            consent.command = Some(command);
+            explicit.command = Some(command);
         }
         if let Some(url) = cli.mcp_url.as_deref() {
             let origin = tau_ext::bridge::origin_of(url)
                 .with_context(|| format!("--mcp-url is not a valid http(s) url: {url}"))?;
             eprintln!("[tau] mcp bridge: {} (url: {}, origin: {})", path.display(), url, origin);
-            consent.origins.insert(origin);
-            consent.mcp_url = Some(url.to_string());
+            explicit.origins.insert(origin);
+            explicit.mcp_url = Some(url.to_string());
         }
+
+        // Remembered consent: recalled per signing fingerprint; explicit
+        // flags win per field, origins union. Unsigned components have no
+        // fingerprint — no recall, no remembering.
+        let bytes = std::fs::read(path)
+            .with_context(|| format!("reading {}", path.display()))?;
+        let fingerprints = tau_ext::consent::component_fingerprints(&bytes)
+            .unwrap_or_default();
+        let fingerprint = fingerprints.first().cloned();
+        let store = tau_ext::consent::ConsentStore::default();
+        let remembered = fingerprint
+            .as_deref()
+            .and_then(|fp| store.load(fp))
+            .unwrap_or_default();
+        if !remembered.is_empty() {
+            eprintln!(
+                "[tau] recalled consent for {}",
+                fingerprint.as_deref().unwrap_or("?")
+            );
+        }
+        let consent = tau_ext::consent::merge(explicit, remembered);
+        anyhow::ensure!(
+            consent.command.is_some() || consent.mcp_url.is_some(),
+            concat!(
+                "--mcp-bridge requires --mcp-command and/or --mcp-url, ",
+                "or remembered consent (sign the component and pass --remember once)"
+            )
+        );
         let bridge_tools = host
-            .load_bridge(path, consent)
+            .load_bridge(path, consent.clone())
             .with_context(|| format!("loading mcp bridge {}", path.display()))?;
         for tool in bridge_tools {
             eprintln!("[tau]   mcp tool: {}", tool.def().name);
             tools.register(tool);
+        }
+
+        if cli.remember {
+            let Some(fp) = fingerprint else {
+                anyhow::bail!(
+                    "--remember requires a signed component: unsigned components                      cannot carry remembered consent"
+                );
+            };
+            store.save(&fp, &tau_ext::consent::RememberedConsent::from(consent))?;
+            eprintln!("[tau] remembered consent for {fp}");
         }
     }
 
