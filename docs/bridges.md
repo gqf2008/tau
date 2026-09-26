@@ -110,3 +110,30 @@ tau --mcp-bridge mcp_bridge.wasm \
 The URL's origin becomes the allowlist; the bridge learns the endpoint via
 `TAU_MCP_URL`. Stdio and HTTP consents are independent — pass either or both;
 the bridge prefers `TAU_MCP_URL` when both are present.
+
+## Worked example: walgit
+
+`walgit mcp` (the walgit git server's client-side adapter) is a stdio MCP server whose tools are
+the walgit CLI itself (read-only by default; the one writing tool needs
+`--allow-write`). tau spawns it through the bridge like any other stdio
+server — the `--mcp-command` flag is the consent:
+
+```
+tau --allow-unsigned \
+    --mcp-bridge examples/mcp-bridge/target/wasm32-wasip2/release/mcp_bridge.wasm \
+    --mcp-command '["walgit", "mcp"]' \
+    --demo -p "ci status"
+```
+
+The bridge handshakes (`initialize`), registers the 15 read-only tools
+(`repo_list`, `repo_refs`, `repo_tree`, `repo_blob`, `repo_commits`,
+`repo_diff`, `collab_*`, `ci_status`, `wal_ls`, …) as tau tools, and every
+call round-trips: tau → wasm bridge → spawned `walgit mcp` → the walgit
+CLI subcommand → result back into the session. `walgit mcp` reads its
+usual config (`~/.walgit/walgit.toml`), so `repo_*` tools operate on the
+configured bucket directly.
+
+Two demo notes: the registry hands tools to the model sorted by name, so
+the faux demo model's "first tool" is `ci_status`; and `--repo` defaults
+to the cwd — run from a git checkout (or pass one) for the `collab_*` /
+`ci_status` tools, while `repo_list` works anywhere.
