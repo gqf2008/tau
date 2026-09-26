@@ -46,6 +46,18 @@ impl Guest for Echo {
             .flatten();
 
         match last_user_text {
+            // "env NAME" reports whether the ambient env var is visible —
+            // demos the host's WASI policy (allow-all inherits, deny-all
+            // sees nothing).
+            Some(text) if text.starts_with("env ") => {
+                let name = text.trim_start_matches("env ").trim();
+                let value = std::env::var(name).unwrap_or_default();
+                emit(&serde_json::json!({
+                    "kind": "text-delta",
+                    "text": format!("{name}={value}"),
+                }));
+                emit(&serde_json::json!({ "kind": "done", "stop": "stop" }));
+            }
             // "audio …" demos the realtime-style channel: two audio
             // chunks then a text note.
             Some(text) if text.starts_with("audio") => {

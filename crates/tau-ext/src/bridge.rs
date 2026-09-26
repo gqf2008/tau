@@ -1,9 +1,10 @@
 //! Bridge components (world "bridge"): external tool protocols (MCP) behind
-//! WIT. Beyond the deny-all sandbox the host grants exactly two scoped
-//! capabilities, and only on explicit consent: spawn-with-pipes (the caller
-//! passes the allowed command argv) and origin-allowlisted HTTP (the caller
-//! passes the allowed origins). The host knows nothing about MCP; the
-//! bridge component speaks whatever protocol it likes over the pipes.
+//! WIT. The host grants exactly two scoped capabilities, and only on
+//! explicit consent: spawn-with-pipes (the caller passes the allowed
+//! command argv) and origin-allowlisted HTTP (the caller passes the
+//! allowed origins). The host knows nothing about MCP; the bridge
+//! component speaks whatever protocol it likes over the pipes. (Ambient
+//! WASI follows the host's WasiPolicy — allow-all by default.)
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
@@ -15,7 +16,7 @@ use async_trait::async_trait;
 use tau_core::tool::{Tool, ToolDef, ToolOutput};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::Store;
-use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
+use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::http::HttpRegistry;
 use crate::{bridge_bindings, ExtError, ExtensionHost};
@@ -235,7 +236,7 @@ impl ExtensionHost {
         let mut linker: Linker<BridgeState> = Linker::new(&self.engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         bridge_bindings::Bridge::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
-        let mut ctx = WasiCtxBuilder::new();
+        let mut ctx = self.wasi.ctx_builder();
         if let Some(command) = &consent.command {
             let command_json = serde_json::to_string(command).unwrap_or_else(|_| "[]".into());
             ctx.env("TAU_MCP_COMMAND", &command_json);

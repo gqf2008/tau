@@ -98,9 +98,9 @@ interface models {
     run: func(request-json: string);
 }
 
-/// General extension: tools and/or probes. Sandboxed by default — the world
-/// exports no capabilities, so a component importing fs/net/env fails
-/// instantiation unless the host explicitly grants it.
+/// General extension: tools and/or probes. Ambient WASI (fs/env/stdio/
+/// args/network) is granted by default — pass --deny-wasi to the host CLI
+/// to run components with no ambient capabilities.
 world extension {
     export tools;
     export hooks;

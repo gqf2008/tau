@@ -54,3 +54,42 @@ async fn audio_deltas_cross_the_channel_as_bytes() {
         })
     ));
 }
+
+/// The host's WasiPolicy reaches the guest's ambient env: allow-all
+/// inherits the process environment, deny-all hides it.
+#[tokio::test]
+async fn wasi_policy_controls_ambient_env() {
+    let Some(wasm) = artifact() else {
+        eprintln!("skipping: echo_provider.wasm not built");
+        return;
+    };
+    unsafe { std::env::set_var("TAU_EXT_TEST_ENV", "visible") };
+
+    let run = |policy| {
+        let wasm = wasm.clone();
+        async move {
+            let host = ExtensionHost::new().with_wasi(policy);
+            let model = host
+                .load_provider(&wasm, "echo", Default::default(), None)
+                .expect("load provider");
+            let request = tau_core::Request {
+                system: None,
+                messages: vec![tau_core::Message::user("env TAU_EXT_TEST_ENV")],
+                tools: vec![],
+            };
+            let mut text = String::new();
+            let mut stream = model.stream(&request).await;
+            while let Some(event) = stream.next().await {
+                if let ModelEvent::TextDelta { text: delta } = event {
+                    text.push_str(&delta);
+                }
+            }
+            text
+        }
+    };
+
+    let allow = run(tau_ext::WasiPolicy::AllowAll).await;
+    assert_eq!(allow, "TAU_EXT_TEST_ENV=visible");
+    let deny = run(tau_ext::WasiPolicy::DenyAll).await;
+    assert_eq!(deny, "TAU_EXT_TEST_ENV=");
+}

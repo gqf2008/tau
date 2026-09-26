@@ -1,9 +1,11 @@
 //! Wasm component extension host.
 //!
 //! Loads components implementing the `tau:extension` world and exposes their
-//! tools to the agent and their probes to the harness. Components run with no
-//! WASI capabilities: the world has no imports, so a component that tries to
-//! import fs/net/env fails instantiation. Sandboxed by default.
+//! tools to the agent and their probes to the harness. Ambient WASI
+//! capabilities (fs/env/stdio/args/network) are granted by default
+//! ([`WasiPolicy::AllowAll`]); [`WasiPolicy::DenyAll`] (CLI `--deny-wasi`)
+//! restores the old deny-all sandbox. Custom capabilities — bridge
+//! process/http, provider origins — stay consent-gated either way.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -52,10 +54,10 @@ pub enum ExtError {
     Load { path: String, reason: String },
 }
 
-/// Host state handed to every component. The WasiCtx grants nothing: no
-/// stdio, no env, no args, no preopened directories, no network. Components
-/// get the WASI interfaces their runtime links against (io/poll, clocks),
-/// but every actual capability call fails with permission-denied.
+/// Host state handed to every component. The WasiCtx follows the host's
+/// [`WasiPolicy`]: allow-all inherits the process's capabilities;
+/// deny-all links the WASI interfaces but fails every capability call
+/// permission-denied.
 struct ComponentState {
     ctx: WasiCtx,
     table: ResourceTable,
@@ -93,9 +95,62 @@ impl LoadedExtension {
     }
 }
 
+/// Ambient WASI capabilities granted to loaded components (fs, env,
+/// stdio, args, network). Independent of the consent-gated custom
+/// capabilities (bridge process/http, provider origins), which stay
+/// explicit. Default: [`WasiPolicy::AllowAll`] — pass
+/// [`WasiPolicy::DenyAll`] (CLI `--deny-wasi`) to restore the old
+/// deny-all sandbox.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum WasiPolicy {
+    /// Inherit stdio/env/args, preopen the host filesystem (each drive
+    /// on Windows, `/` elsewhere), inherit network + DNS.
+    #[default]
+    AllowAll,
+    /// The old default: WASI interfaces link but every capability call
+    /// fails permission-denied.
+    DenyAll,
+}
+
+impl WasiPolicy {
+    /// Base context for the policy; callers may add env vars before
+    /// build (the bridge's TAU_MCP_* consent handoff).
+    pub(crate) fn ctx_builder(self) -> WasiCtxBuilder {
+        let mut ctx = WasiCtxBuilder::new();
+        if self == WasiPolicy::AllowAll {
+            ctx.inherit_stdio()
+                .inherit_env()
+                .inherit_args()
+                .inherit_network()
+                .allow_ip_name_lookup(true);
+            preopen_host_fs(&mut ctx);
+        }
+        ctx
+    }
+}
+
+/// Preopen the whole host filesystem read-write: `/` on unix, every
+/// existing drive letter as `/<letter>` on Windows.
+fn preopen_host_fs(ctx: &mut WasiCtxBuilder) {
+    #[cfg(windows)]
+    for letter in b'a'..=b'z' {
+        let drive = format!("{}:\\", (letter as char).to_ascii_uppercase());
+        if std::path::Path::new(&drive).is_dir() {
+            let _ = ctx.preopened_dir(
+                &drive,
+                format!("/{letter}"),
+                wasmtime_wasi::FsPerms::ReadWrite,
+            );
+        }
+    }
+    #[cfg(not(windows))]
+    let _ = ctx.preopened_dir("/", "/", wasmtime_wasi::FsPerms::ReadWrite);
+}
+
 pub struct ExtensionHost {
     engine: Engine,
     policy: sign::TrustPolicy,
+    wasi: WasiPolicy,
 }
 
 impl Default for ExtensionHost {
@@ -115,7 +170,14 @@ impl ExtensionHost {
         Self {
             engine: Engine::new(&Config::new()).expect("wasmtime engine"),
             policy,
+            wasi: WasiPolicy::default(),
         }
+    }
+
+    /// Set the ambient WASI policy (default allow-all).
+    pub fn with_wasi(mut self, policy: WasiPolicy) -> Self {
+        self.wasi = policy;
+        self
     }
 
     /// Read a component file and enforce the trust policy on its bytes.
@@ -160,8 +222,8 @@ impl ExtensionHost {
         }
     }
 
-    /// Load one component file. Fails if the component imports capabilities
-    /// the world does not provide (the sandbox).
+    /// Load one component file. Ambient WASI access follows the host's
+    /// [`WasiPolicy`] (allow-all by default; `--deny-wasi` to sandbox).
     pub fn load(&self, path: impl AsRef<Path>) -> Result<LoadedExtension, ExtError> {
         let path = path.as_ref().to_path_buf();
         Self::off_runtime(move || self.load_inner(&path))
@@ -173,12 +235,12 @@ impl ExtensionHost {
             path: path.display().to_string(),
             reason: e.to_string(),
         })?;
-        // WASI interfaces are linked so wasip2-std components instantiate,
-        // but the context grants no capabilities: sandbox by context.
+        // WASI interfaces are linked so wasip2-std components instantiate;
+        // what they may actually do follows the host's WasiPolicy.
         let mut linker: Linker<ComponentState> = Linker::new(&self.engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         let state = ComponentState {
-            ctx: WasiCtxBuilder::new().build(),
+            ctx: self.wasi.ctx_builder().build(),
             table: ResourceTable::new(),
         };
         let mut store = Store::new(&self.engine, state);
@@ -396,7 +458,7 @@ impl ExtensionHost {
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         provider_bindings::Provider::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
         let state = ProviderState {
-            ctx: WasiCtxBuilder::new().build(),
+            ctx: self.wasi.ctx_builder().build(),
             table: ResourceTable::new(),
             event_tx: None,
             http: http::HttpRegistry::new(origins),

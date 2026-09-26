@@ -15,8 +15,9 @@ extensible — but extensions are **wasm components**, not in-process scripts.
 - **Extensions**: drop a `.wasm` in. Components implement the
   `tau:extension` WIT world (`wit/tau.wit`): `tools` (contribute agent
   tools) and `hooks` (probes that observe and influence the run).
-  Sandboxed by default — the world exports no capabilities, so a component
-  that imports fs/net/env fails instantiation.
+  Ambient WASI (fs/env/stdio/network) is granted by default;
+  `--deny-wasi` restores the deny-all sandbox. Scoped capabilities
+  (bridge process/http, provider origins) stay consent-gated.
 - **Signing**: components must carry an embedded ed25519 signature from a
   trusted key (`tau keygen` / `tau sign` / `tau trust`); `--allow-unsigned`
   is the explicit dev escape. See `docs/signing.md`.

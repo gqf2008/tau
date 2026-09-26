@@ -98,6 +98,13 @@ struct Cli {
     #[arg(long = "provider-origin")]
     provider_origin: Vec<String>,
 
+    /// Deny ambient WASI capabilities (fs/env/stdio/args/network) to all
+    /// components — the pre-allow-all sandbox. Consent-gated custom
+    /// capabilities (bridge process/http, provider origins) are
+    /// unaffected.
+    #[arg(long)]
+    deny_wasi: bool,
+
     /// Load unsigned components. By default every extension, provider, and
     /// bridge must carry a valid signature from a key in ~/.tau/trust.
     #[arg(long)]
@@ -437,6 +444,11 @@ async fn main() -> Result<()> {
         tau_ext::ExtensionHost::with_policy(tau_ext::sign::TrustPolicy::RequireTrusted {
             trust_dir: tau_ext::sign::trust_dir(),
         })
+    };
+    let host = if cli.deny_wasi {
+        host.with_wasi(tau_ext::WasiPolicy::DenyAll)
+    } else {
+        host
     };
     for path in &cli.extensions {
         let path = &resolve_component(path).await?;

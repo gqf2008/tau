@@ -67,7 +67,9 @@ Every request's origin is checked before sending; **redirects are never
 followed** — a redirect would silently move the request to an origin the user
 did not consent to. Both capabilities are always linked but granted empty by
 default, so an unconsented bridge loads fine and fails at call time, not
-instantiation time (sandbox by context, same as the deny-all WasiCtx).
+instantiation time. (This is about the custom `process`/`http` capabilities;
+ambient WASI — fs/env/stdio/network — is granted by default and can be
+withdrawn with `--deny-wasi`.)
 
 ## Provider credential delivery
 
