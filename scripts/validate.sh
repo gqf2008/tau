@@ -483,6 +483,42 @@ grep -q "not json at all" middle.jsonl \
     || fail "refused file was truncated — forensics destroyed"
 echo "ok — middle corruption refuses with a named line, file untouched"
 
+# --- step 9c: concurrent access -------------------------------------------
+step "9c/10 concurrent access (shared session file stays a valid tree)"
+# Four tau processes append to ONE session file at once. The tree model
+# makes this structurally safe: each process's chain lands in order, so
+# parents always precede children — implicit branching, never corruption.
+PIDS=""
+for i in 1 2 3 4; do
+    "$TAU" --session shared.jsonl --demo -p "concurrent $i" > /dev/null 2>&1 &
+    PIDS="$PIDS $!"
+done
+# Bare `wait` would also wait for the mock daemons started in earlier
+# steps (killed only by the exit trap) — wait on exactly these writers.
+wait $PIDS
+python - << 'EOF_CONCURRENT'
+import json, sys
+entries = []
+with open("shared.jsonl") as f:
+    for n, line in enumerate(f, 1):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entries.append(json.loads(line))
+        except Exception as ex:
+            sys.exit(f"line {n} corrupt after concurrent appends: {ex}")
+ids = set()
+for e in entries:
+    parent = e.get("parent")
+    if parent and parent not in ids:
+        sys.exit(f"parent {parent} appears after its child -- tree broken")
+    ids.add(e["id"])
+if len(entries) != 8:
+    sys.exit(f"expected 8 entries from 4 runs, got {len(entries)}")
+EOF_CONCURRENT
+echo "ok — 4 writers, 8 entries, every parent precedes its child"
+
 # --- step 10: probe verdicts ---------------------------------------------
 step "10/10 probe verdicts (before_tool block reaches the model)"
 OUT="$("$TAU" --allow-unsigned -e "$UPPER" -e "$GUARD" \

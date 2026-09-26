@@ -68,8 +68,9 @@ all three built-in providers
 against a loopback mock, wasm-provider consent gate, MCP bridge spawn
 gate, remembered-consent lifecycle, OCI push/pull/trust onboarding,
 blob GC, compaction (summary entry; originals stay; follow-ups run on
-the compacted branch), torn-tail recovery, and probe verdicts (block,
-continue, and a trapped probe degrading without going dead) — restoring
+the compacted branch), torn-tail recovery, concurrent access, and
+probe verdicts (block, continue, and a trapped probe degrading without
+going dead) — restoring
 the environment exactly afterwards. 103 tests, clippy-clean across all
 workspaces.
 
@@ -83,3 +84,8 @@ warm (wasmtime compile cache); 10k-entry session opens in 66ms.
 - wasip3-style stream ABI for large payloads is not in this release.
 - The interactive REPL is deliberately simple (scrollback + rustyline),
   no alternate screen.
+- Concurrent tau processes on one session file are structurally safe —
+  the append-only tree turns them into implicit branches, never
+  corruption — but each process sees only its own writes until reopen.
+  Run `tau gc` only on idle sessions: a blob written a moment before
+  its referencing entry could look orphaned to a racing sweep.
