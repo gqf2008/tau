@@ -124,6 +124,18 @@ enum Sub {
         #[arg(long)]
         revoke: Option<String>,
     },
+    /// Garbage-collect the blob store: keep blobs referenced by the
+    /// given sessions, report (or with --yes, delete) the rest.
+    Gc {
+        /// Session file to mark live blobs from; repeatable. Defaults
+        /// to .tau/session.jsonl. List EVERY session you still use —
+        /// blobs referenced only by an unlisted session are collected.
+        #[arg(long)]
+        session: Vec<PathBuf>,
+        /// Actually delete. Without it, only report what would go.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Trust a base64 ed25519 pubkey (or list trusted keys).
     Trust {
         /// Base64 pubkey to add to ~/.tau/trust.
@@ -186,6 +198,35 @@ fn run_sub(sub: Sub) -> Result<()> {
                     println!("  payload:  {}", info.payload);
                     println!("  verdicts: {}", info.verdicts);
                 }
+            }
+        }
+        Sub::Gc { session, yes } => {
+            let sessions = if session.is_empty() {
+                vec![PathBuf::from(".tau/session.jsonl")]
+            } else {
+                session
+            };
+            let mut live = std::collections::HashSet::new();
+            for path in &sessions {
+                let store = tau_core::session::JsonlStore::open(path)
+                    .with_context(|| format!("opening {}", path.display()))?;
+                live.extend(store.live_blob_hashes());
+            }
+            let blobs = tau_core::BlobStore::new(tau_core::BlobStore::default_dir());
+            let report = blobs.sweep(&live, !yes)?;
+            let verb = if yes { "freed" } else { "would free" };
+            println!(
+                "{verb} {} blob(s), {} byte(s); {} kept (live across {} session(s))",
+                report.removed,
+                report.bytes_freed,
+                report.kept,
+                sessions.len()
+            );
+            for hash in &report.removed_hashes {
+                println!("  {hash}");
+            }
+            if !yes && report.removed > 0 {
+                println!("dry run — re-run with --yes to delete");
             }
         }
         Sub::Keygen => {

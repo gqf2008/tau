@@ -9,8 +9,13 @@
 //! bytes-only and provider wire encoders never see a hash.
 //!
 //! The store is content-addressed (`sha256:<hex>`, shared across
-//! sessions) and deliberately dumb: put, get, no GC yet.
+//! sessions) and deliberately dumb: put, get, and a mark-and-sweep GC —
+//! the caller marks the live hashes (every blob referenced anywhere in
+//! the session tree, not just the active branch), [`BlobStore::sweep`]
+//! removes the rest. A blob deleted too early is not fatal: materialize
+//! degrades it to a text placeholder and the run continues.
 
+use std::collections::HashSet;
 use std::io;
 use std::path::PathBuf;
 
@@ -66,6 +71,69 @@ impl BlobStore {
     pub fn has(&self, hash: &str) -> bool {
         self.path(hash).is_file()
     }
+
+    /// Remove every stored blob whose hash is not in `live`. With
+    /// `dry_run`, only report what would go. Files whose names do not
+    /// decode back to a hash are left alone — the store dir is ours,
+    /// but deleting is forever.
+    pub fn sweep(&self, live: &HashSet<String>, dry_run: bool) -> io::Result<GcReport> {
+        let mut report = GcReport::default();
+        let entries = match std::fs::read_dir(&self.dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == io::ErrorKind::NotFound => return Ok(report),
+            Err(e) => return Err(e),
+        };
+        for entry in entries {
+            let entry = entry?;
+            if !entry.file_type()?.is_file() {
+                continue;
+            }
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let Some(hash) = name.split_once('_').map(|(tag, hex)| format!("{tag}:{hex}")) else {
+                continue;
+            };
+            report.scanned += 1;
+            if live.contains(&hash) {
+                report.kept += 1;
+                continue;
+            }
+            report.removed += 1;
+            report.bytes_freed += entry.metadata()?.len();
+            report.removed_hashes.push(hash);
+            if !dry_run {
+                std::fs::remove_file(entry.path())?;
+            }
+        }
+        report.removed_hashes.sort();
+        Ok(report)
+    }
+}
+
+/// Outcome of a [`BlobStore::sweep`].
+#[derive(Debug, Default)]
+pub struct GcReport {
+    /// Blob files looked at.
+    pub scanned: usize,
+    /// Still referenced — left in place.
+    pub kept: usize,
+    /// Unreferenced — deleted (or would be, on a dry run).
+    pub removed: usize,
+    pub bytes_freed: u64,
+    pub removed_hashes: Vec<String>,
+}
+
+/// The blob hashes referenced by `message` (externalized media only).
+pub fn blob_hashes(message: &Message) -> impl Iterator<Item = &str> {
+    message.content.iter().filter_map(|content| match content {
+        Content::Image { media }
+        | Content::Audio { media }
+        | Content::Video { media }
+        | Content::File { media, .. } => match &media.source {
+            MediaSource::Blob { hash } => Some(hash.as_str()),
+            _ => None,
+        },
+        _ => None,
+    })
 }
 
 /// Rewrite large inline media in `message` into blob references.
@@ -186,6 +254,38 @@ mod tests {
             }
             _ => panic!("expected image"),
         }
+    }
+
+    #[test]
+    fn sweep_removes_unreferenced_and_keeps_live() {
+        let (_dir, store) = store();
+        let keep = store.put(b"keep me").unwrap();
+        let drop_a = store.put(b"drop a").unwrap();
+        let drop_b = store.put(b"drop b").unwrap();
+        let live: HashSet<String> = [keep.clone()].into_iter().collect();
+
+        // Dry run reports but deletes nothing.
+        let report = store.sweep(&live, true).unwrap();
+        assert_eq!(report.scanned, 3);
+        assert_eq!(report.kept, 1);
+        assert_eq!(report.removed, 2);
+        assert!(report.bytes_freed >= 11);
+        assert_eq!(report.removed_hashes, {
+            let mut v = vec![drop_a.clone(), drop_b.clone()];
+            v.sort();
+            v
+        });
+        assert!(store.has(&drop_a) && store.has(&drop_b));
+
+        // Real sweep deletes exactly the unreferenced blobs.
+        let report = store.sweep(&live, false).unwrap();
+        assert_eq!(report.removed, 2);
+        assert!(store.has(&keep));
+        assert!(!store.has(&drop_a) && !store.has(&drop_b));
+
+        // Sweeping an absent store is a no-op, not an error.
+        let empty = BlobStore::new(_dir.path().join("nope"));
+        assert_eq!(empty.sweep(&live, false).unwrap().scanned, 0);
     }
 
     #[test]

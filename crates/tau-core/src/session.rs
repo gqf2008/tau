@@ -127,6 +127,22 @@ impl JsonlStore {
     }
 
     /// The most recently appended entry, i.e. the head of the latest branch.
+    /// Every blob hash referenced anywhere in the tree — the GC mark
+    /// set. Deliberately the whole tree, not just the active branch:
+    /// old branches still walk their original messages, and a hash
+    /// reachable from any entry must survive the sweep.
+    pub fn live_blob_hashes(&self) -> std::collections::HashSet<String> {
+        let mut live = std::collections::HashSet::new();
+        for entry in &self.entries {
+            match &entry.kind {
+                EntryKind::Message { message } | EntryKind::Compaction { summary: message } => {
+                    live.extend(crate::blobs::blob_hashes(message).map(str::to_owned));
+                }
+            }
+        }
+        live
+    }
+
     pub fn head(&self) -> Option<&SessionEntry> {
         self.entries.last()
     }
@@ -191,6 +207,51 @@ mod tests {
 
     fn temp_path(name: &str) -> PathBuf {
         std::env::temp_dir().join(format!("tau-test-{}-{}", std::process::id(), name))
+    }
+
+    #[test]
+    fn live_blob_hashes_marks_the_whole_tree() {
+        use crate::types::{Content, Media};
+        let path = temp_path("gc.jsonl");
+        let _ = std::fs::remove_file(&path);
+        let mut store = JsonlStore::open(&path).unwrap();
+
+        let msg = |text: &str, hash: &str| {
+            let mut m = Message::user(text);
+            m.content.push(Content::Image {
+                media: Media::blob("image/png", hash),
+            });
+            m
+        };
+        // A blob on an old branch AND one inside a compaction summary
+        // must both be marked live, though neither is on the active
+        // branch's plain message walk alone.
+        store
+            .append(SessionEntry {
+                id: "a".into(),
+                parent: None,
+                kind: EntryKind::Message {
+                    message: msg("old", "sha256:old"),
+                },
+            })
+            .unwrap();
+        store
+            .append(SessionEntry {
+                id: "k".into(),
+                parent: Some("a".into()),
+                kind: EntryKind::Compaction {
+                    summary: msg("[summary]", "sha256:summary"),
+                },
+            })
+            .unwrap();
+        store.append(entry("b", Some("k"), "new")).unwrap();
+
+        let live = store.live_blob_hashes();
+        assert!(live.contains("sha256:old"));
+        assert!(live.contains("sha256:summary"));
+        assert_eq!(live.len(), 2);
+
+        let _ = std::fs::remove_file(&path);
     }
 
     #[test]
