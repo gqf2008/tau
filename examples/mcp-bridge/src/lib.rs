@@ -23,6 +23,10 @@ use tau::extension::{http, process as proc};
 
 const PROTOCOL_VERSION: &str = "2025-06-18";
 const READ_CHUNK: u32 = 65536;
+/// Cap on one JSON-RPC message (and one HTTP response body): a broken or
+/// hostile server flooding bytes without a newline would otherwise grow
+/// linear memory until the allocator traps the whole component.
+const MAX_MESSAGE: usize = 16 * 1024 * 1024;
 
 enum Transport {
     Stdio(StdioConnection),
@@ -247,6 +251,9 @@ impl StdioConnection {
                 return Err("server closed stdout".to_string());
             }
             self.buffer.extend_from_slice(&chunk);
+            if self.buffer.len() > MAX_MESSAGE {
+                return Err("server message exceeds 16 MiB without a newline".to_string());
+            }
         }
     }
 }
@@ -318,10 +325,10 @@ impl HttpConnection {
                     if data.is_empty() || data == "[DONE]" {
                         continue;
                     }
-                    if let Ok(message) = serde_json::from_str::<serde_json::Value>(data) {
-                        if message["id"].as_u64() == Some(id) {
-                            return Ok(message);
-                        }
+                    if let Ok(message) = serde_json::from_str::<serde_json::Value>(data)
+                        && message["id"].as_u64() == Some(id)
+                    {
+                        return Ok(message);
                     }
                 }
                 let (chunk, eof) = http::read_body(handle, READ_CHUNK)?;
@@ -329,6 +336,9 @@ impl HttpConnection {
                     return Err("sse stream ended without our response".into());
                 }
                 buffer.extend_from_slice(&chunk);
+                if buffer.len() > MAX_MESSAGE {
+                    return Err("sse message exceeds 16 MiB without a newline".into());
+                }
             }
         } else {
             let body = read_all(handle)?;
@@ -348,6 +358,9 @@ fn read_all(handle: u64) -> Result<Vec<u8>, String> {
     loop {
         let (chunk, eof) = http::read_body(handle, READ_CHUNK)?;
         body.extend_from_slice(&chunk);
+        if body.len() > MAX_MESSAGE {
+            return Err("response body exceeds 16 MiB".into());
+        }
         if eof {
             return Ok(body);
         }

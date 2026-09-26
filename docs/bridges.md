@@ -44,10 +44,17 @@ tau --mcp-bridge mcp_bridge.wasm \
   `notifications/initialized` → `tools/list`, mapping each MCP tool's
   `inputSchema` to a tau `parameters-json`. A handshake failure traps, which
   the host reports as a bridge load error — a broken server is loud, never
-  silently tool-less.
+  silently tool-less. The guest's panic message reaches its inherited
+  stderr; the host error itself is compacted to a one-line summary plus
+  root cause, not a wasm backtrace dump.
 - `execute()`: `tools/call` with the model's arguments; text content blocks
   are joined into the tool result, `isError` maps to tau's error flag, and
   non-text blocks degrade to a placeholder rather than vanishing.
+- Robustness: one JSON-RPC message (and one HTTP body) is capped at
+  16 MiB — a server flooding bytes without a newline gets an error, not
+  an unbounded linear-memory grow. Host-side, a guest trap during a call
+  degrades to a tool error result (never wedges the run), and a poisoned
+  instance lock is recovered rather than killing the tool permanently.
 
 Because the bridge is a wasm component, it can be written in any wasm
 language, distributed as a single `.wasm` file, and signed — the same

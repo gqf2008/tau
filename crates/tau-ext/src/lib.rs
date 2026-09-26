@@ -54,6 +54,30 @@ pub enum ExtError {
     Load { path: String, reason: String },
 }
 
+/// Compact a wasmtime execution error for user-facing messages. A trap's
+/// Display carries a multi-frame wasm backtrace that drowns the actual
+/// failure — and the guest's panic message already reached its inherited
+/// stderr — so keep the one-line summary plus the root cause.
+pub(crate) fn compact_wasm_error(error: &wasmtime::Error) -> String {
+    compact_error_display(&error.to_string(), &error.root_cause().to_string())
+}
+
+fn compact_error_display(display: &str, root: &str) -> String {
+    let summary = display
+        .lines()
+        .next()
+        .unwrap_or(display)
+        .trim_end_matches(" at wasm backtrace:")
+        .to_string();
+    // No context chain: root == the whole multiline Display. Only append
+    // a root that adds one line of information.
+    if root.is_empty() || root.contains('\n') || root == summary {
+        summary
+    } else {
+        format!("{summary} ({root})")
+    }
+}
+
 /// Host state handed to every component. The WasiCtx follows the host's
 /// [`WasiPolicy`]: allow-all inherits the process's capabilities;
 /// deny-all links the WASI interfaces but fails every capability call
@@ -261,14 +285,25 @@ impl ExtensionHost {
             .map_err(|e| ExtError::Load {
                 path: path.display().to_string(),
                 reason: format!(
-                    "instantiation failed (does it import capabilities the host does not grant?): {e}"
+                    "instantiation failed (does it import capabilities the host does not grant?): {}",
+                    compact_wasm_error(&e)
                 ),
             })?;
 
         let definitions = bindings
             .tau_extension_tools()
-            .call_definitions(&mut store)?;
-        let points = bindings.tau_extension_hooks().call_points(&mut store)?;
+            .call_definitions(&mut store)
+            .map_err(|e| ExtError::Load {
+                path: path.display().to_string(),
+                reason: format!("definitions() trapped: {}", compact_wasm_error(&e)),
+            })?;
+        let points = bindings
+            .tau_extension_hooks()
+            .call_points(&mut store)
+            .map_err(|e| ExtError::Load {
+                path: path.display().to_string(),
+                reason: format!("points() trapped: {}", compact_wasm_error(&e)),
+            })?;
 
         let shared: Shared = Arc::new(Mutex::new(ComponentInstance { store, bindings }));
 
@@ -327,7 +362,7 @@ impl Tool for WasmTool {
         let name = self.def.name.clone();
         let shared = self.shared.clone();
         let result = tokio::task::spawn_blocking(move || {
-            let mut guard = shared.lock().unwrap();
+            let mut guard = shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let ComponentInstance { store, bindings } = &mut *guard;
             bindings
                 .tau_extension_tools()
@@ -339,7 +374,7 @@ impl Tool for WasmTool {
                 content: r.content,
                 is_error: r.is_error,
             },
-            Ok(Err(e)) => ToolOutput::err(format!("wasm trap: {e}")),
+            Ok(Err(e)) => ToolOutput::err(format!("wasm trap: {}", compact_wasm_error(&e))),
             Err(e) => ToolOutput::err(format!("extension task failed: {e}")),
         }
     }
@@ -360,7 +395,7 @@ impl ProbeHandler for WasmProbes {
         let shared = self.shared.clone();
         let point_name = point.name().to_string();
         let result = tokio::task::spawn_blocking(move || {
-            let mut guard = shared.lock().unwrap();
+            let mut guard = shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let ComponentInstance { store, bindings } = &mut *guard;
             bindings
                 .tau_extension_hooks()
@@ -550,7 +585,7 @@ impl tau_core::Model for WasmModel {
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
         let shared = self.shared.clone();
         let call = tokio::task::spawn_blocking(move || {
-            let mut guard = shared.lock().unwrap();
+            let mut guard = shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
             let instance = &mut *guard;
             instance.store.data_mut().event_tx = Some(tx);
             let result = instance
@@ -574,7 +609,7 @@ impl tau_core::Model for WasmModel {
             match call.await {
                 Ok(Ok(())) => {}
                 Ok(Err(e)) => {
-                    yield ModelEvent::Error { message: format!("provider trapped: {e}") };
+                    yield ModelEvent::Error { message: format!("provider trapped: {}", compact_wasm_error(&e)) };
                     yield ModelEvent::Done { stop: tau_core::StopReason::Error };
                 }
                 Err(e) => {
@@ -584,6 +619,30 @@ impl tau_core::Model for WasmModel {
             }
         }
         .boxed()
+    }
+}
+
+#[cfg(test)]
+mod compact_error_tests {
+    #[test]
+    fn strips_backtrace_and_appends_root_cause() {
+        let display = "error while executing at wasm backtrace:\n    0:  0x17cff - abort\n    1:  0x15e03 - panic";
+        assert_eq!(
+            super::compact_error_display(display, "wasm `unreachable` instruction executed"),
+            "error while executing (wasm `unreachable` instruction executed)"
+        );
+    }
+
+    #[test]
+    fn without_a_distinct_root_the_summary_stands_alone() {
+        assert_eq!(
+            super::compact_error_display("plain failure", "plain failure"),
+            "plain failure"
+        );
+        // No context chain: root is the whole multiline Display — never
+        // appended.
+        let display = "first line\nsecond line";
+        assert_eq!(super::compact_error_display(display, display), "first line");
     }
 }
 
