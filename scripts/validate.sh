@@ -94,10 +94,21 @@ SSE_BODY = (
 )
 
 
+RESPONSES_SSE_BODY = (
+    'data: {"type":"response.output_text.delta","delta":"mock "}\n\n'
+    'data: {"type":"response.output_text.delta","delta":"responses ok"}\n\n'
+    'data: {"type":"response.completed"}\n\n'
+    "data: [DONE]\n\n"
+)
+
+
 class ChatHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         self.rfile.read(int(self.headers.get("content-length", 0)))
-        body = SSE_BODY.encode()
+        if self.path.endswith("/responses"):
+            body = RESPONSES_SSE_BODY.encode()
+        else:
+            body = SSE_BODY.encode()
         self.send_response(200)
         self.send_header("content-type", "text/event-stream")
         self.send_header("content-length", str(len(body)))
@@ -142,6 +153,10 @@ OUT=$(OPENAI_API_KEY=dummy OPENAI_BASE_URL=http://127.0.0.1:8401/v1 TAU_MODEL=mo
     "$TAU" -p "say something" 2>&1) || fail "built-in provider: $OUT"
 echo "$OUT" | grep -q "mock provider ok" || fail "SSE stream did not land: $OUT"
 echo "ok — chat-completions SSE streamed end to end"
+
+OUT=$(OPENAI_API_KEY=dummy OPENAI_BASE_URL=http://127.0.0.1:8401/v1 TAU_MODEL=mock-model     "$TAU" --provider responses -p "say something" 2>&1) || fail "responses provider: $OUT"
+echo "$OUT" | grep -q "mock responses ok" || fail "Responses SSE stream did not land: $OUT"
+echo "ok — Responses API SSE streamed end to end"
 
 # --- step 4: wasm provider consent gate --------------------------------
 step "4/4 wasm provider consent gate"
