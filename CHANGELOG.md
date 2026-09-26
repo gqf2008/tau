@@ -73,7 +73,10 @@ in ten steps: demo, the signing/trust chain (trusted load; untrusted,
 byte-flipped, signature-stripped, and corrupted-signature rejection),
 all three built-in providers
 against a loopback mock, wasm-provider consent gate, MCP bridge spawn
-gate, remembered-consent lifecycle, OCI push/pull/trust onboarding,
+gate, remembered-consent lifecycle, credential delivery (the token
+reaches the origin through the guest; consent and session files never
+persist the secret; TAU_PROVIDER_AUTH flows only with the grant),
+OCI push/pull/trust onboarding,
 blob GC, compaction (summary entry; originals stay; follow-ups run on
 the compacted branch), torn-tail recovery, concurrent access, and
 probe verdicts (block, continue, and a trapped probe degrading without

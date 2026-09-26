@@ -227,6 +227,10 @@ class ChatHandler(BaseHTTPRequestHandler):
 
 class HelloHandler(BaseHTTPRequestHandler):
     def do_GET(self):
+        # Side channel: record the Authorization header of every request
+        # so the credential-delivery step can prove what the origin saw.
+        with open("auth_capture.log", "a") as f:
+            f.write(str(self.headers.get("authorization")) + "\n")
         body = b"hello from mock origin"
         self.send_response(200)
         self.send_header("content-type", "text/plain")
@@ -341,6 +345,48 @@ if "$TAU" --provider-wasm prov.wasm --model http-echo \
     fail "fetch flowed after revoke — the gate is open"
 fi
 echo "ok — revoked grant is gone and the gate closes again"
+
+# Credential delivery: passing --provider-auth IS the consent, the token
+# reaches the origin through the guest, and the secret is never
+# persisted — the grant stores only the auth_delivery boolean.
+OUT="$("$TAU" --provider-wasm prov.wasm --model http-echo \
+    --provider-origin http://127.0.0.1:8402 --provider-auth sekrit-123 --remember \
+    -p "http://127.0.0.1:8402/" 2>&1)" || fail "auth run: $OUT"
+echo "$OUT" | grep -q "STATUS 200 \[auth\]" || fail "guest did not get the token: $OUT"
+grep -q "Bearer sekrit-123" auth_capture.log \
+    || fail "token did not reach the origin: $(cat auth_capture.log)"
+grep -q "sekrit-123" "$CONSENT_FILE" \
+    && fail "consent file persisted the secret: $(cat "$CONSENT_FILE")"
+grep -q "sekrit-123" .tau/session.jsonl \
+    && fail "session file persisted the secret"
+echo "ok — token delivered to the origin; consent + session carry no secret"
+
+# With the recalled grant, TAU_PROVIDER_AUTH flows without the flag.
+: > auth_capture.log
+OUT="$(TAU_PROVIDER_AUTH=sekrit-456 "$TAU" --provider-wasm prov.wasm --model http-echo \
+    -p "http://127.0.0.1:8402/" 2>&1)" || fail "env recall run: $OUT"
+echo "$OUT" | grep -q "STATUS 200 \[auth\]" \
+    || fail "recalled grant did not deliver the env token: $OUT"
+grep -q "Bearer sekrit-456" auth_capture.log \
+    || fail "env token did not reach the origin"
+echo "ok — recalled grant delivers TAU_PROVIDER_AUTH"
+
+# The same env var without any grant: delivered nowhere, noted loudly.
+"$TAU" consent --revoke "$THROWAWAY_FP" > /dev/null || fail "second revoke"
+: > auth_capture.log
+OUT="$(TAU_PROVIDER_AUTH=sekrit-789 "$TAU" --provider-wasm prov.wasm --model http-echo \
+    --provider-origin http://127.0.0.1:8402 \
+    -p "http://127.0.0.1:8402/" 2>&1)" || fail "no-grant run: $OUT"
+echo "$OUT" | grep -q "no auth-delivery grant" \
+    || fail "missing the no-grant note: $OUT"
+echo "$OUT" | grep -q "STATUS 200: hello" || fail "fetch broke without auth: $OUT"
+if echo "$OUT" | grep -q "STATUS 200 \[auth\]"; then
+    fail "token flowed without a grant — the auth gate is open"
+fi
+if grep -q "sekrit-789" auth_capture.log; then
+    fail "origin saw a token it never consented to"
+fi
+echo "ok — env token refused without the grant"
 
 # --- step 7: OCI distribution ------------------------------------------
 step "7/10 OCI distribution (push / pull / trust onboarding)"
