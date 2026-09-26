@@ -102,7 +102,7 @@ impl Model for AnthropicModel {
 
         let byte_stream = response
             .bytes_stream()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e));
+            .map_err(std::io::Error::other);
         let mut events = sse::parse(byte_stream);
 
         stream! {

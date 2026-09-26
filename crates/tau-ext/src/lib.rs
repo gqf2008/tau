@@ -77,6 +77,9 @@ struct ComponentInstance {
 
 type Shared = Arc<Mutex<ComponentInstance>>;
 
+/// What a loaded component contributes, unpacked.
+pub type LoadedParts = (Vec<Box<dyn Tool>>, Vec<Box<dyn ProbeHandler>>);
+
 /// Everything one loaded component contributes.
 pub struct LoadedExtension {
     pub name: String,
@@ -85,7 +88,7 @@ pub struct LoadedExtension {
 }
 
 impl LoadedExtension {
-    pub fn into_parts(self) -> (Vec<Box<dyn Tool>>, Vec<Box<dyn ProbeHandler>>) {
+    pub fn into_parts(self) -> LoadedParts {
         (self.tools, self.probes)
     }
 }

@@ -140,12 +140,11 @@ pub fn blob_hashes(message: &Message) -> impl Iterator<Item = &str> {
 /// Idempotent and cheap for already-externalized or small media.
 pub fn externalize(message: &mut Message, store: &BlobStore) -> io::Result<()> {
     for media in media_mut(message) {
-        if let MediaSource::Bytes(bytes) = &media.source {
-            if bytes.len() > INLINE_LIMIT {
+        if let MediaSource::Bytes(bytes) = &media.source
+            && bytes.len() > INLINE_LIMIT {
                 let hash = store.put(bytes)?;
                 media.source = MediaSource::Blob { hash };
             }
-        }
     }
     Ok(())
 }

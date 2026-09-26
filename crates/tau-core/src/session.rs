@@ -99,11 +99,10 @@ impl JsonlStore {
     }
 
     pub fn append(&mut self, mut entry: SessionEntry) -> Result<(), SessionError> {
-        if let Some(parent) = &entry.parent {
-            if !self.by_id.contains_key(parent) {
+        if let Some(parent) = &entry.parent
+            && !self.by_id.contains_key(parent) {
                 return Err(SessionError::NotFound(parent.clone()));
             }
-        }
         if let (Some(blobs), EntryKind::Message { message }) = (&self.blobs, &mut entry.kind) {
             crate::blobs::externalize(message, blobs)?;
         }

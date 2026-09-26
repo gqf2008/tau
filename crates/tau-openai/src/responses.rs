@@ -153,11 +153,10 @@ impl ChunkMapper {
         let mut events = Vec::new();
         match chunk["type"].as_str().unwrap_or_default() {
             "response.output_text.delta" => {
-                if let Some(text) = chunk["delta"].as_str() {
-                    if !text.is_empty() {
+                if let Some(text) = chunk["delta"].as_str()
+                    && !text.is_empty() {
                         events.push(ModelEvent::TextDelta { text: text.into() });
                     }
-                }
             }
             "response.output_item.added" => {
                 let item = &chunk["item"];

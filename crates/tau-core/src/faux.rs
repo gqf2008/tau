@@ -25,7 +25,7 @@ impl FauxModel {
     pub fn echo() -> Self {
         Self::scripted(vec![vec![
             ModelEvent::TextDelta { text: "tau is alive. ".into() },
-            ModelEvent::TextDelta { text: "(faux model — set OPENAI_API_KEY for a real one)".into() },
+            ModelEvent::TextDelta { text: "(faux model — set ANTHROPIC_API_KEY or OPENAI_API_KEY for a real one)".into() },
             ModelEvent::Done {
                 stop: crate::model::StopReason::Stop,
             },

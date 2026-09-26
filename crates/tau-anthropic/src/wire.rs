@@ -144,11 +144,10 @@ pub fn chunk_events(data: &str) -> Vec<ModelEvent> {
             let index = event["index"].as_u64().unwrap_or(0) as u32;
             match delta["type"].as_str().unwrap_or_default() {
                 "text_delta" => {
-                    if let Some(text) = delta["text"].as_str() {
-                        if !text.is_empty() {
+                    if let Some(text) = delta["text"].as_str()
+                        && !text.is_empty() {
                             events.push(ModelEvent::TextDelta { text: text.into() });
                         }
-                    }
                 }
                 "input_json_delta" => events.push(ModelEvent::ToolCallDelta {
                     index,

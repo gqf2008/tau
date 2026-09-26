@@ -148,11 +148,10 @@ pub fn chunk_events(data: &str) -> Vec<ModelEvent> {
     let mut events = Vec::new();
     for choice in chunk["choices"].as_array().into_iter().flatten() {
         let delta = &choice["delta"];
-        if let Some(text) = delta["content"].as_str() {
-            if !text.is_empty() {
+        if let Some(text) = delta["content"].as_str()
+            && !text.is_empty() {
                 events.push(ModelEvent::TextDelta { text: text.to_string() });
             }
-        }
         for call in delta["tool_calls"].as_array().into_iter().flatten() {
             let index = call["index"].as_u64().unwrap_or(0) as u32;
             events.push(ModelEvent::ToolCallDelta {

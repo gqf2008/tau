@@ -116,6 +116,7 @@ async fn bridge_exposes_mcp_tools_over_http() {
     while std::net::TcpStream::connect(("127.0.0.1", port)).is_err() {
         if std::time::Instant::now() > deadline {
             let _ = child.kill();
+    let _ = child.wait();
             panic!("mock http server did not start");
         }
         std::thread::sleep(std::time::Duration::from_millis(50));
@@ -133,6 +134,7 @@ async fn bridge_exposes_mcp_tools_over_http() {
         Ok(tools) => tools,
         Err(e) => {
             let _ = child.kill();
+    let _ = child.wait();
             panic!("load bridge over http: {e}");
         }
     };
@@ -149,6 +151,7 @@ async fn bridge_exposes_mcp_tools_over_http() {
     assert!(out.is_error);
 
     let _ = child.kill();
+    let _ = child.wait();
 }
 
 #[tokio::test]
