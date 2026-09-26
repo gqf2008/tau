@@ -27,7 +27,7 @@ cleanup() {
     [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null || true
     cd "$ROOT" # cannot remove the workdir while standing in it (Windows)
     if [ -n "$THROWAWAY_FP" ]; then
-        rm -f "$HOME/.tau/keys/$THROWAWAY_FP.key"             "$HOME/.tau/trust/$THROWAWAY_FP.pub"             "$HOME/.tau/trust/$THROWAWAY_FP.pub.aside"
+        rm -f "$HOME/.tau/keys/$THROWAWAY_FP.key"             "$HOME/.tau/trust/$THROWAWAY_FP.pub"             "$HOME/.tau/trust/$THROWAWAY_FP.pub.aside"             "$HOME/.tau/consent/$THROWAWAY_FP.json"
     fi
     rm -rf "$WORK"
 }
@@ -52,13 +52,13 @@ mkdir -p "$WORK"
 cd "$WORK"
 
 # --- step 1: demo -----------------------------------------------------
-step "1/5 demo"
+step "1/6 demo"
 OUT="$("$TAU" --demo -p "hello from validation" 2>&1)" || fail "demo exited $?"
 echo "$OUT" | grep -q "tau is alive" || fail "demo answer missing: $OUT"
 echo "ok — faux model answered"
 
 # --- step 2: signing + trust chain ------------------------------------
-step "2/5 signing and trust chain"
+step "2/6 signing and trust chain"
 GEN="$("$TAU" keygen)" || fail "keygen: $GEN"
 THROWAWAY_FP=$(echo "$GEN" | sed -n 's/^key generated and trusted: //p')
 [ -n "$THROWAWAY_FP" ] || fail "no fingerprint in keygen output: $GEN"
@@ -83,7 +83,7 @@ mv "$HOME/.tau/trust/$THROWAWAY_FP.pub.aside" "$HOME/.tau/trust/$THROWAWAY_FP.pu
 echo "ok — untrusted component rejected"
 
 # --- step 3: built-in provider against a loopback SSE mock -------------
-step "3/5 built-in providers (loopback SSE mock)"
+step "3/6 built-in providers (loopback SSE mock)"
 cat > mock.py << 'PYEOF'
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -178,7 +178,7 @@ echo "$OUT" | grep -q "mock anthropic ok" || fail "Anthropic SSE stream did not 
 echo "ok — Anthropic Messages SSE streamed end to end"
 
 # --- step 4: wasm provider consent gate --------------------------------
-step "4/5 wasm provider consent gate"
+step "4/6 wasm provider consent gate"
 if "$TAU" --allow-unsigned \
     --provider-wasm "$HTTP_PROVIDER" --model http-echo \
     -p "http://127.0.0.1:8402/" 2>&1 | grep -q "STATUS 200"; then
@@ -195,7 +195,7 @@ echo "$OUT" | grep -q "STATUS 200: hello from mock origin" \
 echo "ok — with --provider-origin the fetch flows"
 
 # --- step 5: MCP bridge (consent-gated spawn) --------------------------
-step "5/5 MCP bridge (consent-gated spawn)"
+step "5/6 MCP bridge (consent-gated spawn)"
 # Without --mcp-command the bridge has nothing it may spawn: the load
 # must fail, not silently degrade.
 if "$TAU" --allow-unsigned --mcp-bridge "$MCP_BRIDGE" --demo -p hi > /dev/null 2>&1; then
@@ -214,4 +214,39 @@ echo "$OUT" | grep -q "tool ← echo: bridge validation ok" \
     || fail "bridged echo tool did not close the loop: $OUT"
 echo "ok — consent-gated spawn served the echo tool through the MCP bridge"
 
-step "ALL FIVE STEPS PASSED — the release candidate stands"
+# --- step 6: remembered consent lifecycle ------------------------------
+step "6/6 remembered consent (--remember / --list / --revoke)"
+# Consent is keyed by signing fingerprint, so the provider copy is
+# signed with the throwaway key — the real trust store and any real
+# consent records stay untouched.
+cp "$HTTP_PROVIDER" prov.wasm
+"$TAU" sign prov.wasm --key "$THROWAWAY_FP" > /dev/null || fail "sign provider"
+CONSENT_FILE="$HOME/.tau/consent/$THROWAWAY_FP.json"
+
+OUT="$("$TAU" --provider-wasm prov.wasm --model http-echo \
+    --provider-origin http://127.0.0.1:8402 --remember \
+    -p "http://127.0.0.1:8402/" 2>&1)" || fail "remembered run: $OUT"
+echo "$OUT" | grep -q "STATUS 200" || fail "remembered run fetch: $OUT"
+[ -f "$CONSENT_FILE" ] || fail "--remember persisted nothing"
+LIST="$("$TAU" consent --list)" || fail "consent --list: $LIST"
+echo "$LIST" | grep -q "$THROWAWAY_FP" || fail "--list hides the grant: $LIST"
+echo "$LIST" | grep -q "origin: http://127.0.0.1:8402" \
+    || fail "--list hides the origin: $LIST"
+echo "ok — grant persisted and listed"
+
+# The remembered grant flows without the flag.
+OUT="$("$TAU" --provider-wasm prov.wasm --model http-echo \
+    -p "http://127.0.0.1:8402/" 2>&1)" || fail "recalled run: $OUT"
+echo "$OUT" | grep -q "STATUS 200" || fail "recalled grant did not flow: $OUT"
+echo "ok — remembered origin flows without --provider-origin"
+
+OUT="$("$TAU" consent --revoke "$THROWAWAY_FP")" || fail "consent --revoke: $OUT"
+echo "$OUT" | grep -q "revoked: $THROWAWAY_FP" || fail "revoke output: $OUT"
+[ ! -f "$CONSENT_FILE" ] || fail "revoke left the consent file"
+if "$TAU" --provider-wasm prov.wasm --model http-echo \
+    -p "http://127.0.0.1:8402/" 2>&1 | grep -q "STATUS 200"; then
+    fail "fetch flowed after revoke — the gate is open"
+fi
+echo "ok — revoked grant is gone and the gate closes again"
+
+step "ALL SIX STEPS PASSED — the release candidate stands"
