@@ -52,21 +52,45 @@ impl BlobStore {
     }
 
     /// Store bytes; returns the `sha256:<hex>` hash. Idempotent — writing
-    /// the same content twice is a no-op.
+    /// the same content twice is a no-op. The write is atomic — a temp
+    /// file then a rename — so a crash mid-write tears the temp file,
+    /// never the content-addressed one readers verify against.
     pub fn put(&self, bytes: &[u8]) -> io::Result<String> {
         let hash = format!("sha256:{}", hex(&Sha256::digest(bytes)));
         let path = self.path(&hash);
         if !path.is_file() {
             std::fs::create_dir_all(&self.dir)?;
-            std::fs::write(path, bytes)?;
+            let tmp = self.dir.join(format!(
+                ".tmp-{}-{}",
+                std::process::id(),
+                hash.replace(':', "-")
+            ));
+            std::fs::write(&tmp, bytes)?;
+            if let Err(e) = std::fs::rename(&tmp, &path) {
+                let _ = std::fs::remove_file(&tmp);
+                return Err(e);
+            }
         }
         Ok(hash)
     }
 
-    /// The bytes for `hash`, or `None` when absent.
+    /// The bytes for `hash`, or `None` when absent. The store is
+    /// content-addressed, so reads verify: a file whose bytes no longer
+    /// hash to its name (disk rot, a torn write from before the atomic
+    /// put, tampering) is an error, never silently served.
     pub fn get(&self, hash: &str) -> io::Result<Option<Vec<u8>>> {
         match std::fs::read(self.path(hash)) {
-            Ok(bytes) => Ok(Some(bytes)),
+            Ok(bytes) => {
+                let actual = format!("sha256:{}", hex(&Sha256::digest(&bytes)));
+                if actual == hash {
+                    Ok(Some(bytes))
+                } else {
+                    Err(io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("blob {hash} is corrupt (content hashes to {actual})"),
+                    ))
+                }
+            }
             Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
             Err(e) => Err(e),
         }
@@ -94,6 +118,15 @@ impl BlobStore {
                 continue;
             }
             let name = entry.file_name().to_string_lossy().into_owned();
+            if name.starts_with(".tmp-") {
+                // Our own incomplete put: definitionally garbage (the
+                // content-addressed file it was headed for either exists
+                // or will be rewritten by the next put).
+                if !dry_run {
+                    std::fs::remove_file(entry.path())?;
+                }
+                continue;
+            }
             let Some(hash) = name
                 .split_once('_')
                 .map(|(tag, hex)| format!("{tag}:{hex}"))
@@ -187,10 +220,18 @@ pub fn materialize(message: &mut Message, store: &BlobStore) {
                 };
                 media.source = MediaSource::Bytes(bytes);
             }
-            _ => {
+            Ok(None) => {
                 notes.push((
                     content.clone(),
                     format!("[media unavailable: {media_type} blob {hash} not in store]"),
+                ));
+            }
+            Err(e) => {
+                // A corrupt blob (the read verified the hash and it did
+                // not match) degrades the same way — but says so.
+                notes.push((
+                    content.clone(),
+                    format!("[media unavailable: {media_type} blob {hash}: {e}]"),
                 ));
             }
         }
@@ -327,5 +368,58 @@ mod tests {
         assert!(
             matches!(&lost.content[1], Content::Text { text } if text.contains("not in store"))
         );
+    }
+
+    #[test]
+    fn get_verifies_content_and_rejects_corrupt_blobs() {
+        let (_dir, store) = store();
+        let hash = store.put(b"honest bytes").unwrap();
+        assert_eq!(
+            store.get(&hash).unwrap().as_deref(),
+            Some(&b"honest bytes"[..])
+        );
+
+        // Disk rot / a torn write from before the atomic put / tampering:
+        // the file's bytes no longer hash to its name. Never serve that.
+        std::fs::write(store.path(&hash), b"evil bytes").unwrap();
+        let err = store.get(&hash).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::InvalidData);
+        assert!(err.to_string().contains("corrupt"), "got: {err}");
+
+        // materialize degrades a corrupt blob like a missing one — but
+        // says it is corrupt, not "not in store".
+        let mut message = Message::user("look");
+        message.content.push(Content::Image {
+            media: Media::blob("image/png", &hash),
+        });
+        materialize(&mut message, &store);
+        assert!(
+            matches!(&message.content[1], Content::Text { text } if text.contains("corrupt")),
+            "got: {:?}",
+            message.content[1]
+        );
+    }
+
+    #[test]
+    fn put_leaves_no_temp_files_and_sweep_cleans_orphaned_temps() {
+        let (_dir, store) = store();
+        let hash = store.put(b"atomic").unwrap();
+        let names: Vec<String> = std::fs::read_dir(&store.dir)
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec![hash.replace(':', "_")], "no .tmp- litter");
+
+        // A crashed put leaves a .tmp- orphan: dry-run leaves it (pure
+        // report), a real sweep removes it. It never counts as a blob.
+        std::fs::write(store.dir.join(".tmp-1-sha256-deadbeef"), b"torn").unwrap();
+        let live: HashSet<String> = [hash.clone()].into_iter().collect();
+        let report = store.sweep(&live, true).unwrap();
+        assert_eq!(report.scanned, 1, "tmp files are not blobs");
+        assert!(store.dir.join(".tmp-1-sha256-deadbeef").exists());
+        let report = store.sweep(&live, false).unwrap();
+        assert_eq!(report.scanned, 1);
+        assert!(!store.dir.join(".tmp-1-sha256-deadbeef").exists());
+        assert!(store.has(&hash));
     }
 }

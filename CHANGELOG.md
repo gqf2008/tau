@@ -41,7 +41,9 @@ the extension unit instead of in-process scripts.
   its run and the instance is rebuilt, so one crash never fails the
   rest of the session. Multimodal messages (text,
   image, audio, video, file), media >256KB externalized to a
-  content-addressed blob store with `tau gc`.
+  content-addressed blob store with `tau gc`. Blob writes are atomic
+  and reads verify the hash: a corrupt blob degrades to a placeholder,
+  wrong bytes are never served to the model.
 - **MCP without MCP in core**: external protocols are translated by
   bridge components over consent-gated spawn/http capabilities; the
   reference bridge speaks stdio + streamable HTTP with protocol-version
@@ -71,7 +73,7 @@ blob GC, compaction (summary entry; originals stay; follow-ups run on
 the compacted branch), torn-tail recovery, concurrent access, and
 probe verdicts (block, continue, and a trapped probe degrading without
 going dead) — restoring
-the environment exactly afterwards. 103 tests, clippy-clean across all
+the environment exactly afterwards. 105 tests, clippy-clean across all
 workspaces.
 
 Performance baseline (docs/perf.md): extension load 202ms cold → 9ms
