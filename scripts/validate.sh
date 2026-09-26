@@ -93,6 +93,77 @@ fi
 mv "$HOME/.tau/trust/$THROWAWAY_FP.pub.aside" "$HOME/.tau/trust/$THROWAWAY_FP.pub"
 echo "ok — untrusted component rejected"
 
+# Tamper attacks on the signed component: however the bytes were corrupted
+# after signing, the default gate must refuse them.
+step "2b/9 signature tamper rejection"
+
+# Flip one byte mid-module (far outside the trailing signature section):
+# the digest no longer matches the signature.
+python - << 'PYEOF'
+with open("ext.wasm", "rb") as f:
+    data = bytearray(f.read())
+data[len(data) // 2] ^= 0xFF
+with open("tampered-code.wasm", "wb") as f:
+    f.write(bytes(data))
+PYEOF
+if "$TAU" -e tampered-code.wasm --demo -p hi 2> tampered-code.err; then
+    fail "byte-flipped component loaded — verification is not checking the bytes"
+fi
+grep -q "signature does not verify" tampered-code.err \
+    || fail "unexpected rejection: $(cat tampered-code.err)"
+echo "ok — flipped byte in the module: signature does not verify"
+
+# Strip the signature section outright: downgrades to unsigned, which the
+# default policy refuses just the same.
+python - << 'PYEOF'
+with open("ext.wasm", "rb") as f:
+    data = f.read()
+out = bytearray(data[:8])
+pos = 8
+while pos < len(data):
+    sec_id = data[pos]
+    leb_start = pos
+    pos += 1
+    size = 0
+    shift = 0
+    while True:
+        b = data[pos]
+        pos += 1
+        size |= (b & 0x7F) << shift
+        shift += 7
+        if not b & 0x80:
+            break
+    payload = data[pos:pos + size]
+    # Custom-section name length is one LEB byte here ("tau-signature" < 128).
+    is_sig = sec_id == 0 and payload[1:1 + payload[0]] == b"tau-signature"
+    if not is_sig:
+        out.extend(data[leb_start:pos + size])
+    pos += size
+with open("stripped.wasm", "wb") as f:
+    f.write(bytes(out))
+PYEOF
+if "$TAU" -e stripped.wasm --demo -p hi 2> stripped.err; then
+    fail "signature-stripped component loaded — unsigned downgrade passed the gate"
+fi
+grep -q "component is unsigned" stripped.err \
+    || fail "unexpected rejection: $(cat stripped.err)"
+echo "ok — stripped signature section: component is unsigned"
+
+# Corrupt the signature payload itself: refused, not a crash or a bypass.
+python - << 'PYEOF'
+with open("ext.wasm", "rb") as f:
+    data = bytearray(f.read())
+data[-20] ^= 0xFF
+with open("tampered-sig.wasm", "wb") as f:
+    f.write(bytes(data))
+PYEOF
+if "$TAU" -e tampered-sig.wasm --demo -p hi 2> tampered-sig.err; then
+    fail "corrupted signature section loaded — the gate trusts broken signatures"
+fi
+grep -q "signature" tampered-sig.err \
+    || fail "unexpected rejection: $(cat tampered-sig.err)"
+echo "ok — corrupted signature payload refused"
+
 # --- step 3: built-in provider against a loopback SSE mock -------------
 step "3/9 built-in providers (loopback SSE mock)"
 cat > mock.py << 'PYEOF'

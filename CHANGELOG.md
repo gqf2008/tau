@@ -54,11 +54,13 @@ full tour.
 ### Validation
 
 `scripts/validate.sh` proves the release the way a first user meets it,
-in nine steps: demo, signing/trust chain, all three built-in providers
+in nine steps: demo, the signing/trust chain (trusted load; untrusted,
+byte-flipped, signature-stripped, and corrupted-signature rejection),
+all three built-in providers
 against a loopback mock, wasm-provider consent gate, MCP bridge spawn
 gate, remembered-consent lifecycle, OCI push/pull/trust onboarding,
 blob GC, and probe verdicts — restoring the environment exactly
-afterwards. 96 tests, clippy-clean across all workspaces.
+afterwards. 97 tests, clippy-clean across all workspaces.
 
 Performance baseline (docs/perf.md): extension load 202ms cold → 9ms
 warm (wasmtime compile cache); 10k-entry session opens in 66ms.
