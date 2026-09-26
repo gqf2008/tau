@@ -102,11 +102,22 @@ RESPONSES_SSE_BODY = (
 )
 
 
+ANTHROPIC_SSE_BODY = (
+    'data: {"type":"message_start","message":{"id":"m1","role":"assistant"}}\n\n'
+    'data: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n'
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"mock "}}\n\n'
+    'data: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"anthropic ok"}}\n\n'
+    'data: {"type":"message_delta","delta":{"stop_reason":"end_turn"}}\n\n'
+)
+
+
 class ChatHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         self.rfile.read(int(self.headers.get("content-length", 0)))
         if self.path.endswith("/responses"):
             body = RESPONSES_SSE_BODY.encode()
+        elif self.path.endswith("/messages"):
+            body = ANTHROPIC_SSE_BODY.encode()
         else:
             body = SSE_BODY.encode()
         self.send_response(200)
@@ -154,9 +165,15 @@ OUT=$(OPENAI_API_KEY=dummy OPENAI_BASE_URL=http://127.0.0.1:8401/v1 TAU_MODEL=mo
 echo "$OUT" | grep -q "mock provider ok" || fail "SSE stream did not land: $OUT"
 echo "ok — chat-completions SSE streamed end to end"
 
-OUT=$(OPENAI_API_KEY=dummy OPENAI_BASE_URL=http://127.0.0.1:8401/v1 TAU_MODEL=mock-model     "$TAU" --provider responses -p "say something" 2>&1) || fail "responses provider: $OUT"
+OUT=$(OPENAI_API_KEY=dummy OPENAI_BASE_URL=http://127.0.0.1:8401/v1 TAU_MODEL=mock-model \
+    "$TAU" --provider responses -p "say something" 2>&1) || fail "responses provider: $OUT"
 echo "$OUT" | grep -q "mock responses ok" || fail "Responses SSE stream did not land: $OUT"
 echo "ok — Responses API SSE streamed end to end"
+
+OUT=$(ANTHROPIC_API_KEY=dummy ANTHROPIC_BASE_URL=http://127.0.0.1:8401 TAU_MODEL=mock-model \
+    "$TAU" --provider anthropic -p "say something" 2>&1) || fail "anthropic provider: $OUT"
+echo "$OUT" | grep -q "mock anthropic ok" || fail "Anthropic SSE stream did not land: $OUT"
+echo "ok — Anthropic Messages SSE streamed end to end"
 
 # --- step 4: wasm provider consent gate --------------------------------
 step "4/4 wasm provider consent gate"
