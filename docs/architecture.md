@@ -86,12 +86,12 @@ ABI 是已知的未来改进项，当前边界先行钉死。
 
 ### 4.1 契约：三个 world，两种能力，一条推送通道
 
-契约是 `wit/tau.wit`（版本化 `tau:extension@0.1.0`）。它按「组件扮演
+契约是 `wit/tau.wit`（版本化 `tau:extension@0.2.0`）。它按「组件扮演
 什么角色」切成三个 world，而不是一个大接口：
 
 | world | export | import | 角色 |
 |-------|--------|--------|------|
-| `extension` | `tools`（definitions/execute）、`hooks`（points/probe） | — | 通用扩展：给 agent 加工具、在生命周期点上观察与影响 |
+| `extension` | `tools`（definitions/execute）、`probes`（points/probe） | `host`（notify/emit/steer/follow-up；注入类过 consent） | 通用扩展：给 agent 加工具、在生命周期点上观察与影响、经宿主通道回传 |
 | `provider` | `models`（list-models/run） | `events`、`http` | 模型 provider：推送式流式输出，网络走授权出口 |
 | `bridge` | `tools` | `process`、`http` | 桥：把外部工具协议（MCP）翻译成 tau 工具 |
 

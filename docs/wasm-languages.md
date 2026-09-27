@@ -5,6 +5,10 @@
 ——工具名 `upper`，把入参 `text` 转大写——用七种主流语言各写一个最小
 扩展，并用同一条验收命令**真加载**验证。
 
+契约版本 `tau:extension@0.2.0`（0.1.0 → 0.2.0：`hooks` 接口正名
+`probes`，extension world 新增 `host` import）。0.1.0 契约的旧产物
+会被宿主点名拒载（版本错配写进 load 错误），重建即迁移。
+
 ## 验收标准
 
 只「能编译」不算数，必须真加载：
@@ -26,11 +30,11 @@ transcript 必须同时出现：
 | 语言 | 工具链 / 版本 | 产物 | 构建命令 | tau 加载 | 断点或依据 |
 |---|---|---|---|---|---|
 | C | wit-bindgen 0.62（c）+ clang 22.1.8 + wasm-tools 1.259 | `c_upper.wasm` 7.0 KB | `bash examples/c-upper/build.sh` | ✅ 跑通 | — |
-| C++ | wit-bindgen 0.62（cpp）+ clang++ 22.1.8 + wasm-tools 1.259 | `cpp_upper.wasm` 7.3 KB | `bash examples/cpp-upper/build.sh` | ✅ 跑通 | — |
+| C++ | wit-bindgen 0.62（cpp）+ clang++ 22.1.8 + wasm-tools 1.259 | `cpp_upper.wasm` 7.3 KB | `bash examples/cpp-upper/build.sh` | ✅ 跑通 | 0.2.0 需 -std=c++23 + 新增 expected/variant 垫片，见下文 |
 | Python | componentize-py 0.25.1（pip） | `py_upper.wasm` 18 MB | `bash examples/python-upper/build.sh` | ✅ 跑通 | 实现类命名坑，见下文 |
 | JavaScript | jco 1.35.0（npx，node 22.14） | `js_upper.wasm` 12.5 MB | `bash examples/js-upper/build.sh` | ✅ 跑通 | 必须 `--disable http fetch-event` |
 | TypeScript | jco 1.35.0（npx，node 22.14） | `ts_upper.wasm` 12.5 MB | `bash examples/ts-upper/build.sh` | ✅ 跑通 | 同上 |
-| Go | TinyGo 0.42 + go 1.25.7 + wit-bindgen 0.62（go）+ Binaryen 133 + preview1 reactor adapter 48.0.3 | `go_upper.wasm` 3.3 MB | `bash examples/go-upper/build.sh`（需 env，见下文） | ✅ 跑通 | 四处补丁 + reactor 构建模式，见下文 |
+| Go | TinyGo 0.42 + go 1.25.7 + wit-bindgen 0.62（go）+ Binaryen 133 + preview1 reactor adapter 48.0.3 | `go_upper.wasm` 3.3 MB | `bash examples/go-upper/build.sh`（需 env，见下文） | ✅ 跑通 | 四处补丁 + reactor 构建模式，见下文；0.2.0 实现包改名 `export_tau_extension_probes` |
 | Java | — | — | — | ❌ 无可用路径 | 权威依据见下文 |
 
 Rust 本体（`examples/upper` 等 5 个既有示例）不在本轮范围内，由
@@ -46,10 +50,17 @@ Rust 本体（`examples/upper` 等 5 个既有示例）不在本轮范围内，�
 
 ## C++ —— 同一路线加最小 std 垫片
 
-复用 C 的 shim.c，`src/cxxshim/` 提供 11 个最小标准库替代头
+复用 C 的 shim.c，`src/cxxshim/` 提供 13 个最小标准库替代头
 （cstdint/cstdlib/utility/optional/string/string_view/span/memory/map/
-new/assert.h），`clang++ -fno-exceptions -fno-rtti -std=c++17`。
-`wit-bindgen cpp` 生成的绑定在 `exports::tau::extension` 命名空间下。
+new/assert.h + 0.2.0 新增的 expected/variant），`clang++
+-fno-exceptions -fno-rtti -std=c++23`。`wit-bindgen cpp` 生成的绑定
+在 `exports::tau::extension` 命名空间下。
+
+0.2.0 的 `host` import 让生成代码引用 `std::expected`（result 返回）
+与 `std::variant`（content 四态）——clang 自由standing 工具链没有
+libc++，这两头必须手写垫片（只覆盖生成代码实际用到的 API 面；
+`optional`/`span` 垫片也要补 `emplace`/`data`/`const value`）。
+垫片只服务编译与链接：本示例不调用 host 接口，垫片代码路径不执行。
 
 ## Python —— componentize-py 的类命名契约
 

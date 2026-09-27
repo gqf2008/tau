@@ -19,8 +19,11 @@ decision trail — the two channels never diverge.
 ## Who subscribes
 
 - the CLI renderer (one task, prints text deltas and tool activity);
-- (planned, **not implemented** — `docs/wit-review.md` F2/F3) wasm
-  extensions that observe (via tau-ext; observe-only, never blocking);
+- wasm extensions publishing through the host channel: `host.notify`
+  lands as `AgentEvent::ExtensionNotice`, `host.emit` as
+  `AgentEvent::ExtensionFact` (observe-only facts; the schema is the
+  extension's own). A pull-subscription for high-frequency deltas
+  remains a design item (`docs/wit-review.md` F2);
 - telemetry / session recording (future), all without touching the loop.
 
 Subscribers cannot wedge the harness: the bus is bounded
@@ -35,7 +38,8 @@ Subscribers cannot wedge the harness: the bus is bounded
 3. High-volume points (text deltas, audio deltas, tool progress) are events
    only; probes on those paths would put wasm round-trips between the model
    and the user. Realtime-style audio streams in as `audio-delta` model
-   events (base64 on the wire, bytes in memory); the loop assembles
+   events (typed raw bytes on the 0.2.0 contract — base64 exists only
+   at the JSON edges); the loop assembles
    same-media-type runs into `Content::Audio` blocks on the assistant
    message, and observers see byte counts, never the payload.
 4. Commands (steer, follow-up, abort) arrive on the **control channel**
@@ -46,4 +50,6 @@ Subscribers cannot wedge the harness: the bus is bounded
    tool_result); follow-ups continue the same run at its natural end;
    abort stops at the next checkpoint with `StopReason::Aborted`. Applied
    commands are published on the bus (`AgentEvent::Steer` / `FollowUp` /
-   `Abort`), so the trail never diverges.
+   `Abort`), so the trail never diverges. Extensions reach this same
+   channel through `host.steer` / `host.follow-up` (consent-gated,
+   enqueue-only) — identical checkpoint semantics, no second path.

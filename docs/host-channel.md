@@ -1,7 +1,7 @@
 # Host 回调通道：extension world 的 guest→host 主动通道
 
-> **状态：设计定稿，未落地。** 落地以本文为准；代码不得先行于本文。
-> 目标契约版本 `tau:extension@0.2.0`，随 tau 0.3.0 发布。
+> **状态：已落地（本仓 main，契约 `tau:extension@0.2.0`），随下个
+> tau 版本发布。** 本文是设计记录；实施事实见 CHANGELOG [Unreleased]。
 > 是 `docs/im-channels.md` 与 `docs/realtime-av.md` 的契约前置。
 
 ## 动机
@@ -25,49 +25,54 @@ kind 枚举。
 ```wit
 package tau:extension@0.2.0;
 
-/// ---- 消息主干：tau 拥有 schema，用 WIT 类型 ----
+/// ---- 消息主干：tau 拥有 schema，用 WIT 类型（在 interface types 内） ----
 
-enum role { user, assistant, tool }
+interface types {
+    enum role { user, assistant, tool }
 
-record media {
-    /// MIME，如 audio/pcm;rate=24000；主类型即媒体语义。
-    media-type: string,
-    source: media-source,
-    /// 原始文件名（file 语义，可选）。
-    name: option<string>,
+    record media {
+        /// MIME，如 audio/pcm;rate=24000；主类型即媒体语义。
+        media-type: string,
+        source: media-source,
+        /// 原始文件名（仅 file 语义；image/audio/video 带 name 宿主拒绝）。
+        name: option<string>,
+    }
+    variant media-source {
+        /// 裸字节：二进制边界永不过 base64（tau_core::types 的一贯要求，
+        /// 信封版恰恰违反它，类型化顺带修正）。
+        bytes(list<u8>),
+        url(string),
+        /// sha256:<hex>，blob store 引用。
+        blob(string),
+    }
+    record tool-call {
+        id: string,
+        name: string,
+        /// 唯一保留的 JSON 叶：模型产的任意 JSON，无 schema 可类型化。
+        arguments-json: string,
+    }
+    record tool-result {
+        call-id: string,
+        /// 仍是文本：媒体结果属 F4 评估项（0.3.0），不进 0.2.0。
+        content: string,
+        is-error: bool,
+    }
+    variant content {
+        text(string),
+        media(media),
+        tool-call(tool-call),
+        tool-result(tool-result),
+    }
+    record message { role: role, content: list<content> }
 }
-variant media-source {
-    /// 裸字节：二进制边界永不过 base64（tau_core::types 的一贯要求，
-    /// 信封版恰恰违反它，类型化顺带修正）。
-    bytes(list<u8>),
-    url(string),
-    /// sha256:<hex>，blob store 引用。
-    blob(string),
-}
-record tool-call {
-    id: string,
-    name: string,
-    /// 唯一保留的 JSON 叶：模型产的任意 JSON，无 schema 可类型化。
-    arguments-json: string,
-}
-record tool-result {
-    call-id: string,
-    /// 仍是文本：媒体结果属 F4 评估项（0.3.0），不进 0.2.0。
-    content: string,
-    is-error: bool,
-}
-variant content {
-    text(string),
-    media(media),
-    tool-call(tool-call),
-    tool-result(tool-result),
-}
-record message { role: role, content: list<content> }
 
 /// ---- 宿主回调：扩展的主动回传通道 ----
 
 interface host {
+    use types.{message, content};
+
     /// 用户可见通知；渲染层画文本块、媒体块出占位。不进模型历史。
+    /// level: "info" | "warn" | "error"。
     notify: func(level: string, content: list<content>) -> result<_, string>;
 
     /// 发布扩展事实到事件总线（observe-only）。扩展自定义事实的
@@ -81,9 +86,9 @@ interface host {
 }
 
 world extension {
-    import host;      // 新增；旧组件不 import 照常实例化
+    import host;
     export tools;
-    export hooks;
+    export probes;   // 0.1.0 叫 hooks，0.2.0 正名（F7）
 }
 ```
 
@@ -137,14 +142,20 @@ v1 写的「旧组件照常实例化」在 package 版本提升下不成立—�
 - 0.1.0 契约冻结于 git tag v0.1.0/v0.2.0 的 `wit/tau.wit`，需要回看的
   从标签取。
 
-## 落地清单（开工时逐项打勾）
+## 落地清单（已逐项落地）
 
-- [ ] `wit/tau.wit` → 0.2.0（本文接口）；tau-ext 的 vendored 副本同步
-      （`wit_vendored` 测试会盯漂移）
-- [ ] tau-ext 宿主侧链接：notify→渲染层、emit→事件总线、
-      steer/follow-up→控制通道（过 consent 门类）
-- [ ] typed↔serde 转换层（宿主侧唯一实现）+ 往返属性测试
-- [ ] consent 新门类「会话注入」+ remembered-grant 生命周期
-- [ ] 演示示例（不动既有示例，新增一个）
-- [ ] `docs/extensions.md`/`docs/events.md`/`docs/probes.md` 更新
-- [ ] CHANGELOG；`scripts/validate.sh` 加 consent 门案例
+- [x] `wit/tau.wit` → 0.2.0（本文接口）；tau-ext 的 vendored 副本同步
+      （`wit_vendored` 测试盯漂移中）
+- [x] tau-ext 宿主侧链接：notify/emit→事件总线
+      （`AgentEvent::ExtensionNotice`/`ExtensionFact`，渲染层订阅）、
+      steer/follow-up→控制通道（过 consent 门类；sinks 晚绑定——
+      扩展先于 agent 加载，`wire_host_channel` 后接线，trap 重建的
+      实例共享同一接线）
+- [x] typed↔serde 转换层（`tau-ext/src/convert.rs`，宿主侧唯一实现）
+      + 往返测试（全 content 形态 + 具名非 file 媒体/坏 arguments-json/
+      超尺寸三条拒绝路径）
+- [x] consent 新门类「会话注入」（`RememberedConsent.inject`，sticky-on
+      合并，`tau consent --list` 可见，`--revoke` 收回）
+- [x] 演示示例 `examples/notifier`（既有示例不动）
+- [x] `docs/extensions.md`/`docs/events.md`/`docs/probes.md` 更新
+- [x] CHANGELOG；`scripts/validate.sh` 加 consent 门案例（step 10b）

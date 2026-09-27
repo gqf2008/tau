@@ -14,7 +14,9 @@ extensible — but extensions are **wasm components**, not in-process scripts.
   stay in the tree, pi-style.
 - **Extensions**: drop a `.wasm` in. Components implement the
   `tau:extension` WIT world (`wit/tau.wit`): `tools` (contribute agent
-  tools) and `hooks` (probes that observe and influence the run).
+  tools), `probes` (observe and influence the run), and the `host`
+  channel back into the harness (notifications/facts always; session
+  injection behind `--allow-inject`).
   Ambient WASI (fs/env/stdio/network) is granted by default;
   `--deny-wasi` restores the deny-all sandbox (remembered per fingerprint
   with `--remember`, sticky until `tau consent --revoke`). Scoped capabilities
@@ -50,7 +52,7 @@ extensible — but extensions are **wasm components**, not in-process scripts.
 ## Try it
 
 ```bash
-# once 0.1.0 is live on crates.io: cargo install tau-cli --locked
+cargo install tau-cli --locked
 # from a checkout:
 cargo install --path crates/tau-cli --locked   # provides `tau`
 tau --demo -p "hello"

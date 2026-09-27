@@ -148,3 +148,15 @@ idle 超时的处置语义（bridge 长连是断线敏感场景，参照飞书�
   media（MIME 主类型即语义）。F2 的 host-channel 设计已改类型化 v2；
   `events.emit` 的类型化（消灭 audio-delta base64 热路径）与 F6 的
   result 化同属 0.2.0 breaking 批次。
+
+- 2026-09-27（0.2.0 批次**已落地**，本仓 main）：F2 反馈腿（`events.emit`
+  与 `host.*` 全部 `result<_, string>`，malformed-frame 静默 skip 路径
+  随信封一并删除）、F6、F7（`hooks`→`probes` 正名）、F8（kill 返回
+  result + bridge 句柄代数：重建后旧句柄报错而非别名到新子进程）。
+  host 通道（F2 注入腿）落地：notify/emit 进事件总线
+  （`AgentEvent::ExtensionNotice`/`ExtensionFact`），steer/follow-up
+  过 consent 新门类 `inject`（--allow-inject / --remember），
+  enqueue-only 走控制通道既有 checkpoint。load 错误点名契约版本错配。
+  F2 观测腿的高频拉取订阅仍是设计项。models.run 的 request-json
+  **保持 JSON**（评审确认）：provider 的职责是翻译到厂商 JSON 线格式，
+  本路径无热路径，类型化收益为零；若未来反序列化成本显现再评估。

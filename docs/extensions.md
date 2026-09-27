@@ -29,8 +29,9 @@ arbitrary.** Concretely:
   discoverable via `tau probes`).
 
 WIT types are frozen within a package version; evolution rides package
-minor bumps (0.x semantics), with the host linking old and new versions
-during transitions. Typed↔serde conversion lives ONCE in the host and
+minor bumps (0.x semantics). The host links exactly one contract
+version; a component built against an older one gets a load error
+naming the mismatch (docs/host-channel.md 兼容性). Typed↔serde conversion lives ONCE in the host and
 is pinned by round-trip property tests (message → ABI → JSON ==
 original). A bonus the envelope never had: media crosses the ABI as
 raw `list<u8>`, never base64 — which is what the data model
@@ -99,7 +100,7 @@ Implement `exports::tau::extension::tools::Guest`:
   an `is_error` result is just a tool failure the model can react to.
 
 Reference: `examples/upper/src/lib.rs` (an `upper` tool, ~60 lines
-including a no-op hooks impl). Build and load:
+including a no-op probes impl). Build and load:
 
 ```bash
 cargo build --target wasm32-wasip2 --release
@@ -111,7 +112,7 @@ The transcript shows the loop closing: `tool → my_tool`, then
 `tool ← my_tool: <output>`, then the answer. Iterate with `--demo`
 (no API key needed); switch to a real provider when the tool behaves.
 
-## 3. Probes (same world, interface `hooks`)
+## 3. Probes (same world, interface `probes`; `hooks` before 0.2.0)
 
 Probes observe and influence the run at nine wired points —
 `before_run`, `transform_context`, `before_request`, `after_response`,
@@ -132,7 +133,33 @@ Handlers fold in load order: each sees the previous handler's
 replacement; first `block` wins. A trapping handler degrades to
 `continue` — a broken extension must not wedge the harness.
 
-## 4. Providers (world `provider`)
+## 4. The host channel (world `extension`, import `host`)
+
+Since `tau:extension@0.2.0` the extension world imports `host` — the
+guest→host active channel (design: `docs/host-channel.md`). Facts are
+always allowed; decisions are consent-gated:
+
+- `notify(level, content)` — a user-visible notice ("info" / "warn" /
+  "error"); the renderer draws text blocks and media placeholders.
+  Published on the event bus as `AgentEvent::ExtensionNotice`; never
+  enters model history.
+- `emit(event-json)` — an extension-defined fact on the bus
+  (`AgentEvent::ExtensionFact`). The schema is yours, so this stays a
+  JSON leaf — but it must be well-formed JSON, or the result says so.
+- `steer(message)` / `follow-up(message)` — inject a user message into
+  the run. **Consent-gated**: pass `--allow-inject` (or persist the
+  grant with `--remember`); without it the call fails with a named
+  refusal. Messages must have `role: user`; the host validates and caps
+  size (4 MiB). Enqueue-only: delivery follows the control channel's
+  checkpoints (steer after the current turn's tool results, follow-up
+  when the run finishes) — a probe mid-call never re-enters the loop.
+
+All four return `result<_, string>`: validation failures reach the
+guest; nothing is silently swallowed. Demo: `examples/notifier` — its
+`poke` tool does all three kinds of call and reports each outcome in
+the tool result, so the consent gate is visible in the transcript.
+
+## 5. Providers (world `provider`)
 
 A provider component serves models. Streaming is **push-mode**: you
 call `events.emit(json)` per chunk and return from `run` when done.
@@ -163,7 +190,7 @@ tau --provider-wasm target/wasm32-wasip2/release/my_provider.wasm \
   --model my-model --provider-origin https://api.example.com -p "hi"
 ```
 
-## 5. Bridges (world `bridge`)
+## 6. Bridges (world `bridge`)
 
 Bridges translate an external tool protocol into tau tools — the host
 stays protocol-agnostic and only grants capabilities: `process`
@@ -175,7 +202,7 @@ Reference: `examples/mcp-bridge` (MCP stdio + streamable HTTP, with
 protocol-version negotiation). `docs/bridges.md` has the capability
 model and the walgit worked example.
 
-## 6. WASI: ambient by default
+## 7. WASI: ambient by default
 
 Components run with ambient WASI — fs/env/stdio/args/network — unless
 the user passes `--deny-wasi` (or remembered it for your fingerprint).
@@ -183,7 +210,7 @@ Design for both: read env vars defensively, treat filesystem access as
 a bonus not a requirement. `examples/echo-provider`'s `env NAME`
 prompt demos the difference live.
 
-## 7. Sign and distribute
+## 8. Sign and distribute
 
 Unsigned components need `--allow-unsigned` on every load — fine for
 development, wrong for distribution. Signing embeds an ed25519
@@ -223,7 +250,7 @@ their grants across your releases as long as you sign with the same
 key. `tau consent --list` / `tau consent --revoke <fingerprint>` is
 their escape hatch.
 
-## 8. Checklist
+## 9. Checklist
 
 - [ ] `definitions()`/`list-models()` return fast — they run at load
 - [ ] no panics on bad input; `is_error` / `error` events instead

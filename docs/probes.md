@@ -7,6 +7,10 @@ acts on it. This is the surface that makes a typed-decision plugin (jev-style
 classify/bool/score) useful: every probe payload is JSON, every verdict is a
 small typed answer.
 
+Naming: the WIT interface was `hooks` in `tau:extension@0.1.0`;
+0.2.0 renamed it `probes`, matching the code, this doc, and the
+`tau probes` CLI.
+
 Model (derived from pi's `HookMap`, packages/agent/src/harness/agent-harness.ts):
 
 - `continue` — no opinion, run proceeds unchanged.
