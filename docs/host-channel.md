@@ -120,10 +120,22 @@ package 版本内冻结，演化走 minor bump（0.x 语义），过渡期宿主
 保证——七种语言的工具链实测（docs/wasm-languages.md）证明 bindings
 生成器都能吃下这套 record/variant。
 
-## 兼容性
+## 兼容性（修正：不做双版本）
 
-宿主始终提供 `host` import ⇒ 0.1.0 旧组件照常实例化；新组件 import 了
-`host` 而宿主太旧 ⇒ load 期报错点名缺失接口（可诊断，不静默降级）。
+v1 写的「旧组件照常实例化」在 package 版本提升下不成立——组件模型的
+接口身份含版本（`tau:extension/tools@0.1.0` ≠ `@0.2.0`）。0.2.0 契约
+是 breaking batch（host import + hooks→probes 正名 + events.emit
+类型化/result 化 + process.kill 返回 result，见 wit-review.md 修订
+记录）：
+
+- 存量组件需按 0.2.0 重建；宿主 load 错误必须**点名版本错配**
+  （如「组件导出 tau:extension/tools@0.1.0，本宿主需要 @0.2.0」），
+  不静默、不含糊。
+- 宿主侧不做双版本链接：tau 是 0.x（CHANGELOG 明示任何 minor 可
+  breaking），现存组件只有本仓示例，release.sh 每次发版重建。
+  等有真实存量再评估双版本。
+- 0.1.0 契约冻结于 git tag v0.1.0/v0.2.0 的 `wit/tau.wit`，需要回看的
+  从标签取。
 
 ## 落地清单（开工时逐项打勾）
 
