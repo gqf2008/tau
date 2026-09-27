@@ -35,7 +35,12 @@ pub(crate) enum WsFrame {
 }
 
 enum WsCommand {
-    Send(WsFrame),
+    /// Send carries a confirmation channel: the caller blocks until the
+    /// actor has WRITTEN the frame to the socket (Ok = on the wire, not
+    /// merely queued — the dingtalk ack lesson: in print mode the
+    /// process can exit within one actor read tick, and a queued-only
+    /// ack provably never reaches the platform).
+    Send(WsFrame, mpsc::Sender<Result<(), String>>),
     Close,
 }
 
@@ -128,10 +133,17 @@ impl WsRegistry {
     }
 
     pub(crate) fn send(&mut self, handle: u64, frame: WsFrame) -> Result<(), String> {
+        let (confirm_tx, confirm_rx) = mpsc::channel();
         self.get(handle)?
             .cmd
-            .send(WsCommand::Send(frame))
-            .map_err(|_| "ws.send: connection closed".to_string())
+            .send(WsCommand::Send(frame, confirm_tx))
+            .map_err(|_| "ws.send: connection closed".to_string())?;
+        // Wait for the actor's write confirmation — bounded by one read
+        // tick in the worst case, generous margin here against a wedged
+        // actor (a wedged actor must surface as an error, not a hang).
+        confirm_rx
+            .recv_timeout(Duration::from_secs(5))
+            .map_err(|_| "ws.send: actor did not confirm within 5s (wedged?)".to_string())?
     }
 
     pub(crate) fn recv(&mut self, handle: u64, timeout_ms: u32) -> Result<WsFrame, String> {
@@ -191,12 +203,19 @@ fn actor(
         let mut close = false;
         while let Ok(command) = cmd.try_recv() {
             match command {
-                WsCommand::Send(frame) => {
+                WsCommand::Send(frame, confirm) => {
                     let message = match frame {
                         WsFrame::Text(t) => Message::Text(t.into()),
                         WsFrame::Binary(b) => Message::Binary(b.into()),
                     };
-                    if socket.send(message).is_err() {
+                    let result = socket
+                        .send(message)
+                        .map_err(|e| format!("ws.send: {e}"));
+                    let failed = result.is_err();
+                    // The caller waits on this even when the write
+                    // failed — answer first, then die.
+                    let _ = confirm.send(result);
+                    if failed {
                         return;
                     }
                 }

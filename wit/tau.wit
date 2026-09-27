@@ -416,7 +416,11 @@ interface ws {
     /// origin. Returns a handle.
     connect: func(url: string) -> result<u64, string>;
 
-    /// Send one frame.
+    /// Send one frame. Ok means the frame was WRITTEN to the socket
+    /// (the connection actor confirms after writing), not merely
+    /// queued — an ack that returns Ok has been sent, even if the
+    /// process exits immediately after (the dingtalk ack lesson). The
+    /// call blocks until then (bounded by the actor's read tick).
     send: func(handle: u64, frame: frame) -> result<_, string>;
 
     /// Receive the next frame, waiting at most `timeout-ms` (must be
