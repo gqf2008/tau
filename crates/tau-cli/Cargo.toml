@@ -23,6 +23,10 @@ anyhow.workspace = true
 tokio.workspace = true
 clap = { version = "4", features = ["derive"] }
 rustyline = "18.0.1"
+# Phase 0 realtime-av (docs/realtime-av.md): host-side capture/playback
+# (the architecture red line keeps audio I/O out of wasm guests).
+cpal = "0.17"
+hound = "3.5"
 
 [dev-dependencies]
 tau-core = { path = "../tau-core", version = "0.2.0" }

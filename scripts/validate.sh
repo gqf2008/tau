@@ -1040,4 +1040,16 @@ else
     echo "skip — pywinpty not installed; REPL pty e2e not run"
 fi
 
+# --- step 11b: realtime-av Phase 0 voice loop (docs/realtime-av.md) ---
+# The hardware-free path: /mic N sine synthesizes the clip, the demo
+# model echoes it as AudioDelta chunks, assembly + playback path run.
+# (Real-mic capture is the same code path minus synthesis; no gate can
+# assert a room's acoustics, so the gate drives the sine.)
+step "11b/11 voice loop (sine → Content::Audio uplink → audio echo → assembly → playback)"
+if python -c "import winpty" 2> /dev/null; then
+    python "$ROOT/scripts/av_phase0_e2e.py" "$TAU" "$WORK/av-e2e"         || fail "av phase0 e2e failed"
+else
+    echo "skip — pywinpty not installed; av phase0 e2e not run"
+fi
+
 step "ALL ELEVEN STEPS PASSED — the release candidate stands"

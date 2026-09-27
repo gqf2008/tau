@@ -54,6 +54,22 @@
   mock, connection reset at exit). Same doctrine family as the
   webhook honest-ack red line: Ok must mean it happened.
 
+### Added — realtime-av Phase 0: push-to-talk voice loop (docs/realtime-av.md)
+
+- REPL `/mic <sec> [sine]` records the default input (cpal) — or
+  synthesizes a 440 Hz sine, the hardware-free deterministic gate path —
+  and sends the clip as a `Content::Audio` (audio/wav) user message;
+  after the run, assembled assistant audio blocks play through the
+  default output (no device = notice, never red). Capture by explicit
+  command IS the consent — the red line's consent category governs wasm
+  guests, the host CLI acts with the user's keyboard authority.
+- `FauxModel::demo` answers a voice message by echoing the clip as
+  three `AudioDelta` chunks — the downlink assembly and playback paths
+  are exercised offline, for real.
+- Acceptance: validate.sh step 11b (pty, pywinpty): sine → uplink →
+  echo → assembly → playback path → audio/wav block in the session
+  JSONL. Deps: cpal 0.17 + hound 3.5, tau-cli only.
+
 ### Breaking — contract `tau:extension@0.3.0` (tool media results, wit-review F4)
 
 - Tool results are **multi-block**: `tool-result.content` is now

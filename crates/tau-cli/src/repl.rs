@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use tau_core::probe::ProbePoint;
+use tau_core::types::{Content, Media, MediaSource};
 use tau_core::{Agent, AgentEvent, Control, JsonlStore, Message};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
@@ -295,8 +296,62 @@ pub(crate) async fn drive(
                     match text {
                         "/quit" | "/exit" => break,
                         "/help" => {
-                            print("commands: /help /compact /fork [#index|id-prefix] /quit /exit");
+                            print("commands: /help /compact /fork [#index|id-prefix] /mic <sec> [sine] /quit /exit");
                             print("  !<text> while running: steer; plain text while running: follow-up");
+                            continue;
+                        }
+                        // Phase 0 push-to-talk (docs/realtime-av.md):
+                        // record (or synthesize) a clip, send it as a
+                        // voice message. The recording IS the consent —
+                        // the host CLI on an explicit user command.
+                        line if line.starts_with("/mic") => {
+                            if running {
+                                print("[tau] mid-run — /mic waits for the run to finish");
+                                continue;
+                            }
+                            let mut parts = line.split_whitespace();
+                            let _ = parts.next();
+                            let seconds: u32 = parts
+                                .next()
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(3)
+                                .clamp(1, 30);
+                            let sine = parts.next() == Some("sine");
+                            print(&format!(
+                                "[tau] 🎙 recording {seconds}s{}…",
+                                if sine { " (sine)" } else { "" }
+                            ));
+                            match crate::audio::record_wav(seconds, sine) {
+                                Ok(wav) => {
+                                    print(&format!(
+                                        "[tau] 🎙 captured {} bytes (audio/wav)",
+                                        wav.len()
+                                    ));
+                                    let message = Message {
+                                        role: tau_core::types::Role::User,
+                                        content: vec![
+                                            Content::Audio {
+                                                media: Media {
+                                                    media_type: "audio/wav".into(),
+                                                    source: MediaSource::Bytes(wav),
+                                                },
+                                            },
+                                            Content::Text {
+                                                text: "(voice message — audio/wav clip)".into(),
+                                            },
+                                        ],
+                                    };
+                                    let agent = agent.clone();
+                                    let turn_history = history.clone();
+                                    let done_tx = done_tx.clone();
+                                    tokio::spawn(async move {
+                                        let result = agent.run(&turn_history, message).await;
+                                        let _ = done_tx.send(result);
+                                    });
+                                    running = true;
+                                }
+                                Err(e) => print(&format!("[tau] mic: {e:#}")),
+                            }
                             continue;
                         }
                         "/compact" => {
@@ -448,6 +503,26 @@ pub(crate) async fn drive(
                     }
                     None => return Err(anyhow::anyhow!("run channel closed")),
                 };
+                for message in &produced {
+                    for content in &message.content {
+                        if let Content::Audio { media } = content {
+                            let MediaSource::Bytes(bytes) = &media.source else {
+                                continue;
+                            };
+                            // Phase 0 playback: after the run, blocking
+                            // (docs/realtime-av.md — the live sink is
+                            // Phase 1). No output device is a notice,
+                            // never a failure (headless machines exist).
+                            match crate::audio::play_wav(bytes) {
+                                Ok(n) => print(&format!(
+                                    "[tau] ▶ played {n} samples ({})",
+                                    media.media_type
+                                )),
+                                Err(e) => print(&format!("[tau] playback: {e:#}")),
+                            }
+                        }
+                    }
+                }
                 for message in produced {
                     let entry = tau_core::SessionEntry {
                         id: tau_core::session::new_id(),

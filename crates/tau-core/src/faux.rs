@@ -91,7 +91,48 @@ impl Model for FauxModel {
 /// not seen a tool result yet, else the plain alive-text answer.
 fn demo_round(req: &Request) -> Vec<ModelEvent> {
     use crate::model::StopReason;
-    use crate::types::Content;
+    use crate::types::{Content, MediaSource, Role};
+
+    // Voice message (docs/realtime-av.md Phase 0): echo the clip back
+    // as three AudioDelta chunks of one media_type — the downlink
+    // assembly (concatenate → Content::Audio) and the host playback
+    // path get exercised for real, offline. A voice turn never reaches
+    // the tool-call branch.
+    let voice = req.messages.iter().rev().find_map(|m| {
+        if m.role != Role::User {
+            return None;
+        }
+        m.content.iter().find_map(|c| match c {
+            Content::Audio { media } => match &media.source {
+                MediaSource::Bytes(bytes) => Some(bytes.clone()),
+                _ => None,
+            },
+            _ => None,
+        })
+    });
+    if let Some(wav) = voice {
+        let third = wav.len() / 3;
+        return vec![
+            ModelEvent::TextDelta {
+                text: "echoing your voice clip. ".into(),
+            },
+            ModelEvent::AudioDelta {
+                data: wav[..third].to_vec(),
+                media_type: "audio/wav".into(),
+            },
+            ModelEvent::AudioDelta {
+                data: wav[third..2 * third].to_vec(),
+                media_type: "audio/wav".into(),
+            },
+            ModelEvent::AudioDelta {
+                data: wav[2 * third..].to_vec(),
+                media_type: "audio/wav".into(),
+            },
+            ModelEvent::Done {
+                stop: StopReason::Stop,
+            },
+        ];
+    }
 
     let answered = req.messages.iter().any(|m| {
         m.content

@@ -38,6 +38,29 @@ server VAD 与 barge-in → 关会话）。Phase 2 的本质就是补这个抽�
 通道送入 → 现有多模态 provider 直接吃；下行在 run 结束后播放组装好
 的 Audio 块。**双向成立但不实时**，用作端到端冒烟。
 
+### Phase 0 实施定稿（2026-09-28）
+
+- **UX**：REPL 斜杠命令 `/mic <秒>` 录默认输入设备；`/mic <秒> sine`
+  合成 440Hz 正弦（无硬件、确定可断言——门禁用这条）。录制即
+  consent：宿主 CLI 本人按显式命令动作，红线 1 的 consent 门类管的是
+  wasm guest，宿主自身不需能力门（与用户敲键盘输入文本同权）。
+- **格式**：`Content::Audio{ media_type: "audio/wav" }`——WAV 容器
+  自描述（采样率/位深在头部），下行播放与同媒体类型组装块零解析
+  成本；16-bit PCM。base64 内联进会话 JSON（MediaSource::Bytes；
+  blob 化是存储优化，不在 Phase 0 发明）。
+- **下行**：run 结束后回放 assistant 消息里组装好的 Audio 块
+  （cpal 默认输出设备；无输出设备 = 提示不是失败——无声卡环境
+  不许红）。
+- **测试替身**：`FauxModel::demo` 学会有音频输入时的应答——把上行
+  WAV 的 PCM 采样拆成 2-3 个 `AudioDelta` 块回声下行（组装路径因此
+  被真实走过）+ 文本注记。回声即闭环：录（或合成）→ 上行 →
+  provider（demo 替身）→ AudioDelta → 组装 → 回放。
+- **验收**（validate.sh 11b，pty）：`/mic 2 sine` → 断言会话 JSONL
+  含 audio/wav 块、`[tau] ▶` 回放行出现。真实麦克风采的冒烟留
+  手工路径（无硬件环境跳过不红）。
+- 依赖：cpal 0.17（采集/播放）+ hound 3.5（WAV 编解码），仅
+  tau-cli。
+
 ### Phase 1 — 下行实时化（纯宿主，契约零改动）
 
 渲染层加播放 sink 订阅总线 `AudioDelta`，即收即播（环形缓冲 + 从
@@ -72,7 +95,10 @@ base64-JSON 块调用换 `stream<u8>`，按 `docs/wasip3-streams.md` 的
 
 ## 落地清单
 
-- [ ] Phase 0：宿主采集 + `Content::Audio` 上行 + 播放组装块（冒烟）
+- [x] Phase 0：宿主采集 + `Content::Audio` 上行 + 播放组装块
+      （2026-09-28 落地）：`/mic <sec> [sine]` 录制/合成 → WAV 上行；
+      demo 替身回声 3 个 AudioDelta；组装块 run 后回放（无输出设备
+      仅提示不红）；validate.sh 11b pty 全链断言（sine 路径）
 - [ ] Phase 1：渲染层播放 sink（即收即播 + 打断清缓冲）
 - [ ] Phase 2：`RealtimeSession` trait + 新事件 kind + WIT world
       `realtime` + consent 门类（microphone/camera）+ faux provider
