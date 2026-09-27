@@ -32,6 +32,24 @@
 guest 代码本身通过了 wit-bindgen 0.46 的宏展开，死在 std 缺失，
 证实阻塞点在上游发布物而非我们的用法。
 
+## 追加 Spike（2026-09-28，nightly 1.101）：std 阻塞已解，async ABI 有工具链错位
+
+`rustup check` 出现 nightly 1.101.0（2026-09-26）后重跑 spike，结论更新：
+
+| 检查 | 结果 | 证据 |
+|------|------|------|
+| nightly 1.101 发 `wasm32-wasip3` 预编译 std | ✅ 已解锁 | `rustup target add wasm32-wasip3 --toolchain nightly` 成功（stable 1.97/1.98 仍 low-tier 无产物） |
+| guest 编译出真 wasip3 组件 | ✅ | `spike_guest.wasm`（101 KB），`wasm-tools component wit` 见 `run: func(u32, u32) -> stream<u8>` 导出 |
+| **sync lift 的导出返回 stream：调用通，但 spawn 的写任务永不驱动** | ❌ 死路 | host 侧 `call_concurrent` 正常返回 stream，但 `canon lift` 无 `async`/`callback` 的导出在返回后不再有事件循环入口；guest 内 `wit_bindgen::spawn` 的 writer 永远是 "uninteresting spawned thread"，host `poll_no_interesting_tasks` 立即 ready、consumer 零字节 |
+| **async lift 全链路** | ❌ 上游错位，双向都堵 | ① `generate!(async: true)` 产出 `canon lift … async (callback)`，但组件类型里的 func type 仍标 sync → wasmtime 49.0.1 校验拒绝："the `async` canonical option requires an async function type"（wasmparser 0.258 规则）；② 改用 WIT 源注解 `run: async func(...)`（wit-parser 0.239+ 支持该语法）→ 组件类型正确标 async，但 wit-bindgen 0.46 把导出名编码为 `[async]run`，nightly 自带的 wasm-component-ld 拒收（"not in kebab case"）——wit-bindgen 0.46 与 LLVM 23 时代 componentizer 的编码约定错位 |
+| host 侧消费 API 已探明 | ✅ 备档 | `store.run_concurrent(async |accessor| …)` + `func.call_concurrent` + `Val::Stream` → `try_into_stream_reader::<u8>()` + `reader.pipe(store, impl StreamConsumer)`；consumer 每次 accept 后唤醒 host future 注册的 waker（不能依赖 executor 自动重 poll）。注意 `Config` 需 `wasm_component_model_async(true)` + `concurrency_support(true)`；`async_support` 已废弃无效果 |
+
+**冻结结论不变**：等 stable 1.100 + 与之对齐的 wit-bindgen/wasmtime 版本（届时 `[async]run`
+编码与 async func type 校验应已对齐）。nightly 已能编译 wasip3 guest 意味着 1.100 进
+stable 当天即可重跑本 spike 验证解锁。spike 工程（含 host 驱动器）在
+`target/wasip3-spike/`（guest 一个导出 async stream 的组件；host 一个 wasmtime 49
+concurrent API 驱动器，当前死于 guest 链接/宿主校验两道上游错位之一，视 WIT 注解而定）。
+
 ## 为什么等，而不是硬上
 
 1. **分发故事不接受 nightly**：`docs/extensions.md` 给作者的承诺是
