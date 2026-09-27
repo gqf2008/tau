@@ -103,7 +103,7 @@ and prebuilt (unsigned) example components.
 | `crates/tau-ext` | wasmtime component host (WASI open by default) |
 | `crates/tau-cli` | `tau` binary (print + interactive modes) |
 | `wit/tau.wit` | the extension contract, versioned |
-| `docs/` | extensions (author guide), probes, events, bridges, signing, oci, media, release, perf |
+| `docs/` | architecture (the design doc), extensions (author guide), probes, events, bridges, signing, oci, media, release, perf |
 | `examples/upper` | example wasm extension (tool) |
 | `examples/echo-provider` | example wasm provider (push-mode streaming) |
 | `examples/http-provider` | example wasm provider (consent-gated http) |
