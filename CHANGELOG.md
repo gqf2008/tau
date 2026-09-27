@@ -77,7 +77,7 @@ full tour.
 ### Validation
 
 `scripts/validate.sh` proves the release the way a first user meets it,
-in ten steps: demo, the signing/trust chain (trusted load; untrusted,
+in eleven steps: demo, the signing/trust chain (trusted load; untrusted,
 byte-flipped, signature-stripped, and corrupted-signature rejection),
 all three built-in providers
 against a loopback mock, wasm-provider consent gate (a consent-escaping 302 is shown to the guest, never followed; userinfo/backslash URLs stay on the consented host while delimiter tricks and normalized twins are refused), MCP bridge spawn
@@ -89,7 +89,9 @@ blob GC (the mark covers the whole session tree — active, compacted, and aband
 the compacted branch), torn-tail recovery, concurrent access, and
 probe verdicts (block, continue, and a trapped probe degrading without
 going dead), and the WASI sandbox boundary (ambient env visible by
-default, empty under --deny-wasi) — restoring
+default, empty under --deny-wasi), and the interactive REPL over a
+real pty (banner, a full turn, /help, idle Ctrl-C, /quit, recall
+history) — restoring
 the environment exactly afterwards. 117 tests, clippy-clean across all
 workspaces.
 

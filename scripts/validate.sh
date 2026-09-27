@@ -1,10 +1,11 @@
 #!/usr/bin/env bash
 # First-user validation: prove the release candidate works for someone
-# who just installed tau, in ten steps — demo, the signing/trust chain
+# who just installed tau, in eleven steps — demo, the signing/trust chain
 # (incl. tamper rejection), all three built-in providers against a
 # loopback mock, the wasm provider consent gate, the MCP bridge spawn
 # gate, the remembered-consent lifecycle, OCI distribution, blob GC,
-# compaction, and probe verdicts.
+# compaction, probe verdicts, and the interactive REPL over a real pty
+# (skipped with a note when pywinpty is not installed).
 #
 # Usage: scripts/validate.sh
 #
@@ -65,13 +66,13 @@ mkdir -p "$WORK"
 cd "$WORK"
 
 # --- step 1: demo -----------------------------------------------------
-step "1/10 demo"
+step "1/11 demo"
 OUT="$("$TAU" --demo -p "hello from validation" 2>&1)" || fail "demo exited $?"
 echo "$OUT" | grep -q "tau is alive" || fail "demo answer missing: $OUT"
 echo "ok — faux model answered"
 
 # --- step 2: signing + trust chain ------------------------------------
-step "2/10 signing and trust chain"
+step "2/11 signing and trust chain"
 GEN="$("$TAU" keygen)" || fail "keygen: $GEN"
 THROWAWAY_FP=$(echo "$GEN" | sed -n 's/^key generated and trusted: //p')
 [ -n "$THROWAWAY_FP" ] || fail "no fingerprint in keygen output: $GEN"
@@ -106,7 +107,7 @@ echo "ok — tau sign --key rejects non-fingerprint input"
 
 # Tamper attacks on the signed component: however the bytes were corrupted
 # after signing, the default gate must refuse them.
-step "2b/10 signature tamper rejection"
+step "2b/11 signature tamper rejection"
 
 # Flip one byte mid-module (far outside the trailing signature section):
 # the digest no longer matches the signature.
@@ -185,7 +186,7 @@ grep -q "signature" tampered-au.err \
 echo "ok — --allow-unsigned still refuses a corrupted signature"
 
 # --- step 3: built-in provider against a loopback SSE mock -------------
-step "3/10 built-in providers (loopback SSE mock)"
+step "3/11 built-in providers (loopback SSE mock)"
 cat > mock.py << 'PYEOF'
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -291,7 +292,7 @@ echo "$OUT" | grep -q "mock anthropic ok" || fail "Anthropic SSE stream did not 
 echo "ok — Anthropic Messages SSE streamed end to end"
 
 # --- step 4: wasm provider consent gate --------------------------------
-step "4/10 wasm provider consent gate"
+step "4/11 wasm provider consent gate"
 if "$TAU" --allow-unsigned \
     --provider-wasm "$HTTP_PROVIDER" --model http-echo \
     -p "http://127.0.0.1:8402/" 2>&1 | grep -q "STATUS 200"; then
@@ -349,7 +350,7 @@ done
 echo "ok — origin gate: userinfo/backslash stay home, tricks and twins refused"
 
 # --- step 5: MCP bridge (consent-gated spawn) --------------------------
-step "5/10 MCP bridge (consent-gated spawn)"
+step "5/11 MCP bridge (consent-gated spawn)"
 # Without --mcp-command the bridge has nothing it may spawn: the load
 # must fail, not silently degrade.
 if "$TAU" --allow-unsigned --mcp-bridge "$MCP_BRIDGE" --demo -p hi > /dev/null 2>&1; then
@@ -369,7 +370,7 @@ echo "$OUT" | grep -q "tool ← echo: bridge validation ok" \
 echo "ok — consent-gated spawn served the echo tool through the MCP bridge"
 
 # --- step 6: remembered consent lifecycle ------------------------------
-step "6/10 remembered consent (--remember / --list / --revoke)"
+step "6/11 remembered consent (--remember / --list / --revoke)"
 # Consent is keyed by signing fingerprint, so the provider copy is
 # signed with the throwaway key — the real trust store and any real
 # consent records stay untouched.
@@ -468,7 +469,7 @@ grep -q "not a signing fingerprint" revoke.out \
 echo "ok — consent --revoke rejects non-fingerprint input"
 
 # --- step 7: OCI distribution ------------------------------------------
-step "7/10 OCI distribution (push / pull / trust onboarding)"
+step "7/11 OCI distribution (push / pull / trust onboarding)"
 # ext.wasm from step 2 is signed with the throwaway key: signature and
 # trust must apply to pulled bytes unchanged.
 OCI_REF="oci://127.0.0.1:8403/test/component:v1"
@@ -507,7 +508,7 @@ rm -f "$HOME/.tau/trust/$THROWAWAY_FP.pub.aside"
 echo "ok — trust --from-component onboards the verified key from oci://"
 
 # --- step 8: blob GC ----------------------------------------------------
-step "8/10 blob GC (dry-run reports, --yes deletes, live blobs kept)"
+step "8/11 blob GC (dry-run reports, --yes deletes, live blobs kept)"
 # Seed the real blob store with four blobs only this run could own
 # (random content, unique digests): one referenced on the active
 # branch, one inside a compaction summary, one on an abandoned branch,
@@ -569,7 +570,7 @@ echo "ok — --yes frees exactly the orphan; active, compacted, and abandoned-br
 GC_BLOB=""
 
 # --- step 9: compaction --------------------------------------------------
-step "9/10 compaction (summary entry; originals stay in the tree)"
+step "9/11 compaction (summary entry; originals stay in the tree)"
 # Seed a small session: two demo exchanges on disk.
 "$TAU" --session session.jsonl --demo -p "first exchange" > /dev/null 2>&1 \
     || fail "seed run 1"
@@ -602,7 +603,7 @@ echo "$TREE" | grep -q "after compact" \
 echo "ok — follow-up runs on the compacted branch"
 
 # --- step 9b: torn-tail recovery ------------------------------------------
-step "9b/10 torn-tail recovery (a crash mid-append must not brick the session)"
+step "9b/11 torn-tail recovery (a crash mid-append must not brick the session)"
 # session.jsonl from step 9 is intact; tear its tail the way a crash
 # mid-append leaves it: a partial JSON line, no trailing newline.
 printf '{"id":"torn","parent":null,"kind":{"me' >> session.jsonl
@@ -631,7 +632,7 @@ grep -q "not json at all" middle.jsonl \
 echo "ok — middle corruption refuses with a named line, file untouched"
 
 # --- step 9c: concurrent access -------------------------------------------
-step "9c/10 concurrent access (shared session file stays a valid tree)"
+step "9c/11 concurrent access (shared session file stays a valid tree)"
 # Four tau processes append to ONE session file at once. The tree model
 # makes this structurally safe: each process's chain lands in order, so
 # parents always precede children — implicit branching, never corruption.
@@ -667,7 +668,7 @@ EOF_CONCURRENT
 echo "ok — 4 writers, 8 entries, every parent precedes its child"
 
 # --- step 10: probe verdicts ---------------------------------------------
-step "10/10 probe verdicts (before_tool block reaches the model)"
+step "10/11 probe verdicts (before_tool block reaches the model)"
 OUT="$("$TAU" --allow-unsigned -e "$UPPER" -e "$GUARD" \
     --demo -p "shout forbidden" 2>&1)" || fail "guard run: $OUT"
 echo "$OUT" | grep -q "probe before_tool: block" \
@@ -708,4 +709,12 @@ echo "$OUT" | grep -q "tool ← upper: SHOUT WASICHECK" \
     || fail "--deny-wasi did not hide the ambient env from the guest: $OUT"
 echo "ok — --deny-wasi: the guest env is empty, the sandbox holds"
 
-step "ALL TEN STEPS PASSED — the release candidate stands"
+# --- step 11: interactive REPL over a real pty -------------------------
+step "11/11 interactive REPL (pty: banner, turn, /help, Ctrl-C, /quit, history)"
+if python -c "import winpty" 2> /dev/null; then
+    python "$ROOT/scripts/repl_e2e.py" "$TAU" || fail "repl pty e2e failed"
+else
+    echo "skip — pywinpty not installed; REPL pty e2e not run"
+fi
+
+step "ALL ELEVEN STEPS PASSED — the release candidate stands"

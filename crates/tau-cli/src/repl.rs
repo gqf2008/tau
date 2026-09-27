@@ -85,6 +85,13 @@ pub(crate) async fn interactive(
                     let trimmed = line.trim();
                     if !trimmed.is_empty() {
                         let _ = editor.add_history_entry(trimmed);
+                        // Persist per line, not only at EOF: the save at
+                        // loop exit is unreachable when the user quits
+                        // via /quit (readline still blocks), so exiting
+                        // the normal way used to lose the recall history.
+                        if let Some(path) = &history_path {
+                            let _ = editor.append_history(path);
+                        }
                     }
                     if line_tx.send(LineEvent::Line(line)).is_err() {
                         break;
