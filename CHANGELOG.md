@@ -1,5 +1,12 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+
+- `repository`/`homepage` metadata now point at the public repo,
+  https://github.com/gqf2008/tau (rides the next crates.io publish).
+
 ## [0.2.0] — 2026-09-27
 
 Examples-and-docs-only release: the five crates are byte-identical
