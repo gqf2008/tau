@@ -6,6 +6,31 @@ walks the three worlds — `extension` (tools + probes), `provider`
 (models), `bridge` (external protocols) — using the shipped examples as
 reference implementations.
 
+## Contract conventions
+
+WIT can express the full message model as typed records/variants — the
+JSON-string parameters (`parameters-json`, `arguments-json`,
+`payload-json`, `event-json`) are a deliberate choice, not a WIT
+limitation. The rule: **small, stable structures use WIT types**
+(definition, verdict, info, handles, `result` errors); **large,
+fast-evolving message-shaped payloads travel as JSON envelopes**. Why:
+
+1. Single source of truth — the Message schema already serves session
+   JSONL (pi-compatible wire shape) and provider HTTP APIs; serde is
+   canonical, a WIT twin would drift unchecked.
+2. Evolution — adding a JSON field never breaks the ABI; adding a WIT
+   record field or variant case does (types are frozen within a package
+   version).
+3. Arbitrary-JSON holes (`ToolCall.arguments` is model-produced) would
+   still force embedded JSON strings inside typed records.
+4. Cross-language ergonomics — every guest language has JSON; nested
+   variant/option canonical-ABI mappings are verbose in C/TinyGo.
+
+The envelope is a string, but the schema is the real type: schemas are
+discoverable (`tau probes`), documented per point, and hosts validate
+fail-loud. Same reason `process`/`http` handles are plain `u64`, not
+resources — resources drag in wasi:io and strain C/TinyGo toolchains.
+
 Prerequisites: a Rust toolchain with the component target —
 
 ```bash
