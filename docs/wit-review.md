@@ -70,7 +70,7 @@ extensions that observe (via tau-ext; observe-only)」同样无实现支撑。
 `Agent::observe`）；text_delta/tool_progress 保持 reserved（高频拉取
 订阅设计落地前不接线），`tau probes` 目录列出 wired/reserved 状态。
 
-### F4 [中·全模态] 工具结果只能是文本
+### F4 [中·全模态] 工具结果只能是文本 —— 已评估，0.3.0 做
 
 证据链：`wit tool-result{content: string}` ↔
 `tau-core ToolOutput{content: String}`（tool.rs:21）↔
@@ -78,8 +78,20 @@ extensions that observe (via tau-ext; observe-only)」同样无实现支撑。
 image/audio/video/file 块，但**工具无法返回媒体**——截图工具、
 文件生成工具做不了，与全模态故事（CHANGELOG）断一环。
 
-处置：0.3.0 评估项。改动面到 session 线格式（与 pi 的兼容性），
-动手前先查 pi 的 ToolResult 线格式是否支持多块内容。
+评估结论（2026-09-27，查过 pi 线格式）：
+- pi `ToolResultMessage.content = (TextContent|ImageContent)[]`——
+  **多块，但仅 text+image**；image 在线上是内联 base64
+  （`ImageContent{data: base64, mimeType}`），read 工具即如此返回。
+- tau session 的媒体本来就走 blob 引用（`sha256:`），请求边物化——
+  与 pi 的字节级兼容本就不存在，兼容面在格式族（JSONL 树），
+  F4 不引入新的不兼容。
+- 厂商边：Anthropic/OpenAI 的 tool_result 内容块只收 text/image，
+  非 image 媒体须在 provider 边降级为文本占位符。
+
+0.3.0 改动面：WIT `tool-result.content: string → list<content>`
+（契约 breaking）；`ToolOutput.content: String → Vec<Content>`；
+convert.rs 映射 + 尺寸上限沿用；provider 边非 image 媒体降级。
+评估完成，实现排 0.3.0。
 
 ### F5 [中·fail-loud] parameters-json 解析失败静默降级为全开放 schema —— 已落地
 
@@ -108,13 +120,14 @@ WIT 接口叫 `hooks`，代码/文档/CLI（`tau probes`）全叫 probes。
 
 kill 失败静默；句柄 close 后复用理论上有 ABA 风险。0.2.0 一并补。
 
-### F9 [中] ws 能力确认必要；http 能力缺超时/取消控制
+### F9 [中] ws 能力确认必要；http 能力缺超时/取消控制 —— 设计已补
 
 评审确认 im-channels.md 的 `ws` 能力设计必要（飞书/钉钉 stream
 模式是 WebSocket 帧协议，现有 `http.read-body` 的增量读只覆盖
-SSE/长轮询）。补充要求进设计：`ws` 与 `http` 都应明确 keepalive /
-idle 超时的处置语义（bridge 长连是断线敏感场景，参照飞书长连接
-断线窗口 lesson）。
+SSE/长轮询）。补充要求已进设计（2026-09-27，im-channels.md `ws`
+节）：`ws` 宿主 ping 保活 + pong 超时判死 + `recv` idle 超时显式
+error（永不永阻）；`http` 增量读带 idle 超时，连接级 keepalive 归
+宿主 HTTP 栈。实现仍排 im-channels 落地批次。
 
 ### F10 [信息] 评审通过项（无需动作）
 
@@ -138,7 +151,8 @@ idle 超时的处置语义（bridge 长连是断线敏感场景，参照飞书�
 3. ~~F5~~：parameters-json 坏 schema 拒载并点名工具（已落地）。
 4. F7/F8：hooks→probes 正名、kill 返回 result、句柄代数，随 0.2.0。
 5. F1：ambient 侧门处置（A/B/C）留用户拍板，0.3.0 决策项。
-6. F4：工具媒体结果，0.3.0 评估项（先查 pi 线格式）。
+6. F4：工具媒体结果——已评估（pi 线格式 text+image 多块，tau 走
+   blob 引用无新不兼容），0.3.0 实现项。
 
 ## 修订记录
 

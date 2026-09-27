@@ -48,6 +48,18 @@ IM 平台                    tau
    stream 模式是 WebSocket 帧协议——加 `ws.connect/send/recv/close`，
    origin 白名单同款 consent，宿主只做帧管道，协议解析全在组件里。
    与 `process`/`http` 同一切法：bridge 翻译协议，宿主只授窄能力。
+
+   **keepalive / idle 超时语义**（wit-review F9，写进契约注释）：
+   bridge 长连是断线敏感场景，语义必须显式——
+   - `ws`：宿主发 ping 保活（默认 30s，可调），P 秒无 pong 判定死亡
+     并 `close`（带 reason）；组件侧 `recv` 在 idle 超时时收到显式
+     error 而不是永远阻塞——「永远阻塞」会让断线窗口静默扩大
+     （飞书断线窗口丢消息的 lesson）。重连与补拉是组件职责，
+     宿主不代劳。
+   - `http`：每个 `read-body` 增量读带 idle 超时（无字节即超时 error），
+     连接级 keepalive 由宿主 HTTP 栈负责；组件可用「提前关」主动
+     断流。SSE 长连接同样适用 idle 超时——静默挂起的 SSE 与断线
+     不可区分。
 2. **`ingress` 能力**（webhook 平台：WhatsApp/企微）：consent-gated
    端口监听，宿主按路由把请求体喂给对应组件（UX 明示
    「该组件要监听 :8080/im/whatsapp」）。宿主依然不懂任何 IM 协议。
