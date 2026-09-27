@@ -631,8 +631,11 @@ async fn main() -> Result<()> {
             explicit.command = Some(command);
         }
         if let Some(url) = cli.mcp_url.as_deref() {
+            // ws(s) endpoints consent like http(s) origins (the ws
+            // capability shares the allowlist: ws:→http:, wss:→https:).
             let origin = tau_ext::bridge::origin_of(url)
-                .with_context(|| format!("--mcp-url is not a valid http(s) url: {url}"))?;
+                .or_else(|| tau_ext::ws::origin_of(url))
+                .with_context(|| format!("--mcp-url is not a valid http(s)/ws(s) url: {url}"))?;
             eprintln!(
                 "[tau] mcp bridge: {} (url: {}, origin: {})",
                 path.display(),

@@ -398,6 +398,42 @@ interface http {
     close: func(handle: u64);
 }
 
+
+/// WebSocket connections: a scoped network capability for bridge
+/// components (IM stream modes — docs/im-channels.md). The host is a
+/// frame pipe only: it never parses payloads. Origin consent shares the
+/// `http` allowlist (ws: matches http:, wss: matches https:).
+interface ws {
+    /// One wire frame. Text frames carry UTF-8 (IM stream protocols are
+    /// text-frame JSON); the pipe is honest about the wire shape.
+    variant frame {
+        text(string),
+        binary(list<u8>),
+    }
+
+    /// Connect to a ws(s) URL. The origin must be in the consent
+    /// allowlist (same rule as http.request); a refusal names the
+    /// origin. Returns a handle.
+    connect: func(url: string) -> result<u64, string>;
+
+    /// Send one frame.
+    send: func(handle: u64, frame: frame) -> result<_, string>;
+
+    /// Receive the next frame, waiting at most `timeout-ms` (must be
+    /// > 0 — a recv that can block forever makes a dead connection
+    /// indistinguishable from a quiet one, wit-review F9). On timeout
+    /// returns an explicit error. The host pings every 30s and closes
+    /// the connection after 60s without any inbound frame or pong;
+    /// that close surfaces here as an error naming the reason.
+    /// Reconnect and catch-up are the component's job.
+    recv: func(handle: u64, timeout-ms: u32) -> result<frame, string>;
+
+    /// Close and release the handle. Handles carry a generation: a
+    /// stale handle after a trap rebuild errors instead of aliasing a
+    /// newer connection (same rule as process).
+    close: func(handle: u64) -> result<_, string>;
+}
+
 /// Bridge components translate an external tool protocol (MCP today) into
 /// tau tools. The host knows nothing about that protocol; it only grants
 /// the capabilities the bridge declares (process spawn, scoped http).
@@ -406,5 +442,6 @@ interface http {
 world bridge {
     import process;
     import http;
+    import ws;
     export tools;
 }

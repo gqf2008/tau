@@ -13,6 +13,7 @@ policy, load them with `--allow-unsigned` (or sign them with your own key:
 | `mcp_bridge.wasm` | bridge (MCP) | `tau --allow-unsigned --mcp-bridge examples/mcp_bridge.wasm --mcp-command '["python","server.py"]' -p "hi"` |
 | `guard.wasm` | extension (probe) | `tau --allow-unsigned -e examples/upper.wasm -e examples/guard.wasm --demo -p "shout forbidden"` → the `before_tool` probe blocks the call and the model sees the reason |
 | `notifier.wasm` | extension (host channel) | `tau --allow-unsigned -e examples/notifier.wasm --demo -p "hello"` → notify/emit reach the renderer, steer is refused; add `--allow-inject` and the steer lands |
+| `ws_echo_bridge.wasm` | bridge (ws capability) | `tau --allow-unsigned --mcp-bridge examples/ws_echo_bridge.wasm --mcp-url ws://<host>/echo --demo -p "echo hi via ws_echo"` → the frame crosses the consent-gated host pipe and back |
 | `streamer.wasm` | extension (stream subscription) | `tau --allow-unsigned -e examples/streamer.wasm --demo -p "hello"` → subscribes to `text-delta` at session start and reports the observed deltas at run end (`ext info: stream observed: …`) |
 | `media_tool.wasm` | extension (media tool result) | `tau --allow-unsigned -e examples/media_tool.wasm --demo -p "show me a dot"` → the `dot_png` tool returns a 1x1 PNG image block; the model sees `a 1x1 transparent dot. [image: image/png]` and the session JSONL keeps the bytes |
 

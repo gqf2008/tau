@@ -46,6 +46,21 @@
   `before_run_end`, notifies the observed delta count; validate.sh
   step 1c asserts the notice end to end.
 
+### Added — `ws` capability for bridges (docs/im-channels.md, 0.3.0)
+
+- The bridge world imports `ws`: `connect` / `send` / `recv` / `close`
+  over text/binary frames — the host is a frame pipe and never parses
+  payloads (IM stream modes: 飞书/钉钉). Origin consent shares the
+  `http` allowlist (ws:→http:, wss:→https:; `--mcp-url` accepts ws(s)
+  URLs). Keepalive/idle semantics are contractual (wit-review F9): the
+  host pings every 30s, closes with a named reason after 60s of inbound
+  silence, and `recv` takes a mandatory timeout — a dead connection
+  always surfaces as an explicit error, never a hang. Handles carry the
+  instance generation like `process`.
+- New example `ws-echo-bridge` + `scripts/ws_echo_mock.py` (stdlib
+  loopback echo server); validate.sh step 5b drives an echo round trip
+  through the consent gate.
+
 ### Breaking — contract `tau:extension@0.2.0` (docs/wit-review.md batch)
 
 - **Host channel** (`docs/host-channel.md`, landed): the extension

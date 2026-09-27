@@ -212,6 +212,15 @@ tau --provider-wasm target/wasm32-wasip2/release/my_provider.wasm \
 
 ## 6. Bridges (world `bridge`)
 
+Since 0.3.0 the bridge world also imports `ws` — a WebSocket frame pipe
+for stream-mode protocols (IM long connections, docs/im-channels.md):
+`connect(url)` (origin allowlist shared with `http`; `--mcp-url` accepts
+ws(s) URLs), `send(handle, frame)`, `recv(handle, timeout-ms)` (the
+timeout is mandatory — a recv that can block forever hides a dead
+connection; the host pings every 30s and closes with a named reason
+after 60s of inbound silence), `close(handle)`. Handles are
+generation-fenced like `process`. Demo: `examples/ws-echo-bridge`.
+
 Bridges translate an external tool protocol into tau tools — the host
 stays protocol-agnostic and only grants capabilities: `process`
 (spawn-with-pipes) and `http` (origin allowlist). Both are always

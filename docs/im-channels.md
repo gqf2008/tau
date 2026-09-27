@@ -82,7 +82,7 @@ media 工具能力，或交给 provider 侧（realtime API 多直接吃 PCM）�
 ## 落地顺序
 
 1. **前置契约**：host-channel（steer/follow-up/notify/emit + consent）
-   + `ws` 能力 → `tau:extension@0.2.0`。
+   + `ws` 能力 → 随 `tau:extension@0.3.0`（0.2.0 未赶上，0.3.0 未发布，同班列车）。
 2. **飞书先行**：长连接无需公网；一个适配器同时验证入站注入、出站
    观测、thread 会话映射、媒体入 blob 四件事。
 3. **钉钉**：模式复制（同属 stream），差异在卡片/富文本映射。
@@ -93,7 +93,13 @@ media 工具能力，或交给 provider 侧（realtime API 多直接吃 PCM）�
 ## 落地清单
 
 - [ ] host-channel 落地（见 docs/host-channel.md 清单）
-- [ ] `ws` 能力：WIT + 宿主帧管道 + consent 门类
+- [x] `ws` 能力（0.3.0 落地）：bridge world `import ws`——
+      connect/send/recv/close + text|binary 帧；宿主 actor 线程只做
+      帧管道；consent 与 http 共享 origin 白名单（ws:→http:,
+      wss:→https:，`--mcp-url` 接受 ws(s) URL）；F9 语义入契约注释
+      （ping 30s / 60s 无入站即 close 报因 / recv 必须带显式超时）。
+      示例 `examples/ws-echo-bridge` + `scripts/ws_echo_mock.py`
+      回环验收（validate.sh 步骤 5b）
 - [ ] 飞书 bridge 组件（新示例，不动既有示例）
 - [ ] 会话/身份映射配置文件格式
 - [ ] `ingress` 能力（排到企微/WhatsApp 之前）

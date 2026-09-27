@@ -19,6 +19,7 @@ tokio.workspace = true
 futures.workspace = true
 async-stream = "0.3"
 reqwest = { version = "0.12", default-features = false, features = ["rustls-tls", "blocking"] }
+tungstenite = { version = "0.26", default-features = false, features = ["handshake", "rustls-tls-webpki-roots"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 sha2 = "0.10"
 base64 = "0.23"

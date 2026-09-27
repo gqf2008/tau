@@ -49,7 +49,7 @@ trap cleanup EXIT
 # --- pre-flight -------------------------------------------------------
 step "build release binary + wasm examples"
 cargo build --release -p tau-cli --quiet
-for ex in upper http-provider mcp-bridge guard echo-provider notifier media-tool streamer; do
+for ex in upper http-provider mcp-bridge guard echo-provider notifier media-tool streamer ws-echo-bridge; do
     cargo build --manifest-path "examples/${ex}/Cargo.toml" \
         --target wasm32-wasip2 --release --quiet
 done
@@ -61,6 +61,7 @@ ECHO_PROVIDER="$ROOT/examples/echo-provider/target/wasm32-wasip2/release/echo_pr
 NOTIFIER="$ROOT/examples/notifier/target/wasm32-wasip2/release/notifier.wasm"
 MEDIA_TOOL="$ROOT/examples/media-tool/target/wasm32-wasip2/release/media_tool.wasm"
 STREAMER="$ROOT/examples/streamer/target/wasm32-wasip2/release/streamer.wasm"
+WS_ECHO="$ROOT/examples/ws-echo-bridge/target/wasm32-wasip2/release/ws_echo_bridge.wasm"
 [ -f "$UPPER" ] || fail "upper example missing"
 [ -f "$HTTP_PROVIDER" ] || fail "http-provider example missing"
 [ -f "$MCP_BRIDGE" ] || fail "mcp-bridge example missing"
@@ -69,6 +70,7 @@ STREAMER="$ROOT/examples/streamer/target/wasm32-wasip2/release/streamer.wasm"
 [ -f "$NOTIFIER" ] || fail "notifier example missing"
 [ -f "$MEDIA_TOOL" ] || fail "media-tool example missing"
 [ -f "$STREAMER" ] || fail "streamer example missing"
+[ -f "$WS_ECHO" ] || fail "ws-echo-bridge example missing"
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
@@ -455,6 +457,23 @@ OUT="$("$TAU" --allow-unsigned --mcp-bridge "$MCP_BRIDGE" \
 echo "$OUT" | grep -q "tool ← echo: bridge validation ok" \
     || fail "bridged echo tool did not close the loop: $OUT"
 echo "ok — consent-gated spawn served the echo tool through the MCP bridge"
+
+# --- step 5b: ws capability (frame pipe, docs/im-channels.md) ---------
+step "5b/11 ws capability (frame pipe over a loopback echo server)"
+python "$ROOT/scripts/ws_echo_mock.py" > ws_mock.log 2>&1 &
+WS_MOCK_PID=$!
+for _ in $(seq 1 20); do
+    grep -q "ws echo ready" ws_mock.log 2> /dev/null && break
+    sleep 0.5
+done
+WS_PORT=$(sed -n 's/^ws echo ready //p' ws_mock.log)
+[ -n "$WS_PORT" ] || fail "ws echo mock did not start: $(cat ws_mock.log)"
+OUT="$("$TAU" --allow-unsigned --mcp-bridge "$WS_ECHO"     --mcp-url "ws://127.0.0.1:$WS_PORT/echo" --demo -p "echo frame-pipe-ok via ws_echo" 2>&1)" || fail "ws run: $OUT"
+kill "$WS_MOCK_PID" 2> /dev/null || true
+# The faux model decides the exact payload wording; assert the round
+# trip (echo: prefix = frame came back) and the payload's survival.
+echo "$OUT" | grep -qE "tool ← ws_echo: echo: .*frame-pipe-ok" || fail "ws echo did not close the loop: $OUT"
+echo "ok — frame crossed guest→host→ws→echo→back (consent-gated origin)"
 
 # --- step 6: remembered consent lifecycle ------------------------------
 step "6/11 remembered consent (--remember / --list / --revoke)"

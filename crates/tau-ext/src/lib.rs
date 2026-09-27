@@ -40,6 +40,8 @@ use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
+pub mod ws;
+
 mod bindings {
     wasmtime::component::bindgen!({
         // Vendored copy so the packaged crate builds outside the

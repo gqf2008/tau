@@ -28,6 +28,7 @@ struct BridgeState {
     table: ResourceTable,
     processes: ProcessRegistry,
     http: HttpRegistry,
+    ws: crate::ws::WsRegistry,
 }
 
 impl WasiView for BridgeState {
@@ -183,6 +184,41 @@ impl bridge_bindings::tau::extension::http::Host for BridgeState {
     }
 }
 
+impl bridge_bindings::tau::extension::ws::Host for BridgeState {
+    fn connect(&mut self, url: String) -> Result<u64, String> {
+        self.ws.connect(&url)
+    }
+
+    fn send(
+        &mut self,
+        handle: u64,
+        frame: bridge_bindings::tau::extension::ws::Frame,
+    ) -> Result<(), String> {
+        use bridge_bindings::tau::extension::ws::Frame;
+        let frame = match frame {
+            Frame::Text(t) => crate::ws::WsFrame::Text(t),
+            Frame::Binary(b) => crate::ws::WsFrame::Binary(b),
+        };
+        self.ws.send(handle, frame)
+    }
+
+    fn recv(
+        &mut self,
+        handle: u64,
+        timeout_ms: u32,
+    ) -> Result<bridge_bindings::tau::extension::ws::Frame, String> {
+        use bridge_bindings::tau::extension::ws::Frame;
+        match self.ws.recv(handle, timeout_ms)? {
+            crate::ws::WsFrame::Text(t) => Ok(Frame::Text(t)),
+            crate::ws::WsFrame::Binary(b) => Ok(Frame::Binary(b)),
+        }
+    }
+
+    fn close(&mut self, handle: u64) -> Result<(), String> {
+        self.ws.close(handle)
+    }
+}
+
 impl bridge_bindings::tau::extension::process::Host for BridgeState {
     fn spawn(&mut self, argv: Vec<String>) -> Result<u64, String> {
         self.processes.spawn(&argv)
@@ -268,6 +304,7 @@ impl BridgeFactory {
             table: ResourceTable::new(),
             processes: ProcessRegistry::new(generation),
             http: HttpRegistry::new(self.consent.origins.clone()),
+            ws: crate::ws::WsRegistry::new(generation, self.consent.origins.clone()),
         };
         let mut store = Store::new(&self.engine, state);
         let bindings =
