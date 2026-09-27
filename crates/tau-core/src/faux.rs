@@ -1153,3 +1153,78 @@ mod navigation_tests {
         assert!(agent().navigate(&store, "aa").await.is_err());
     }
 }
+
+#[cfg(test)]
+mod observe_tests {
+    use std::sync::{Arc, Mutex};
+
+    use async_trait::async_trait;
+
+    use crate::agent::AgentEvent;
+    use crate::probe::{ProbeHandler, Verdict};
+    use crate::{Agent, ProbePoint, ProbeRegistry, ToolRegistry};
+
+    fn agent() -> Agent {
+        Agent::new(
+            Box::new(crate::faux::FauxModel::echo()),
+            ToolRegistry::new(),
+        )
+    }
+
+    /// Observe-only points: handlers see the payload; a misbehaving
+    /// handler's verdict is reported on the bus as `ignored`, never
+    /// honored.
+    #[tokio::test]
+    async fn observe_fires_handlers_and_ignores_verdicts() {
+        struct Recorder {
+            seen: Arc<Mutex<Vec<(ProbePoint, serde_json::Value)>>>,
+        }
+        #[async_trait]
+        impl ProbeHandler for Recorder {
+            fn points(&self) -> &[ProbePoint] {
+                &[ProbePoint::SessionStart]
+            }
+            async fn probe(&self, point: ProbePoint, payload: serde_json::Value) -> Verdict {
+                self.seen.lock().unwrap().push((point, payload));
+                // Misuse: observe-only points must not honor this.
+                Verdict::Block {
+                    reason: "must be ignored".into(),
+                }
+            }
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut probes = ProbeRegistry::new();
+        probes.register(Box::new(Recorder { seen: seen.clone() }));
+        let agent = agent().probes(probes);
+        let mut events = agent.events();
+        agent
+            .observe(
+                ProbePoint::SessionStart,
+                serde_json::json!({ "session": "s.jsonl" }),
+            )
+            .await;
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[(
+                ProbePoint::SessionStart,
+                serde_json::json!({ "session": "s.jsonl" })
+            )]
+        );
+        let mut saw_ignored = false;
+        while let Ok(event) = events.try_recv() {
+            if let AgentEvent::Probe { point, action } = event {
+                assert_eq!(point, "session_start");
+                assert_eq!(action, "ignored");
+                saw_ignored = true;
+            }
+        }
+        assert!(saw_ignored, "the misused verdict was not reported");
+    }
+
+    #[tokio::test]
+    async fn observe_without_probes_is_a_noop() {
+        agent()
+            .observe(ProbePoint::SessionEnd, serde_json::json!({}))
+            .await;
+    }
+}

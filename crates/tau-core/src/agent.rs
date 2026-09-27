@@ -55,7 +55,9 @@ pub enum AgentEvent {
     Probe {
         /// The probe point's wire name.
         point: &'static str,
-        /// The verdict's action (`continue`/`replace`/`block`).
+        /// The verdict's action (`continue`/`replace`/`block`, or
+        /// `ignored` when an observe-only point got a verdict it must
+        /// not honor).
         action: &'static str,
     },
     /// A steering message was injected after the current turn's tool results.
@@ -198,6 +200,28 @@ impl Agent {
             });
         }
         verdict
+    }
+
+    /// Fire an observe-only point (session lifecycle: `session_start`,
+    /// `branch`, `session_end` — probes.md). Every handler registered
+    /// for the point sees the payload; verdicts are ignored by contract.
+    /// A non-continue verdict is reported on the bus as a `Probe` event
+    /// with action `ignored` — visible, never honored.
+    pub async fn observe(&self, point: ProbePoint, payload: serde_json::Value) {
+        debug_assert!(
+            point.observe_only(),
+            "observe() with an influence point: {point:?}"
+        );
+        if self.probes.is_empty() {
+            return;
+        }
+        let verdict = self.probes.probe(point, payload).await;
+        if verdict != Verdict::Continue {
+            self.emit(AgentEvent::Probe {
+                point: point.name(),
+                action: "ignored",
+            });
+        }
     }
 
     /// Set the system prompt for requests built by this agent.

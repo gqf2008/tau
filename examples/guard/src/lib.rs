@@ -7,7 +7,9 @@
 //! carrying "wasicheck" make the probe read the ambient environment:
 //! under the default allow-all WASI it sees the host's TAU_AMBIENT and
 //! blocks (proving the leak); under --deny-wasi the guest env is empty
-//! and the call passes (proving the sandbox).
+//! and the call passes (proving the sandbox). It also registers the
+//! observe-only `session_start` point and reports the session via
+//! `host.notify` — observe leg (probes.md), verdict ignored by contract.
 //!
 //! Build:
 //!   cargo build --manifest-path examples/guard/Cargo.toml \
@@ -26,6 +28,8 @@ wit_bindgen::generate!({
 
 use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
+use tau::extension::host;
+use tau::extension::types::Content;
 
 struct Guard;
 
@@ -45,7 +49,7 @@ impl Tools for Guard {
 
 impl Probes for Guard {
     fn points() -> Vec<String> {
-        vec!["before_tool".into()]
+        vec!["before_tool".into(), "session_start".into()]
     }
 
     fn probe(point: String, payload_json: String) -> Verdict {
@@ -54,6 +58,23 @@ impl Probes for Guard {
             payload_json: None,
             reason: None,
         };
+        if point == "session_start" {
+            // Observe-only: report the session through the host channel.
+            // The verdict is ignored by contract — this is pure notice.
+            let parsed: serde_json::Value =
+                serde_json::from_str(&payload_json).unwrap_or_default();
+            let session = parsed["session"].as_str().unwrap_or("?");
+            let model = parsed["model"].as_str().unwrap_or("?");
+            if let Err(e) = host::notify(
+                "info",
+                &[Content::Text(format!(
+                    "session_start: {session} (model {model})"
+                ))],
+            ) {
+                eprintln!("guard: notify failed: {e}");
+            }
+            return continue_();
+        }
         if point != "before_tool" {
             return continue_();
         }

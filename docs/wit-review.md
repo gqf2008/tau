@@ -57,7 +57,7 @@ probe 语义）+ host import 拉取订阅（高频 delta，events.md 规则 3
 禁止 probe 上高频路径，所以 probe 形态覆盖不了 text/audio delta，
 **两条腿都要**）。
 
-### F3 [高·文档漂移] probes.md 承诺的 observe-only 点位未实现
+### F3 [高·文档漂移] probes.md 承诺的 observe-only 点位未实现 —— 低频三点已落地
 
 证据：`docs/probes.md` 列了 `session_start/session_end/branch/
 text_delta/tool_progress`「observe-only in v0」，但
@@ -65,8 +65,10 @@ text_delta/tool_progress`「observe-only in v0」，但
 tau-ext/tau-cli 对这些名字**零引用**；`docs/events.md` 的「wasm
 extensions that observe (via tau-ext; observe-only)」同样无实现支撑。
 
-处置（docs-first 规矩）：本次评审已把两份文档的相关段落标注
-「未实现」；实现并入 F2 观测腿。
+处置（2026-09-27 落地）：session_start/session_end/branch 三点 wired
+（observe-only：verdict 上报为 ignored 永不生效，CLI 发射，
+`Agent::observe`）；text_delta/tool_progress 保持 reserved（高频拉取
+订阅设计落地前不接线），`tau probes` 目录列出 wired/reserved 状态。
 
 ### F4 [中·全模态] 工具结果只能是文本
 
@@ -162,6 +164,9 @@ idle 超时的处置语义（bridge 长连是断线敏感场景，参照飞书�
   过 consent 新门类 `inject`（--allow-inject / --remember），
   enqueue-only 走控制通道既有 checkpoint。load 错误点名契约版本错配。
   F5 同批落地：坏 parameters-json 拒载并点名工具。
+  F3/F2 观测腿（低频）同批落地：session_start/session_end/branch
+  observe-only probe 点（CLI 发射，`Agent::observe`，误用 verdict 上报
+  ignored）；text_delta/tool_progress 留 reserved，等高频拉取订阅设计。
   F2 观测腿的高频拉取订阅仍是设计项。models.run 的 request-json
   **保持 JSON**（评审确认）：provider 的职责是翻译到厂商 JSON 线格式，
   本路径无热路径，类型化收益为零；若未来反序列化成本显现再评估。

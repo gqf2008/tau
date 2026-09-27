@@ -12,6 +12,7 @@
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
+use tau_core::probe::ProbePoint;
 use tau_core::{Agent, AgentEvent, Control, JsonlStore, Message};
 use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
 
@@ -47,6 +48,7 @@ pub(crate) async fn interactive(
     store: JsonlStore,
     history: Vec<Message>,
     base: Option<String>,
+    session_payload: serde_json::Value,
 ) -> Result<()> {
     let agent = Arc::new(agent);
     let (line_tx, line_rx) = unbounded_channel();
@@ -117,7 +119,24 @@ pub(crate) async fn interactive(
         .recv()
         .await
         .context("input thread failed to start")?;
-    drive(agent, store, history, base, line_rx, print.as_ref()).await
+    let result = drive(
+        agent.clone(),
+        store,
+        history,
+        base,
+        line_rx,
+        print.as_ref(),
+        Some(session_payload.clone()),
+    )
+    .await;
+    if result.is_ok() {
+        // Best-effort clean-exit observation (observe-only; verdicts
+        // ignored). Error exits skip it — a crash is not a session end.
+        agent
+            .observe(ProbePoint::SessionEnd, session_payload)
+            .await;
+    }
+    result
 }
 
 /// The REPL loop, factored for tests: lines arrive on a channel, rendered
@@ -130,6 +149,7 @@ pub(crate) async fn drive(
     base: Option<String>,
     mut lines: UnboundedReceiver<LineEvent>,
     print: impl Fn(&str) + Send + Sync,
+    session_start: Option<serde_json::Value>,
 ) -> Result<()> {
     // Renderer: another event-bus subscriber, formatting events into
     // complete lines for the printer.
@@ -170,6 +190,39 @@ pub(crate) async fn drive(
                 Ok(AgentEvent::FollowUp(message)) => {
                     format!("[tau] follow-up: {}", message.text())
                 }
+                Ok(AgentEvent::ExtensionNotice { level, content }) => {
+                    // Text blocks render; other media are placeholders —
+                    // notices are user-visible facts, never history.
+                    let mut line = String::new();
+                    for block in &content {
+                        match block {
+                            tau_core::Content::Text { text } => line.push_str(text),
+                            tau_core::Content::Image { media } => {
+                                line.push_str(&format!("[image: {}]", media.media_type))
+                            }
+                            tau_core::Content::Audio { media } => {
+                                line.push_str(&format!("[audio: {}]", media.media_type))
+                            }
+                            tau_core::Content::Video { media } => {
+                                line.push_str(&format!("[video: {}]", media.media_type))
+                            }
+                            tau_core::Content::File { media, name } => line.push_str(&format!(
+                                "[file: {}]",
+                                name.as_deref().unwrap_or(&media.media_type)
+                            )),
+                            tau_core::Content::ToolCall { name, .. } => {
+                                line.push_str(&format!("[tool-call: {name}]"))
+                            }
+                            tau_core::Content::ToolResult { call_id, .. } => {
+                                line.push_str(&format!("[tool-result: {call_id}]"))
+                            }
+                        }
+                    }
+                    format!("[tau] ext {level}: {line}")
+                }
+                Ok(AgentEvent::ExtensionFact(fact)) => {
+                    format!("[tau] ext fact: {}", compact_preview(&fact.to_string()))
+                }
                 Ok(AgentEvent::Abort) => "[tau] aborted".to_string(),
                 Ok(AgentEvent::RunEnd { .. } | AgentEvent::RunError { .. }) => {
                     if partial.is_empty() {
@@ -190,6 +243,12 @@ pub(crate) async fn drive(
             }
         }
     });
+
+    // The renderer is attached; session_start observes now so its
+    // notices render (observe leg, probes.md — verdicts ignored).
+    if let Some(payload) = session_start {
+        agent.observe(ProbePoint::SessionStart, payload).await;
+    }
 
     // Run completion is signalled over a channel so the select stays
     // borrow-free.
@@ -290,8 +349,15 @@ pub(crate) async fn drive(
                                         .get(&id)
                                         .map(tau_core::session::entry_summary)
                                         .unwrap_or_default();
+                                    let from = parent.clone();
                                     parent = Some(id.clone());
                                     history = branch;
+                                    agent
+                                        .observe(
+                                            ProbePoint::Branch,
+                                            serde_json::json!({ "from": from, "to": id.clone() }),
+                                        )
+                                        .await;
                                     print(&format!(
                                         "[tau] forked at {}: {summary} ({} messages in context)",
                                         &id[..12.min(id.len())],
@@ -464,7 +530,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer()));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("two".into())).unwrap();
@@ -485,6 +551,52 @@ mod tests {
         assert_eq!(branch[2].text(), "two");
     }
 
+    /// The session_start payload interactive() hands over fires once the
+    /// renderer is attached — the guest observes before the first turn.
+    #[tokio::test]
+    async fn drive_fires_session_start_before_the_first_turn() {
+        struct Recorder {
+            seen: Arc<Mutex<Vec<serde_json::Value>>>,
+        }
+        #[async_trait::async_trait]
+        impl tau_core::probe::ProbeHandler for Recorder {
+            fn points(&self) -> &[ProbePoint] {
+                &[ProbePoint::SessionStart]
+            }
+            async fn probe(&self, _point: ProbePoint, payload: serde_json::Value) -> tau_core::probe::Verdict {
+                self.seen.lock().unwrap().push(payload);
+                tau_core::probe::Verdict::Continue
+            }
+        }
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let mut probes = tau_core::ProbeRegistry::new();
+        probes.register(Box::new(Recorder { seen: seen.clone() }));
+        let (_dir, store) = store();
+        let agent = Arc::new(
+            Agent::new(Box::new(StaticModel), ToolRegistry::new()).probes(probes),
+        );
+        let capture = Arc::new(Capture {
+            lines: Mutex::new(Vec::new()),
+            ready: Notify::new(),
+        });
+        let (tx, rx) = unbounded_channel();
+        let task = tokio::spawn(drive(
+            agent,
+            store,
+            Vec::new(),
+            None,
+            rx,
+            capture.printer(),
+            Some(serde_json::json!({ "session": "s.jsonl", "model": "demo" })),
+        ));
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+        assert_eq!(
+            seen.lock().unwrap().as_slice(),
+            &[serde_json::json!({ "session": "s.jsonl", "model": "demo" })]
+        );
+    }
+
     #[tokio::test]
     async fn mid_run_followup_and_steer_join_the_same_run() {
         let (_dir, store) = store();
@@ -503,7 +615,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer()));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None));
 
         tx.send(LineEvent::Line("start".into())).unwrap();
         started.notified().await; // model is mid-stream now
@@ -540,7 +652,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer()));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("two".into())).unwrap();
@@ -588,7 +700,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer()));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("/compact".into())).unwrap();
@@ -638,7 +750,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer()));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None));
         tx.send(LineEvent::Line("/help".into())).unwrap();
         tx.send(LineEvent::Line("/bogus".into())).unwrap();
         tx.send(LineEvent::Line("/quit".into())).unwrap();
@@ -691,7 +803,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer()));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None));
         tx.send(LineEvent::Line("hi".into())).unwrap();
         wait_for(&capture, "run failed: model error: boom").await;
         // The loop survived: the next prompt runs and completes.
@@ -721,7 +833,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer()));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("two".into())).unwrap();

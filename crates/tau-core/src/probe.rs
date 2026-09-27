@@ -27,6 +27,14 @@ pub enum ProbePoint {
     BeforeCompaction,
     /// About to navigate: fork the session at an older entry.
     BeforeNavigation,
+    /// A session opened. Observe-only: verdicts are reported, never
+    /// honored (see `Agent::observe`).
+    SessionStart,
+    /// The session forked to an older entry (after `before_navigation`
+    /// allowed it). Observe-only.
+    Branch,
+    /// A session closed cleanly. Observe-only.
+    SessionEnd,
 }
 
 impl ProbePoint {
@@ -42,6 +50,9 @@ impl ProbePoint {
             Self::BeforeRunEnd => "before_run_end",
             Self::BeforeCompaction => "before_compaction",
             Self::BeforeNavigation => "before_navigation",
+            Self::SessionStart => "session_start",
+            Self::Branch => "branch",
+            Self::SessionEnd => "session_end",
         }
     }
 
@@ -57,12 +68,16 @@ impl ProbePoint {
             "before_run_end" => Some(Self::BeforeRunEnd),
             "before_compaction" => Some(Self::BeforeCompaction),
             "before_navigation" => Some(Self::BeforeNavigation),
+            "session_start" => Some(Self::SessionStart),
+            "branch" => Some(Self::Branch),
+            "session_end" => Some(Self::SessionEnd),
             _ => None,
         }
     }
 
     /// Every point, in lifecycle order.
-    pub const ALL: [ProbePoint; 9] = [
+    pub const ALL: [ProbePoint; 12] = [
+        Self::SessionStart,
         Self::BeforeRun,
         Self::TransformContext,
         Self::BeforeRequest,
@@ -72,7 +87,16 @@ impl ProbePoint {
         Self::BeforeRunEnd,
         Self::BeforeCompaction,
         Self::BeforeNavigation,
+        Self::Branch,
+        Self::SessionEnd,
     ];
+
+    /// Observe-only points inform; they never influence. The harness
+    /// fires them via `Agent::observe`, which reports but ignores any
+    /// non-continue verdict.
+    pub fn observe_only(self) -> bool {
+        matches!(self, Self::SessionStart | Self::Branch | Self::SessionEnd)
+    }
 }
 
 /// A probe's decision for one firing.
@@ -242,6 +266,41 @@ pub const CATALOG: &[PointInfo] = &[
         payload: r#"{"target": entry-id, "summary": string — first line of the target's message}"#,
         verdicts: "continue | replace{target} — navigate to a different entry instead | block{reason} — vetoes the navigation",
     },
+    PointInfo {
+        point: Some(ProbePoint::SessionStart),
+        name: "session_start",
+        wired: true,
+        payload: r#"{"session": path, "cwd": path, "model": string}"#,
+        verdicts: "observe-only — a non-continue verdict is reported as ignored, never honored",
+    },
+    PointInfo {
+        point: Some(ProbePoint::Branch),
+        name: "branch",
+        wired: true,
+        payload: r#"{"from": entry-id|null, "to": entry-id}"#,
+        verdicts: "observe-only — a non-continue verdict is reported as ignored, never honored",
+    },
+    PointInfo {
+        point: Some(ProbePoint::SessionEnd),
+        name: "session_end",
+        wired: true,
+        payload: r#"{"session": path, "cwd": path, "model": string}"#,
+        verdicts: "observe-only — a non-continue verdict is reported as ignored, never honored",
+    },
+    PointInfo {
+        point: None,
+        name: "text_delta",
+        wired: false,
+        payload: r#"{"text": string}"#,
+        verdicts: "observe-only (reserved — high-frequency streaming awaits the pull-subscription design in host-channel.md)",
+    },
+    PointInfo {
+        point: None,
+        name: "tool_progress",
+        wired: false,
+        payload: r#"{"id": string, "name": string, "progress": object}"#,
+        verdicts: "observe-only (reserved — high-frequency streaming awaits the pull-subscription design in host-channel.md)",
+    },
 ];
 
 #[cfg(test)]
@@ -270,6 +329,24 @@ mod catalog_tests {
                 "{:?} missing from catalog",
                 point
             );
+        }
+    }
+
+    #[test]
+    fn reserved_slots_and_observe_only_flags_are_consistent() {
+        // Reserved slots: no variant, not wired, name not parseable yet.
+        for name in ["text_delta", "tool_progress"] {
+            let info = CATALOG.iter().find(|i| i.name == name).expect(name);
+            assert!(!info.wired && info.point.is_none(), "{name} drifted");
+            assert_eq!(ProbePoint::from_name(name), None, "{name} wired?");
+        }
+        // The observe-only set is exactly the session lifecycle trio.
+        for point in ProbePoint::ALL {
+            let expected = matches!(
+                point,
+                ProbePoint::SessionStart | ProbePoint::Branch | ProbePoint::SessionEnd
+            );
+            assert_eq!(point.observe_only(), expected, "{point:?}");
         }
     }
 }

@@ -37,18 +37,34 @@ it becomes a blocked tool result handed back to the model, and
 | 8 | `before_compaction` | `{"reason": "manual", "messages": [Message]}` | continue / replace{messages} / block{reason} | custom summarizer (replace the message set the summarizer sees); veto compaction during a critical phase |
 | 9 | `before_navigation` | `{"target": entry-id, "summary": string — first line of the target's message}` | continue / replace{target} / block{reason} | policy: veto rewinding past a critical point; redirect navigation to a sanctioned entry |
 
-## Session lifecycle (**not implemented in v0.1.0/0.2.0** — see
-       `docs/wit-review.md` F3; lands with the observe leg of
-       `docs/host-channel.md`)
+## Session lifecycle — observe-only (wired since 0.2.0)
 
-The points below are a design commitment, not shipping code: `ProbePoint`
-has only the nine wired points above and no guest can register these today.
+These three points **observe, never influence**: the harness fires them
+via `Agent::observe`, every registered handler sees the payload, and any
+non-`continue` verdict is reported on the bus as a `Probe` event with
+action `ignored` — visible on the decision trail, never honored. Fire
+sites live in the CLI (session open/close, `--continue-from` and REPL
+`/fork`), not in the run loop.
 
-| point | payload |
-|-------|---------|
-| `session_start` / `session_end` | session id, cwd, model |
-| `branch` | from entry, to entry |
-| `text_delta`, `tool_progress` | streaming progress (high volume, never blocking) |
+| point | payload | fires |
+|-------|---------|-------|
+| `session_start` | `{"session": path, "cwd": path, "model": string}` | once the agent exists, after the renderer subscribes |
+| `branch` | `{"from": entry-id|null, "to": entry-id}` | after a navigation the `before_navigation` probe allowed |
+| `session_end` | same as `session_start` | on clean exit (print-mode end, compact-only return, REPL quit); error exits skip it — a crash is not a session end |
+
+Two renderer caveats, both honest consequences of the bus: in print
+mode the CLI renderer detaches at run end, so a `session_end` notice is
+for bus subscribers (embedders) — the guest observes the point
+regardless; and a buffered notice can drain a line late relative to
+direct `eprintln` status lines.
+
+### Reserved (design commitment, not shipping code)
+
+`text_delta` / `tool_progress` — streaming progress, high volume, never
+blocking. They stay reserved slots in the `tau probes` catalog until the
+high-frequency pull-subscription design (`docs/host-channel.md` /
+`docs/wit-review.md` F2) lands; `ProbePoint::from_name` rejects them
+today, so no guest can register them.
 
 ## Rules
 
@@ -58,6 +74,7 @@ has only the nine wired points above and no guest can register these today.
    extension must not wedge the harness.
 3. Blocking probes (#5, #9 in the hot path) must be fast; the model is not
    waiting on anything else. jev's ~1s latency is acceptable at `before_tool`,
-   not at `text_delta` (which is why streaming points are observe-only).
+   not at `text_delta` (which is why streaming points stay observe-only and
+   reserved).
 4. Points are discoverable: `tau probes` lists them with payload schemas, so
    extension authors never guess.

@@ -14,7 +14,10 @@ everything that wants to know is a subscriber.
 Probes are the synchronous points where the harness pauses for a verdict
 (`continue` / `replace` / `block`). Every non-trivial probe outcome is *also*
 published on the bus as `AgentEvent::Probe`, so observers always see the full
-decision trail — the two channels never diverge.
+decision trail — the two channels never diverge. The session-lifecycle
+points (`session_start` / `branch` / `session_end`) are observe-only: the
+harness never pauses, and a misused verdict surfaces as action `ignored`
+(`docs/probes.md`).
 
 ## Who subscribes
 

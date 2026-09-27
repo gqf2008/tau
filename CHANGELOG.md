@@ -40,6 +40,14 @@
   "steer refused: session injection not consented"; with
   `--allow-inject` the steer lands (`[tau] steer: hello`).
 - CLI `--allow-inject`; `tau consent --list` shows the inject grant.
+- Observe-only probe points `session_start` / `branch` / `session_end`
+  (probes.md session lifecycle): fired by the CLI via `Agent::observe`;
+  verdicts are ignored by contract, and a misused verdict is reported on
+  the bus as a `Probe` event with action `ignored`. The `tau probes`
+  catalog lists them wired, plus `text_delta` / `tool_progress` as
+  reserved slots. The guard example observes `session_start` and reports
+  it through `host.notify`; the REPL renderer now prints extension
+  notices/facts like print mode.
 - The six language examples (C/C++/Python/JS/TS/Go) are rebuilt against
   0.2.0; C++ gained `expected`/`variant` shims (now `-std=c++23`).
 

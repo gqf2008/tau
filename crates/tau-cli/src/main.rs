@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tau_core::agent::AgentEvent;
 use tau_core::faux::FauxModel;
+use tau_core::probe::ProbePoint;
 use tau_core::session::{EntryKind, JsonlStore, SessionEntry, new_id};
 use tau_core::{Agent, Message, Model, ProbeRegistry, ToolRegistry};
 
@@ -674,8 +675,8 @@ async fn main() -> Result<()> {
         )?;
     }
 
-    let model: Box<dyn Model> = if cli.demo {
-        Box::new(FauxModel::demo())
+    let (model, model_label): (Box<dyn Model>, String) = if cli.demo {
+        (Box::new(FauxModel::demo()), "demo".into())
     } else if let Some(raw) = &cli.provider_wasm {
         let path = &resolve_component(raw).await?;
         let name = cli
@@ -695,6 +696,7 @@ async fn main() -> Result<()> {
         }
         let auth = resolve_provider_auth(cli.provider_auth.clone(), remembered.auth_delivery);
         let wasi = effective_wasi(cli.deny_wasi, &remembered);
+        let label = format!("{name} @ {}", path.display());
         let model = Box::new(
             host.with_wasi_policy(wasi)
                 .load_provider(path, name, consent.origins.clone(), auth)
@@ -709,7 +711,7 @@ async fn main() -> Result<()> {
                 ..tau_ext::consent::RememberedConsent::from(consent)
             },
         )?;
-        model
+        (model, label)
     } else {
         let provider = cli.provider.clone().unwrap_or_else(|| {
             if std::env::var("ANTHROPIC_API_KEY").is_ok()
@@ -721,7 +723,8 @@ async fn main() -> Result<()> {
             }
         });
         let name = cli.model.unwrap_or_else(default_model);
-        match provider.as_str() {
+        let label = format!("{provider}/{name}");
+        let model: Box<dyn Model> = match provider.as_str() {
             "openai" => Box::new(
                 tau_openai::OpenAiModel::from_env(name)
                     .context("OPENAI_API_KEY not set (or use --demo)")?,
@@ -735,7 +738,8 @@ async fn main() -> Result<()> {
                     .context("ANTHROPIC_API_KEY not set (or use --demo)")?,
             ),
             other => anyhow::bail!("unknown provider: {other}"),
-        }
+        };
+        (model, label)
     };
 
     let mut store = JsonlStore::open(&cli.session)
@@ -764,6 +768,28 @@ async fn main() -> Result<()> {
         agent = agent.system(system);
     }
 
+    // Observe leg (probes.md): session lifecycle observations fire once
+    // the agent exists so every loaded extension sees them. Verdicts are
+    // ignored by contract (observe-only).
+    let session_payload = serde_json::json!({
+        "session": cli.session.display().to_string(),
+        "cwd": std::env::current_dir()
+            .map(|p| p.display().to_string())
+            .unwrap_or_default(),
+        "model": model_label,
+    });
+    // Print mode: the renderer's receiver subscribes before the session
+    // lifecycle fires — broadcast buffers for existing receivers, so the
+    // renderer (spawned below) still sees session_start and every probe
+    // verdict from compact/navigate. Interactive mode renders inside
+    // repl::drive instead, which fires session_start itself.
+    let print_events = (!interactive).then(|| agent.events());
+    if !interactive {
+        agent
+            .observe(ProbePoint::SessionStart, session_payload.clone())
+            .await;
+    }
+
     if cli.compact {
         let head = store.head().map(|h| h.id.clone());
         match head {
@@ -787,6 +813,7 @@ async fn main() -> Result<()> {
             }
         }
         if cli.print.is_none() && !interactive {
+            agent.observe(ProbePoint::SessionEnd, session_payload).await;
             return Ok(());
         }
     }
@@ -796,6 +823,7 @@ async fn main() -> Result<()> {
     // the target.
     let mut base: Option<String> = None;
     if let Some(target) = &cli.continue_from {
+        let from = store.head().map(|h| h.id.clone());
         let (id, branch) = agent.navigate(&store, target).await?;
         let summary = store
             .get(&id)
@@ -803,18 +831,23 @@ async fn main() -> Result<()> {
             .unwrap_or_default();
         eprintln!("[tau] forked at {}: {summary}", &id[..12.min(id.len())]);
         history = branch;
-        base = Some(id);
+        base = Some(id.clone());
+        agent
+            .observe(ProbePoint::Branch, serde_json::json!({ "from": from, "to": id }))
+            .await;
     }
 
     if interactive {
-        return repl::interactive(agent, store, history, base).await;
+        return repl::interactive(agent, store, history, base, session_payload).await;
     }
     let prompt_text = cli.print.expect("print mode checked above");
 
     let parent = base.or_else(|| store.head().map(|h| h.id.clone()));
 
-    // Renderer: just another event-bus subscriber.
-    let mut events = agent.events();
+    // Renderer: just another event-bus subscriber. Its receiver was
+    // created before the session lifecycle fired, so it drains from
+    // session_start on.
+    let mut events = print_events.expect("print mode always subscribes");
     let renderer = tokio::spawn(async move {
         use std::io::Write;
         loop {
@@ -918,6 +951,7 @@ async fn main() -> Result<()> {
         store.append(entry)?;
     }
     eprintln!("[tau] session: {}", cli.session.display());
+    agent.observe(ProbePoint::SessionEnd, session_payload).await;
     Ok(())
 }
 

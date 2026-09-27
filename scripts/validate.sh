@@ -763,6 +763,25 @@ echo "$OUT" | grep -q "The tool failed: blocked: the guard said no" \
     || fail "block reason did not reach the model: $OUT"
 echo "ok — block: probe → tool result → the model sees the reason"
 
+# Observe leg (probes.md): the guard registers session_start; the host
+# fires it, the guest reports through host.notify, the renderer prints.
+echo "$OUT" | grep -q "ext info: session_start: .tau/session.jsonl" \
+    || fail "session_start observation did not reach the guest/renderer: $OUT"
+echo "ok — observe-only session_start fires, guest sees it, verdict ignored"
+
+# Discoverability: the catalog lists the wired lifecycle points and the
+# reserved streaming slots.
+OUT="$("$TAU" probes)" || fail "tau probes: $OUT"
+echo "$OUT" | grep -q "session_start \[wired\]" \
+    || fail "catalog missing session_start: $OUT"
+echo "$OUT" | grep -q "session_end \[wired\]" \
+    || fail "catalog missing session_end: $OUT"
+echo "$OUT" | grep -q "branch \[wired\]" \
+    || fail "catalog missing branch: $OUT"
+echo "$OUT" | grep -q "text_delta \[reserved\]" \
+    || fail "catalog missing reserved text_delta: $OUT"
+echo "ok — tau probes catalog: lifecycle wired, streaming reserved"
+
 OUT="$("$TAU" --allow-unsigned -e "$UPPER" -e "$GUARD" \
     --demo -p "shout allowed" 2>&1)" || fail "guard pass run: $OUT"
 echo "$OUT" | grep -q "tool ← upper: SHOUT ALLOWED" \
