@@ -14,7 +14,7 @@ use std::path::PathBuf;
 use serde::{Deserialize, Serialize};
 
 use crate::bridge::BridgeConsent;
-use crate::sign::{self, SignError};
+use crate::sign::{self, SignError, fingerprint_shaped};
 
 /// Per-fingerprint capability grants persisted under
 /// `~/.tau/consent/`. Secrets are never stored — only the grant to
@@ -90,18 +90,11 @@ pub fn remember_into(existing: RememberedConsent, grant: RememberedConsent) -> R
     }
 }
 
-/// Fingerprints are 16 lowercase hex chars (see
-/// [`sign::fingerprint`]). Every store method checks the shape: the
-/// filename is built from the fingerprint, and a caller-supplied value
-/// (`tau consent --revoke <arg>`) must never become a path —
-/// `../x` would escape the store directory.
-fn fingerprint_shaped(fingerprint: &str) -> bool {
-    fingerprint.len() == 16
-        && fingerprint
-            .bytes()
-            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-}
-
+// Every store method checks the key's shape (see
+// [`sign::fingerprint_shaped`]): the filename is built from the
+// fingerprint, and a caller-supplied value (`tau consent --revoke
+// <arg>`) must never become a path — `../x` would escape the store
+// directory.
 fn bad_fingerprint(fingerprint: &str) -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::InvalidInput,

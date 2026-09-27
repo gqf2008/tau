@@ -95,6 +95,15 @@ fi
 mv "$HOME/.tau/trust/$THROWAWAY_FP.pub.aside" "$HOME/.tau/trust/$THROWAWAY_FP.pub"
 echo "ok — untrusted component rejected"
 
+# A caller-supplied "fingerprint" must never become a path: --key
+# accepts only the canonical 16-hex shape, never ../-style input.
+if "$TAU" sign ext.wasm --key ../escape > sign-key.out 2>&1; then
+    fail "path-shaped --key accepted by tau sign"
+fi
+grep -q "not a signing fingerprint" sign-key.out \
+    || fail "unexpected sign rejection: $(cat sign-key.out)"
+echo "ok — tau sign --key rejects non-fingerprint input"
+
 # Tamper attacks on the signed component: however the bytes were corrupted
 # after signing, the default gate must refuse them.
 step "2b/10 signature tamper rejection"

@@ -169,6 +169,17 @@ pub fn fingerprint(key: &VerifyingKey) -> String {
     hex_prefix(&Sha256::digest(key.as_bytes()), 16)
 }
 
+/// Fingerprints are 16 lowercase hex chars (see [`fingerprint`]).
+/// Anything taking a fingerprint from a caller (CLI flags, store
+/// lookups) must check this shape before building a path from it —
+/// `../x` must never become a filename outside the store.
+pub fn fingerprint_shaped(fp: &str) -> bool {
+    fp.len() == 16
+        && fp
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
 fn hex_prefix(bytes: &[u8], chars: usize) -> String {
     bytes
         .iter()
@@ -332,7 +343,14 @@ pub fn keygen() -> Result<String, SignError> {
 pub fn load_key(fp: Option<&str>) -> Result<(String, SigningKey), SignError> {
     let dir = keys_dir();
     let chosen = match fp {
-        Some(fp) => fp.to_string(),
+        Some(fp) => {
+            if !fingerprint_shaped(fp) {
+                return Err(SignError::Malformed(format!(
+                    "{fp:?} is not a signing fingerprint (16 lowercase hex chars)"
+                )));
+            }
+            fp.to_string()
+        }
         None => {
             let mut keys: Vec<_> = std::fs::read_dir(&dir)?
                 .filter_map(|e| e.ok())
@@ -445,6 +463,16 @@ mod tests {
         // section appended at the end).
         signed[12] ^= 0xff;
         assert!(matches!(verify(&signed), Err(SignError::BadSignature(_))));
+    }
+
+    #[test]
+    fn load_key_rejects_non_fingerprint_input() {
+        // The shape check fires before any filesystem access, so these
+        // never touch the real keys dir — `tau sign --key "../x"`-style
+        // input must die here, not in a path join.
+        assert!(load_key(Some("../escape")).is_err());
+        assert!(load_key(Some("AAAAAAAAAAAAAAAA")).is_err());
+        assert!(load_key(Some("abc123")).is_err());
     }
 
     #[test]

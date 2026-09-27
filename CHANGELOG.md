@@ -36,7 +36,8 @@ the extension unit instead of in-process scripts.
   policy, so the escape hatch cannot launder tampered bytes. Consent
   files validate their key: a corrupt file reads as absent (the gate
   closes), and a caller-supplied "fingerprint" is accepted only as
-  16 lowercase hex — never as a path out of the store. Origin
+  16 lowercase hex — never as a path out of the store; the same shape
+  check guards tau sign --key and the trust/key stores. Origin
   checks parse the way the HTTP client does (authority ends at
   `/ ? # \`), so userinfo hidden in a query, fragment, or backslash
   cannot smuggle a request past a consented origin.
@@ -89,7 +90,7 @@ the compacted branch), torn-tail recovery, concurrent access, and
 probe verdicts (block, continue, and a trapped probe degrading without
 going dead), and the WASI sandbox boundary (ambient env visible by
 default, empty under --deny-wasi) — restoring
-the environment exactly afterwards. 116 tests, clippy-clean across all
+the environment exactly afterwards. 117 tests, clippy-clean across all
 workspaces.
 
 Performance baseline (docs/perf.md): extension load 202ms cold → 9ms
