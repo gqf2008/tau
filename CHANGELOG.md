@@ -54,7 +54,10 @@
 ### Docs
 
 - `docs/wit-review.md` — full contract review (F1–F10) with the 0.2.0
-  action list; F2 feedback leg / F6 / F7 / F8 landed in this batch.
+  action list; F2 feedback leg / F3 (observe leg) / F5 / F6 / F7 / F8
+  landed in this batch; F4 evaluated and designed
+  (`docs/tool-media.md`, contract 0.3.0), F9 timeout semantics folded
+  into `docs/im-channels.md`.
 - `docs/im-channels.md`, `docs/realtime-av.md` remain design documents
   (unimplemented; code must not precede them).
 

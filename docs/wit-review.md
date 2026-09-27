@@ -70,7 +70,7 @@ extensions that observe (via tau-ext; observe-only)」同样无实现支撑。
 `Agent::observe`）；text_delta/tool_progress 保持 reserved（高频拉取
 订阅设计落地前不接线），`tau probes` 目录列出 wired/reserved 状态。
 
-### F4 [中·全模态] 工具结果只能是文本 —— 已评估，0.3.0 做
+### F4 [中·全模态] 工具结果只能是文本 —— 设计定稿（docs/tool-media.md），0.3.0 实现
 
 证据链：`wit tool-result{content: string}` ↔
 `tau-core ToolOutput{content: String}`（tool.rs:21）↔
@@ -90,8 +90,10 @@ image/audio/video/file 块，但**工具无法返回媒体**——截图工具�
 
 0.3.0 改动面：WIT `tool-result.content: string → list<content>`
 （契约 breaking）；`ToolOutput.content: String → Vec<Content>`；
-convert.rs 映射 + 尺寸上限沿用；provider 边非 image 媒体降级。
-评估完成，实现排 0.3.0。
+convert.rs 映射 + 尺寸上限沿用；provider 边非 image 媒体降级；
+旧 session 文件读兼容（string → [Text]）。设计定稿见
+`docs/tool-media.md`（2026-09-27，jev 裁决：本轮只落设计文档，
+实现排下一轮）。
 
 ### F5 [中·fail-loud] parameters-json 解析失败静默降级为全开放 schema —— 已落地
 
