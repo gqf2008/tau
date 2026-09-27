@@ -47,9 +47,21 @@ cleanup() {
 trap cleanup EXIT
 
 # --- pre-flight -------------------------------------------------------
+# The release.sh example lists must enumerate the SAME set as the
+# EXAMPLES list below — two hand-maintained copies drift silently
+# (LESSON_两处本该一致的逻辑分开维护漂移不报错). Assert equality
+# before building.
+EXAMPLES="upper http-provider mcp-bridge guard echo-provider notifier media-tool streamer ws-echo-bridge feishu-bridge whatsapp-bridge wecom-bridge dingtalk-bridge realtime-echo"
+rel_build=$(sed -n 's/^for ex in \(.*\); do$/\1/p' "$ROOT/scripts/release.sh" | head -1)
+rel_zip=$(sed -n 's/^for ex in \(.*\); do$/\1/p' "$ROOT/scripts/release.sh" | sed -n '2p' | tr '_' '-')
+[ "$(echo $EXAMPLES | tr ' ' '\n' | sort)" = "$(echo $rel_build | tr ' ' '\n' | sort)" ] \
+    || fail "release.sh build list drifted from validate.sh EXAMPLES"
+[ "$(echo $EXAMPLES | tr ' ' '\n' | sort)" = "$(echo $rel_zip | tr ' ' '\n' | sort)" ] \
+    || fail "release.sh zip list drifted from validate.sh EXAMPLES"
+
 step "build release binary + wasm examples"
 cargo build --release -p tau-cli --quiet
-for ex in upper http-provider mcp-bridge guard echo-provider notifier media-tool streamer ws-echo-bridge feishu-bridge whatsapp-bridge wecom-bridge dingtalk-bridge realtime-echo; do
+for ex in $EXAMPLES; do
     cargo build --manifest-path "examples/${ex}/Cargo.toml" \
         --target wasm32-wasip2 --release --quiet
 done

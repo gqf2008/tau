@@ -82,5 +82,5 @@ a partial chain.
 - The wasm example components (`examples/*`, separate workspaces) are
   built from source; their distribution channel is OCI (`tau push`,
   see `docs/oci.md`), not crates.io.
-- `repository`/`homepage` metadata is intentionally unset until the repo
-  gets a public remote — add both to `[workspace.package]` then.
+- `repository`/`homepage` metadata is set (github.com/gqf2008/tau,
+  public since 2026-09).

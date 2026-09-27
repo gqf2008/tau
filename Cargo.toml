@@ -10,14 +10,13 @@ members = [
 exclude = ["examples/upper"]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/gqf2008/tau"
 homepage = "https://github.com/gqf2008/tau"
 keywords = ["agent", "llm", "wasm", "ai", "cli"]
 categories = ["command-line-utilities"]
-# repository/homepage: set when the repo gets a public remote (docs/release.md).
 
 [workspace.dependencies]
 serde = { version = "1", features = ["derive"] }

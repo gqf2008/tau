@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.3.0] — 2026-09-28
 
 ### Added — `ingress` capability (webhook IM platforms, docs/im-channels.md)
 
