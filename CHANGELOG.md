@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+### Added — `ingress` capability (webhook IM platforms, docs/im-channels.md)
+
+- WASI has no listen, so the host binds the consented address:
+  `--ingress <addr:port>` (repeatable; remembered-consent unions and
+  round-trips the list) lets a bridge `ingress.listen(route)`; the host
+  (tiny_http) pushes every request on a registered route into the
+  component's `ingress-handler.handle-request` export SYNCHRONOUSLY and
+  serves its return value as the HTTP response — the push model, no
+  idle-pump window (the ws leg's known limitation). Unregistered paths
+  get 404, an unloaded/trapped instance 503/502; TLS termination belongs
+  to the tunnel in front, signature verification to the component.
+- Contract: bridge world gains `import ingress` (`listen`/`close`) and a
+  MANDATORY `export ingress-handler`; bridges without a webhook leg
+  stub it with 501 (mcp-bridge, ws-echo-bridge, feishu-bridge updated).
+- New example `whatsapp-bridge` + `scripts/wa_mock.py` loopback
+  platform: inbound POST → steer into the session (honest ack — 403
+  when injection is not consented), `after_response` posts the reply to
+  the platform's send API. validate.sh step 5d drives the real REPL
+  over a pty (pywinpty): delivered webhook ack 200 → idle steer wakes a
+  turn → reply POST; refusal leg without `--ingress` never listens.
+- Fix (tau-cli): an injected steer/follow-up arriving while the
+  interactive REPL idles now starts the next turn with the injected
+  message as prompt — previously it queued in the agent's control
+  channel forever because the REPL's select only woke on user input
+  (host-channel control is interposed through the REPL; mid-run
+  forwarding is unchanged, print mode forwards straight through).
+
 ### Breaking — contract `tau:extension@0.3.0` (tool media results, wit-review F4)
 
 - Tool results are **multi-block**: `tool-result.content` is now

@@ -45,6 +45,12 @@ struct BridgeState {
     /// (a trap rebuild drops them with the old state).
     subscriptions: HashMap<u64, StreamSubscription>,
     next_subscription: u64,
+    /// Webhook ingress (docs/im-channels.md): consented listen
+    /// addresses + this bridge's routes/servers. Arc-shared with the
+    /// factory so a trap rebuild keeps the listener (and its routes)
+    /// alive — the server threads dispatch into the SharedBridge, which
+    /// revive() repoints at the fresh instance.
+    ingress: std::sync::Arc<crate::ingress::IngressRegistry>,
 }
 
 impl WasiView for BridgeState {
@@ -168,6 +174,11 @@ pub struct BridgeConsent {
     /// (host.steer / follow-up) — the IM inbound leg. Same gate and same
     /// remembered grant as extensions.
     pub inject: bool,
+    /// Webhook ingress: the `addr:port` list the bridge may listen on
+    /// (CLI `--ingress`; the IM webhook leg for WhatsApp/企微-class
+    /// platforms — docs/im-channels.md). Empty = listen() fails naming
+    /// the missing consent.
+    pub ingress: Vec<String>,
 }
 
 /// Extract the consent origin ("scheme://host[:port]") from an http(s) URL.
@@ -307,6 +318,48 @@ impl bridge_bindings::tau::extension::host::Host for BridgeState {
     }
 }
 
+/// Webhook ingress: consent is the listen address (CLI --ingress);
+/// the registry owns routes/servers and the push dispatch
+/// (docs/im-channels.md). Host stays a pipe.
+impl bridge_bindings::tau::extension::ingress::Host for BridgeState {
+    fn listen(&mut self, route: String) -> Result<(), String> {
+        // Arc<S: listen takes &Arc<Self> for server spawning; clone the
+        // Arc out of the state (the registry outlives any one instance).
+        let registry = self.ingress.clone();
+        registry.listen(&route)
+    }
+
+    fn close(&mut self, route: String) -> Result<(), String> {
+        self.ingress.close(&route)
+    }
+}
+
+/// Push one inbound webhook request into the component's
+/// ingress-handler export, synchronously, under the instance lock. A
+/// trap poisons the guest: revive so the NEXT request lands on a fresh
+/// instance, and answer this one 502 (the platform retries — a retried
+/// webhook is a platform fact, not a loss).
+pub(crate) fn ingress_dispatch(
+    shared: &SharedBridge,
+    request: bridge_bindings::exports::tau::extension::ingress_handler::Request,
+) -> Result<bridge_bindings::exports::tau::extension::ingress_handler::Response, String> {
+    let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
+    let BridgeInstance { store, bindings } = &mut guard.instance;
+    let result = bindings
+        .tau_extension_ingress_handler()
+        .call_handle_request(store, &request);
+    match result {
+        Ok(response) => Ok(response),
+        Err(e) => {
+            guard.revive();
+            Err(format!(
+                "component trapped handling the webhook: {}",
+                crate::compact_wasm_error(&e)
+            ))
+        }
+    }
+}
+
 impl bridge_bindings::tau::extension::process::Host for BridgeState {
     fn spawn(&mut self, argv: Vec<String>) -> Result<u64, String> {
         self.processes.spawn(&argv)
@@ -378,6 +431,19 @@ struct BridgeFactory {
     /// Bumped per instantiation; baked into process handles (see
     /// [`ProcessRegistry`]). Guarded by the SharedBridgeInstance mutex.
     generation: std::cell::Cell<u32>,
+    /// One per load_bridge; the listener survives instance revivals and
+    /// dies with the factory (see Drop).
+    ingress: std::sync::Arc<crate::ingress::IngressRegistry>,
+}
+
+impl Drop for BridgeFactory {
+    fn drop(&mut self) {
+        // The factory is the registry owner whose lifetime tracks the
+        // bridge's: when every tool/probe/CLI handle to this bridge is
+        // gone, the accept loops stop (threads exit within a tick and
+        // drop their Arcs; the registry itself drops with the last).
+        self.ingress.shutdown();
+    }
 }
 
 impl BridgeFactory {
@@ -402,6 +468,7 @@ impl BridgeFactory {
             inject: self.inject,
             subscriptions: HashMap::new(),
             next_subscription: 0,
+            ingress: self.ingress.clone(),
         };
         let mut store = Store::new(&self.engine, state);
         let bindings =
@@ -410,7 +477,7 @@ impl BridgeFactory {
     }
 }
 
-struct SharedBridgeInstance {
+pub(crate) struct SharedBridgeInstance {
     instance: BridgeInstance,
     factory: BridgeFactory,
 }
@@ -426,7 +493,7 @@ impl SharedBridgeInstance {
     }
 }
 
-type SharedBridge = Arc<Mutex<SharedBridgeInstance>>;
+pub(crate) type SharedBridge = Arc<Mutex<SharedBridgeInstance>>;
 
 impl ExtensionHost {
     /// Load a bridge component. `consent` carries everything the bridge is
@@ -462,6 +529,9 @@ impl ExtensionHost {
         let mut linker: Linker<BridgeState> = Linker::new(&self.engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
         bridge_bindings::Bridge::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
+        let ingress = std::sync::Arc::new(crate::ingress::IngressRegistry::new(
+            consent.ingress.clone(),
+        ));
         let factory = BridgeFactory {
             engine: self.engine.clone(),
             component,
@@ -471,6 +541,7 @@ impl ExtensionHost {
             inject: consent.inject,
             consent,
             generation: std::cell::Cell::new(0),
+            ingress,
         };
         let mut instance = factory.instantiate().map_err(|e| ExtError::Load {
             path: path.display().to_string(),
@@ -504,6 +575,15 @@ impl ExtensionHost {
             })?;
 
         let shared: SharedBridge = Arc::new(Mutex::new(SharedBridgeInstance { instance, factory }));
+        // Late-bind the dispatch target: requests arriving between the
+        // listener's first accept and this line answer 503, never
+        // dispatch into a half-built bridge.
+        shared
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .factory
+            .ingress
+            .bind(&shared);
         let mut tools: Vec<Box<dyn Tool>> = Vec::with_capacity(definitions.len());
         for def in definitions {
             let tool_def = crate::tool_def_strict(def.name, def.description, &def.parameters_json)

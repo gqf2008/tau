@@ -49,7 +49,7 @@ trap cleanup EXIT
 # --- pre-flight -------------------------------------------------------
 step "build release binary + wasm examples"
 cargo build --release -p tau-cli --quiet
-for ex in upper http-provider mcp-bridge guard echo-provider notifier media-tool streamer ws-echo-bridge feishu-bridge; do
+for ex in upper http-provider mcp-bridge guard echo-provider notifier media-tool streamer ws-echo-bridge feishu-bridge whatsapp-bridge; do
     cargo build --manifest-path "examples/${ex}/Cargo.toml" \
         --target wasm32-wasip2 --release --quiet
 done
@@ -63,6 +63,7 @@ MEDIA_TOOL="$ROOT/examples/media-tool/target/wasm32-wasip2/release/media_tool.wa
 STREAMER="$ROOT/examples/streamer/target/wasm32-wasip2/release/streamer.wasm"
 WS_ECHO="$ROOT/examples/ws-echo-bridge/target/wasm32-wasip2/release/ws_echo_bridge.wasm"
 FEISHU="$ROOT/examples/feishu-bridge/target/wasm32-wasip2/release/feishu_bridge.wasm"
+WHATSAPP="$ROOT/examples/whatsapp-bridge/target/wasm32-wasip2/release/whatsapp_bridge.wasm"
 [ -f "$UPPER" ] || fail "upper example missing"
 [ -f "$HTTP_PROVIDER" ] || fail "http-provider example missing"
 [ -f "$MCP_BRIDGE" ] || fail "mcp-bridge example missing"
@@ -73,6 +74,7 @@ FEISHU="$ROOT/examples/feishu-bridge/target/wasm32-wasip2/release/feishu_bridge.
 [ -f "$STREAMER" ] || fail "streamer example missing"
 [ -f "$WS_ECHO" ] || fail "ws-echo-bridge example missing"
 [ -f "$FEISHU" ] || fail "feishu-bridge example missing"
+[ -f "$WHATSAPP" ] || fail "whatsapp-bridge example missing"
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
@@ -541,6 +543,20 @@ kill "$IM_MOCK_PID" 2> /dev/null || true
 echo "$OUT" | grep -q "feishu: steer refused: session injection not consented"     || fail "unconsented steer was not refused: $OUT"
 grep -q "IM REPLY: " im_mock2.log     && fail "reply left without inject consent: $(cat im_mock2.log)"
 echo "ok — IM loop closed (ws inbound → steer → turn → reply POST); config-gated identity: unauthorized user ignored; unconsented steer refused"
+
+# --- step 5d: webhook ingress (whatsapp-shaped adapter, docs/im-channels.md)
+# The dual of 5c's ws leg: WASI has no listen, so the host binds the
+# consented --ingress address and pushes each webhook request into the
+# component's ingress-handler export. Delivery lands while the session
+# IDLES — the acceptance must be the interactive REPL over a pty (print
+# mode's sub-second run would be a race), so it needs pywinpty like 11.
+step "5d/11 webhook ingress (host listener → ingress-handler → idle REPL wakes → reply POST)"
+if python -c "import winpty" 2> /dev/null; then
+    mkdir -p "$WORK/wa-e2e"
+    python "$ROOT/scripts/wa_ingress_e2e.py" "$TAU" "$WHATSAPP" "$WORK/wa-e2e"         || fail "whatsapp ingress e2e failed"
+else
+    echo "skip — pywinpty not installed; webhook ingress e2e not run"
+fi
 
 # --- step 6: remembered consent lifecycle ------------------------------
 step "6/11 remembered consent (--remember / --list / --revoke)"

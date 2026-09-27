@@ -94,6 +94,49 @@ drain 积存并 `host::steer` 注入。
   当前回合后触发 turn 2 ⇒ turn 2 的 `after_response` 把回复 POST
   回 mock——全链路只用既有调用点，零新驱动机制。
 
+## `ingress` 能力设计（webhook 平台入站，0.3.0 定稿）
+
+WASI p2 没有 listen ⇒ **宿主起 HTTP 监听，按路由把请求喂给组件**。
+宿主只做请求管道（方法/路径/头/体原样过手），不解析任何平台语义。
+
+**形态（jev 裁决 push_export @ 1.000，2026-09-28）**：推送，不拉取。
+bridge world 加 `import ingress`（`listen`/`close`，consent-gated）
++ `export ingress-handler`（`handle-request(request) -> response`）。
+webhook 由平台主动发起 ⇒ 宿主收请求当即同步调组件，**入站泵问题
+整个消失**（ws 腿「组件只在被调用时才能 drain」的空闲局限不存在；
+host→guest 同步调用是既有原语，probes/tools 同款，含 trap 重建的
+实例互斥锁）。HTTP 响应即组件返回值：WhatsApp 的 200 ack、企微
+callback 的同步回包都自然落地。组件在 handle-request 里
+host::steer 注入会话；回复仍走 after_response → 平台发消息 API。
+否决项：拉取形态（recv/respond-by-request-id）——pending-request
+簿记 + 应答超时 + 空闲不泵局限照搬进一个本可避免它的场景；
+hybrid（listen import + 回调 export 拆两处）——契约面最大。
+
+**宿主 HTTP 服务器（jev 裁决 tiny_http_dep @ 0.890）**：引入
+tiny_http 0.12（钉死版本，依赖变更按仓规视同评审代码）——成熟
+解析、同步模型贴合既有 actor 线程（process/ws 同款）。否决项：
+std::net 手写最小 HTTP/1.1——手写解析器的长期安全维护责任归仓内，
+为零新依赖不值。
+
+### 契约与红线
+
+- 只进 bridge world（IM 适配器是 webhook 的唯一消费者；普通
+  extension 不给监听能力）。`export ingress-handler` 成为必需导出
+  （0.3.0 breaking 列车同班）；无 webhook 的 bridge 补一个恒 501
+  的桩实现（不 listen 就永不会被调用）。
+- consent 维度是**监听地址**（新维度，与 origin 白名单正交）：
+  CLI `--ingress <addr:port>`（可重复）；组件 `listen(route)` 时
+  校验已授权地址，UX 明示「组件要监听 127.0.0.1:8080 的
+  /im/whatsapp」；remembered consent 按指纹携带、merge sticky-on。
+- TLS 终结不在组件也不在宿主 ingress——公网部署由隧道/反代终结，
+  宿主只监听明文回环或内网地址。
+- 请求/响应直通：方法、路径、头表、原始体原样过手；签名校验
+  （WhatsApp 的 X-Hub-Signature-256、企微的 msg_signature）是
+  组件职责——它持有平台 secret，宿主没有也不该有。
+- 与 ws 腿并存不耦合：平台适配器按平台现实二选一。
+- 并发语义：请求在实例互斥锁下同步调组件——组件正执行长 tool 时
+  webhook 排队（平台重试是既有事实，如实记录；不是丢失）。
+
 ## 已知运维坑（来自实机 lesson，直接进适配器设计）
 
 - 飞书长连接断线窗口期会丢消息 ⇒ 入站注入必须补「重连后拉取遗漏」
@@ -211,7 +254,15 @@ agent loop 跑出新回合
       本文「会话/身份映射配置文件格式」节；feishu-bridge 经
       TAU_IM_CONFIG 读文件，endpoint 对照 consent、未知 chat 忽略、
       users.allow fail-closed；validate.sh 5c 加未授权 user 拒绝腿
-- [ ] `ingress` 能力（排到企微/WhatsApp 之前）
+- [x] `ingress` 能力（2026-09-28 落地）：bridge world `import ingress`
+      + 必需 `export ingress-handler`；宿主 tiny_http 监听 consent 的
+      `--ingress <addr:port>`，把每个 webhook 请求同步推进组件导出
+      （push 模型，无 idle 泵窗口）；consent 按监听地址记、可
+      remember/union；`examples/whatsapp-bridge` + `scripts/wa_mock.py`
+      回环；validate.sh 5d 双腿（pty 驱动交互 REPL：deliver→ack 200→
+      idle steer 唤醒回合→reply POST；无 --ingress 时 listen 拒、零回帖）。
+      配套修复：REPL 空闲时注入的 steer/follow-up 现在直接成为下一回合
+      （此前只在运行中转发，空闲注入永远排队——idle-wake gap）
 - [x] validate.sh IM 回环案例（步骤 5c，`scripts/im_mock.py`）：
       注入→steer→turn 2→回帖 POST 全链断言 + 无 --allow-inject 时
       steer 拒、零回帖的拒绝路径

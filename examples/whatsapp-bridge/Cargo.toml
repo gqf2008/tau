@@ -1,0 +1,13 @@
+[package]
+name = "whatsapp-bridge"
+version = "0.1.0"
+edition = "2024"
+description = "Example tau bridge: whatsapp-shaped IM adapter, ingress webhook inbound + steer, after_response outbound (docs/im-channels.md)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.46"
+
+[workspace]

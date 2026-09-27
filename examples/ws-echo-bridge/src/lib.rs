@@ -18,6 +18,7 @@ wit_bindgen::generate!({
     world: "bridge",
 });
 
+use exports::tau::extension::ingress_handler::{Guest as IngressHandler, Request, Response};
 use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
 use tau::extension::types::ResultBlock;
@@ -97,6 +98,19 @@ impl Probes for WsEchoBridge {
             action: Action::Continue,
             payload_json: None,
             reason: None,
+        }
+    }
+}
+
+// The 0.3.0 bridge world makes ingress-handler a mandatory export. This
+// adapter has no webhook leg (it never calls ingress.listen), so nothing
+// can invoke this — the stub is explicit, not dead weight.
+impl IngressHandler for WsEchoBridge {
+    fn handle_request(_request: Request) -> Response {
+        Response {
+            status: 501,
+            headers: Vec::new(),
+            body: b"this bridge has no webhook leg".to_vec(),
         }
     }
 }

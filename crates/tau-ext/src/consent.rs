@@ -44,6 +44,10 @@ pub struct RememberedConsent {
     /// session (`host.steer` / `host.follow-up`). Sticky like wasi_deny.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub inject: bool,
+    /// Webhook ingress: the `addr:port` list this bridge may listen on
+    /// (docs/im-channels.md). Unions on merge like origins.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub ingress: Vec<String>,
 }
 
 impl RememberedConsent {
@@ -55,6 +59,7 @@ impl RememberedConsent {
             && !self.auth_delivery
             && !self.wasi_deny
             && !self.inject
+            && self.ingress.is_empty()
     }
 }
 
@@ -67,6 +72,7 @@ impl From<BridgeConsent> for RememberedConsent {
             auth_delivery: false,
             wasi_deny: false,
             inject: consent.inject,
+            ingress: consent.ingress,
         }
     }
 }
@@ -78,6 +84,7 @@ impl From<RememberedConsent> for BridgeConsent {
             mcp_url: remembered.mcp_url,
             origins: remembered.origins,
             inject: remembered.inject,
+            ingress: remembered.ingress,
         }
     }
 }
@@ -88,6 +95,12 @@ impl From<RememberedConsent> for BridgeConsent {
 pub fn remember_into(existing: RememberedConsent, grant: RememberedConsent) -> RememberedConsent {
     let mut origins = existing.origins;
     origins.extend(grant.origins);
+    let mut ingress = existing.ingress;
+    for addr in grant.ingress {
+        if !ingress.contains(&addr) {
+            ingress.push(addr);
+        }
+    }
     RememberedConsent {
         command: grant.command.or(existing.command),
         mcp_url: grant.mcp_url.or(existing.mcp_url),
@@ -95,6 +108,7 @@ pub fn remember_into(existing: RememberedConsent, grant: RememberedConsent) -> R
         auth_delivery: existing.auth_delivery || grant.auth_delivery,
         wasi_deny: existing.wasi_deny || grant.wasi_deny,
         inject: existing.inject || grant.inject,
+        ingress,
     }
 }
 
@@ -192,6 +206,12 @@ pub fn component_fingerprints(wasm: &[u8]) -> Result<Vec<String>, SignError> {
 pub fn merge(explicit: BridgeConsent, remembered: RememberedConsent) -> BridgeConsent {
     let mut origins = remembered.origins;
     origins.extend(explicit.origins);
+    let mut ingress = remembered.ingress;
+    for addr in explicit.ingress {
+        if !ingress.contains(&addr) {
+            ingress.push(addr);
+        }
+    }
     BridgeConsent {
         command: explicit.command.or(remembered.command),
         mcp_url: explicit.mcp_url.or(remembered.mcp_url),
@@ -199,6 +219,7 @@ pub fn merge(explicit: BridgeConsent, remembered: RememberedConsent) -> BridgeCo
         // Sticky-on like remember_into: a remembered grant is never
         // lifted by omitting the flag (that is what --revoke is for).
         inject: explicit.inject || remembered.inject,
+        ingress,
     }
 }
 
@@ -228,6 +249,7 @@ mod tests {
             auth_delivery: true,
             wasi_deny: false,
             inject: true,
+            ingress: Vec::new(),
         };
         store.save("abc123abc123abc1", &consent).unwrap();
         assert_eq!(store.load("abc123abc123abc1"), Some(consent));
@@ -306,6 +328,7 @@ mod tests {
             auth_delivery: true,
             wasi_deny: false,
             inject: false,
+            ingress: Vec::new(),
         };
         let grant = RememberedConsent {
             command: None,
@@ -314,6 +337,7 @@ mod tests {
             auth_delivery: false,
             wasi_deny: true,
             inject: true,
+            ingress: Vec::new(),
         };
         let merged = remember_into(existing, grant);
         assert_eq!(merged.command, Some(vec!["old".into()]));
@@ -336,6 +360,7 @@ mod tests {
             mcp_url: None,
             origins: ["https://b.example".into()].into_iter().collect(),
             inject: false,
+            ingress: Vec::new(),
         };
         let remembered = RememberedConsent {
             command: Some(vec!["remembered".into()]),
@@ -344,12 +369,47 @@ mod tests {
             auth_delivery: false,
             wasi_deny: false,
             inject: false,
+            ingress: Vec::new(),
         };
         let merged = merge(explicit, remembered);
         assert_eq!(merged.command, Some(vec!["explicit".into()]));
         assert_eq!(merged.mcp_url, Some("https://a.example/mcp".into()));
         assert!(merged.origins.contains("https://a.example"));
         assert!(merged.origins.contains("https://b.example"));
+    }
+
+    #[test]
+    fn ingress_unions_and_round_trips() {
+        // BridgeConsent -> RememberedConsent -> BridgeConsent keeps the
+        // listen addresses; merge unions explicit over remembered
+        // without duplicates (a repeated --ingress is idempotent).
+        let consent = BridgeConsent {
+            ingress: vec!["127.0.0.1:8080".into()],
+            ..BridgeConsent::default()
+        };
+        let remembered = RememberedConsent::from(consent);
+        assert_eq!(remembered.ingress, vec!["127.0.0.1:8080".to_string()]);
+        assert!(!remembered.is_empty());
+        let back = BridgeConsent::from(remembered.clone());
+        assert_eq!(back.ingress, vec!["127.0.0.1:8080".to_string()]);
+
+        let explicit = BridgeConsent {
+            ingress: vec!["127.0.0.1:8080".into(), "127.0.0.1:9090".into()],
+            ..BridgeConsent::default()
+        };
+        let merged = merge(explicit, remembered);
+        assert_eq!(
+            merged.ingress,
+            vec!["127.0.0.1:8080".to_string(), "127.0.0.1:9090".to_string()]
+        );
+
+        // Serde back-compat: a record written before the field existed
+        // reads with an empty list.
+        let legacy: RememberedConsent =
+            serde_json::from_str(r#"{"command":null,"mcp_url":null,"origins":[],"auth_delivery":false,"wasi_deny":false,"inject":false}"#)
+                .unwrap();
+        assert!(legacy.ingress.is_empty());
+        assert!(legacy.is_empty());
     }
 
     #[test]

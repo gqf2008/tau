@@ -74,6 +74,7 @@ mod bridge_bindings {
 
 pub mod bridge;
 pub mod consent;
+mod ingress;
 pub mod convert;
 mod http;
 pub mod oci;

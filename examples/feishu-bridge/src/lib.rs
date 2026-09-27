@@ -33,6 +33,7 @@ wit_bindgen::generate!({
 
 use std::sync::Mutex;
 
+use exports::tau::extension::ingress_handler::{Guest as IngressHandler, Request, Response};
 use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
 use tau::extension::types::{Content, Message, Role};
@@ -344,6 +345,19 @@ impl Probes for FeishuBridge {
             _ => {}
         }
         continue_()
+    }
+}
+
+// The 0.3.0 bridge world makes ingress-handler a mandatory export. This
+// adapter has no webhook leg (it never calls ingress.listen), so nothing
+// can invoke this — the stub is explicit, not dead weight.
+impl IngressHandler for FeishuBridge {
+    fn handle_request(_request: Request) -> Response {
+        Response {
+            status: 501,
+            headers: Vec::new(),
+            body: b"this bridge has no webhook leg".to_vec(),
+        }
     }
 }
 

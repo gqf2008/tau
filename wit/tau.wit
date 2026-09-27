@@ -434,6 +434,62 @@ interface ws {
     close: func(handle: u64) -> result<_, string>;
 }
 
+/// Webhook ingress: a scoped LISTEN capability for bridge components
+/// (IM webhook platforms — WhatsApp Business Cloud, 企业微信 callback;
+/// docs/im-channels.md). WASI p2 has no listen, so the host runs the
+/// HTTP server and pushes each request into the component's
+/// `ingress-handler` export synchronously; the export's return value IS
+/// the HTTP response (the platform's ack / synchronous reply). The host
+/// is a pipe: method/path/headers/body pass through untouched, signature
+/// verification against platform secrets is the component's job (it
+/// holds the secret; the host never does). Consent is the listen
+/// ADDRESS (CLI --ingress), orthogonal to the origin allowlist.
+interface ingress {
+    /// Register `route` (an absolute path, e.g. "/im/whatsapp") on the
+    /// consented listen address. Fails naming the address if no
+    /// --ingress consent covers it. One registration per route; a
+    /// duplicate errors instead of shadowing.
+    listen: func(route: string) -> result<_, string>;
+
+    /// Stop serving `route` and release it. A route that was never
+    /// registered errors (same honesty as ws.close).
+    close: func(route: string) -> result<_, string>;
+}
+
+/// The push half of webhook ingress: the host calls handle-request once
+/// per inbound HTTP request on a registered route, synchronously, under
+/// the instance lock (a component mid-tool-call queues the webhook —
+/// platforms retry, that is a fact of the platform, not a loss). The
+/// returned response is written back verbatim. A bridge with no webhook
+/// leg still exports this (the 0.3.0 world makes it mandatory) with a
+/// stub returning 501 — nothing calls it unless the component listened.
+interface ingress-handler {
+    /// One inbound HTTP request.
+    record request {
+        /// The route that matched (the listen() argument).
+        route: string,
+        /// Uppercase method verb, passed through verbatim.
+        method: string,
+        /// The request path (== route today; a route is an exact path —
+        /// prefix matching is a future contract item, not guessed here).
+        path: string,
+        /// Headers as received (lower-cased names by the HTTP layer).
+        headers: list<tuple<string, string>>,
+        /// Raw body bytes.
+        body: list<u8>,
+    }
+
+    /// The HTTP response to write back.
+    record response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    handle-request: func(request: request) -> response;
+}
+
+
 /// Bridge components translate an external tool protocol (MCP today) into
 /// tau tools. The host knows nothing about that protocol; it only grants
 /// the capabilities the bridge declares (process spawn, scoped http).
@@ -445,12 +501,18 @@ interface ws {
 /// + the host channel (steer/follow-up inbound injection, consent-gated
 /// the same way as extensions) + probes (after_response outbound
 /// observation; a bridge with nothing to observe returns an empty
-/// points() list).
+/// points() list). Later on the same 0.3.0 train (docs/im-channels.md
+/// ingress section): webhook platforms get import ingress (consent-gated
+/// listen by ADDRESS) + export ingress-handler (host pushes each inbound
+/// request in synchronously; the return value is the HTTP response; a
+/// bridge without a webhook leg exports a 501 stub).
 world bridge {
     import process;
     import http;
     import ws;
     import host;
+    import ingress;
     export tools;
     export probes;
+    export ingress-handler;
 }

@@ -130,6 +130,15 @@ struct Cli {
     #[arg(long)]
     allow_inject: bool,
 
+    /// Consent to webhook ingress for the bridge (docs/im-channels.md):
+    /// it may listen on the given addr:port (repeatable) and receive
+    /// inbound HTTP requests pushed into its ingress-handler export —
+    /// the WhatsApp/企微-class webhook leg. The consent names the
+    /// ADDRESS (orthogonal to the origin allowlist); TLS is terminated
+    /// by the tunnel in front, this listener speaks plain HTTP.
+    #[arg(long)]
+    ingress: Vec<String>,
+
     /// Persist this run's capability grants — bridge command/url/origins,
     /// provider credential delivery, WASI deny — under each loaded
     /// component's signing fingerprint; later runs recall them without
@@ -231,6 +240,9 @@ async fn run_sub(sub: Sub) -> Result<()> {
                         }
                         if consent.auth_delivery {
                             println!("  auth_delivery: true");
+                        }
+                        for addr in &consent.ingress {
+                            println!("  ingress: listen on {addr}");
                         }
                         if consent.inject {
                             println!("  inject: session injection (steer/follow-up)");
@@ -650,12 +662,16 @@ async fn main() -> Result<()> {
         // Remembered consent: recalled per signing fingerprint; explicit
         // flags win per field, origins union. Unsigned components have no
         // fingerprint — no recall, no remembering.
+        if !cli.ingress.is_empty() {
+            eprintln!("[tau]   consent: may listen for webhooks on {}", cli.ingress.join(", "));
+            explicit.ingress = cli.ingress.clone();
+        }
         let bytes = std::fs::read(path).with_context(|| format!("reading {}", path.display()))?;
         let (consent, fingerprint, remembered) = recall_consent(&bytes, explicit);
         anyhow::ensure!(
-            consent.command.is_some() || consent.mcp_url.is_some(),
+            consent.command.is_some() || consent.mcp_url.is_some() || !consent.ingress.is_empty(),
             concat!(
-                "--mcp-bridge requires --mcp-command and/or --mcp-url, ",
+                "--mcp-bridge requires --mcp-command, --mcp-url and/or --ingress, ",
                 "or remembered consent (sign the component and pass --remember once)"
             )
         );
