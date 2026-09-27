@@ -49,6 +49,7 @@ pub(crate) async fn interactive(
     history: Vec<Message>,
     base: Option<String>,
     session_payload: serde_json::Value,
+    inject: UnboundedReceiver<Control>,
 ) -> Result<()> {
     let agent = Arc::new(agent);
     let (line_tx, line_rx) = unbounded_channel();
@@ -127,6 +128,7 @@ pub(crate) async fn interactive(
         line_rx,
         print.as_ref(),
         Some(session_payload.clone()),
+        inject,
     )
     .await;
     if result.is_ok() {
@@ -142,6 +144,10 @@ pub(crate) async fn interactive(
 /// The REPL loop, factored for tests: lines arrive on a channel, rendered
 /// output goes to `print`. `base` seeds the parent of the next append (a
 /// fork base); None = store head.
+// The REPL loop's full wiring (channels in, printer out, session
+// payload, injection receiver) is the parameter list — bundling it into
+// a struct would only rename the same eight slots at nine call sites.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn drive(
     agent: Arc<Agent>,
     mut store: JsonlStore,
@@ -150,6 +156,7 @@ pub(crate) async fn drive(
     mut lines: UnboundedReceiver<LineEvent>,
     print: impl Fn(&str) + Send + Sync,
     session_start: Option<serde_json::Value>,
+    mut inject: UnboundedReceiver<Control>,
 ) -> Result<()> {
     // Renderer: another event-bus subscriber, formatting events into
     // complete lines for the printer.
@@ -393,6 +400,34 @@ pub(crate) async fn drive(
                 }
                 Some(LineEvent::Eof) | None => break,
             },
+            injected = inject.recv() => match injected {
+                // The host channel's injection leg (host.steer/follow-up
+                // from an extension or IM bridge). Mid-run it joins the
+                // agent's control channel unchanged (steer lands after
+                // the current turn, follow-up after the run). IDLE, the
+                // message IS the next turn — an inbound IM wakes the
+                // agent instead of sitting in a queue nobody drains
+                // (docs/im-channels.md: the push model's reason to exist).
+                Some(control) => match control {
+                    Control::Steer(message) | Control::FollowUp(message) if !running => {
+                        print(&format!("[tau] steer: {}", message.text()));
+                        let agent = agent.clone();
+                        let turn_history = history.clone();
+                        let done_tx = done_tx.clone();
+                        tokio::spawn(async move {
+                            let result = agent.run(&turn_history, message).await;
+                            let _ = done_tx.send(result);
+                        });
+                        running = true;
+                    }
+                    other => {
+                        let _ = agent.control().send(other);
+                    }
+                },
+                // Every sender gone (the host channel is dropped): the
+                // REPL's own input still works, so just disarm this arm.
+                None => inject.close(),
+            },
             rendered = render_rx.recv() => {
                 if let Some(line) = rendered {
                     print(&line);
@@ -530,7 +565,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("two".into())).unwrap();
@@ -549,6 +584,51 @@ mod tests {
         assert_eq!(branch.len(), 4);
         assert_eq!(branch[0].text(), "one");
         assert_eq!(branch[2].text(), "two");
+    }
+
+    /// An injected steer while the REPL idles IS the next turn: the IM
+    /// push path (docs/im-channels.md) must wake the agent, not sit in
+    /// a queue nobody drains while the select waits on user input.
+    #[tokio::test]
+    async fn idle_injection_starts_a_turn() {
+        let (_dir, store) = store();
+        let agent = Arc::new(Agent::new(Box::new(StaticModel), ToolRegistry::new()));
+        let capture = Arc::new(Capture {
+            lines: Mutex::new(Vec::new()),
+            ready: Notify::new(),
+        });
+        let (tx, rx) = unbounded_channel();
+        let (inject_tx, inject_rx) = unbounded_channel();
+        let task = tokio::spawn(drive(
+            agent,
+            store,
+            Vec::new(),
+            None,
+            rx,
+            capture.printer(),
+            None,
+            inject_rx,
+        ));
+        // No typed line at all: the injection alone must run the turn.
+        inject_tx
+            .send(Control::Steer(Message::user("from the IM platform")))
+            .unwrap();
+        capture.ready.notified().await;
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        let text = capture.text();
+        assert!(
+            text.contains("[tau] steer: from the IM platform"),
+            "output: {text}"
+        );
+        assert!(text.contains("tau is alive"), "output: {text}");
+
+        let store = JsonlStore::open(_dir.path().join("session.jsonl")).unwrap();
+        let head = store.head().unwrap().id.clone();
+        let branch = store.active_branch(&head).unwrap();
+        assert_eq!(branch.len(), 2);
+        assert_eq!(branch[0].text(), "from the IM platform");
     }
 
     /// The session_start payload interactive() hands over fires once the
@@ -588,6 +668,7 @@ mod tests {
             rx,
             capture.printer(),
             Some(serde_json::json!({ "session": "s.jsonl", "model": "demo" })),
+            unbounded_channel().1,
         ));
         tx.send(LineEvent::Line("/quit".into())).unwrap();
         task.await.unwrap().unwrap();
@@ -615,7 +696,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1));
 
         tx.send(LineEvent::Line("start".into())).unwrap();
         started.notified().await; // model is mid-stream now
@@ -652,7 +733,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("two".into())).unwrap();
@@ -700,7 +781,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("/compact".into())).unwrap();
@@ -750,7 +831,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1));
         tx.send(LineEvent::Line("/help".into())).unwrap();
         tx.send(LineEvent::Line("/bogus".into())).unwrap();
         tx.send(LineEvent::Line("/quit".into())).unwrap();
@@ -803,7 +884,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1));
         tx.send(LineEvent::Line("hi".into())).unwrap();
         wait_for(&capture, "run failed: model error: boom").await;
         // The loop survived: the next prompt runs and completes.
@@ -833,7 +914,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("two".into())).unwrap();

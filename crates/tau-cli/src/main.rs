@@ -780,7 +780,13 @@ async fn main() -> Result<()> {
     // wire its sinks now so host.notify/emit reach this bus and
     // host.steer/follow-up reach this control channel. Every loaded
     // extension shares the wiring, including trap-rebuilt instances.
-    host.wire_host_channel(agent.bus(), agent.control());
+    // The control channel is interposed: injections land in inject_rx
+    // first. Interactive mode hands the receiver to the REPL, which
+    // forwards mid-run and — crucially — turns an idle injection into
+    // the next turn's prompt (an inbound IM wakes the agent;
+    // docs/im-channels.md). Print mode forwards straight through.
+    let (inject_tx, inject_rx) = tokio::sync::mpsc::unbounded_channel::<tau_core::Control>();
+    host.wire_host_channel(agent.bus(), inject_tx);
     if let Some(system) = cli.system {
         agent = agent.system(system);
     }
@@ -855,9 +861,20 @@ async fn main() -> Result<()> {
     }
 
     if interactive {
-        return repl::interactive(agent, store, history, base, session_payload).await;
+        return repl::interactive(agent, store, history, base, session_payload, inject_rx).await;
     }
     let prompt_text = cli.print.expect("print mode checked above");
+
+    // Print mode: no idle REPL to wake, so injections keep their
+    // original semantics — straight into the agent's control channel
+    // (a mid-run steer lands after the current turn).
+    let mut inject_rx = inject_rx;
+    let inject_control = agent.control();
+    tokio::spawn(async move {
+        while let Some(control) = inject_rx.recv().await {
+            let _ = inject_control.send(control);
+        }
+    });
 
     let parent = base.or_else(|| store.head().map(|h| h.id.clone()));
 
