@@ -93,7 +93,9 @@ Implement `exports::tau::extension::tools::Guest`:
 
 - `definitions()` — called **once at load time**. Each definition is a
   name, a description the model reads when deciding to call, and a JSON
-  Schema (serialized) for the arguments.
+  Schema (serialized) for the arguments. A `parameters-json` that does
+  not parse **fails the whole load**, naming the tool — a broken schema
+  is never silently widened to an open one (wit-review F5).
 - `execute(name, arguments-json)` — called per tool call. Return
   `ToolResult { content, is_error }`; the content string goes back to
   the model as the tool result. Never panic: a trap kills the load, but

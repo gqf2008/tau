@@ -23,6 +23,10 @@
   instead of aliasing a new child.
 - Load errors name contract-version mismatches ("component targets
   tau:extension@0.1.0; this host requires @0.2.0 — rebuild…").
+- A `parameters-json` that does not parse **fails the whole load**,
+  naming the tool (extension and bridge paths alike); the 0.1.0 silent
+  fallback to an open `{"type": "object"}` schema is gone
+  (wit-review F5).
 - Components built against 0.1.0 must be rebuilt; no dual-version
   linking (0.x semantics; docs/host-channel.md 兼容性).
 

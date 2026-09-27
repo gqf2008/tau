@@ -1,0 +1,13 @@
+[package]
+name = "bad-schema"
+version = "0.1.0"
+edition = "2024"
+description = "Negative fixture: a tau extension whose parameters-json is invalid; the host must refuse to load it"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.46"
+
+[workspace]

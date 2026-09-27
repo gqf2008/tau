@@ -594,20 +594,18 @@ impl ExtensionHost {
 
         let shared: Shared = Arc::new(Mutex::new(SharedInstance { instance, factory }));
 
-        let tools: Vec<Box<dyn Tool>> = definitions
-            .into_iter()
-            .map(|def| {
-                Box::new(WasmTool {
-                    def: ToolDef {
-                        name: def.name,
-                        description: def.description,
-                        parameters: serde_json::from_str(&def.parameters_json)
-                            .unwrap_or_else(|_| serde_json::json!({ "type": "object" })),
-                    },
-                    shared: shared.clone(),
-                }) as Box<dyn Tool>
-            })
-            .collect();
+        let mut tools: Vec<Box<dyn Tool>> = Vec::with_capacity(definitions.len());
+        for def in definitions {
+            let tool_def = tool_def_strict(def.name, def.description, &def.parameters_json)
+                .map_err(|reason| ExtError::Load {
+                    path: path.display().to_string(),
+                    reason,
+                })?;
+            tools.push(Box::new(WasmTool {
+                def: tool_def,
+                shared: shared.clone(),
+            }) as Box<dyn Tool>);
+        }
 
         let points: Vec<ProbePoint> = points
             .iter()
@@ -632,6 +630,26 @@ impl ExtensionHost {
             probes,
         })
     }
+}
+
+/// Build a ToolDef from a component's declaration, strictly: a
+/// parameters-json that does not parse fails the whole load, naming the
+/// tool (wit-review F5 — the trust spine is fail-closed everywhere; a
+/// silent fallback to an open schema would let the model free-wheel
+/// arguments past a broken contract).
+pub(crate) fn tool_def_strict(
+    name: String,
+    description: String,
+    parameters_json: &str,
+) -> Result<ToolDef, String> {
+    let parameters = serde_json::from_str(parameters_json).map_err(|e| {
+        format!("tool '{name}' has an invalid parameters-json schema: {e}")
+    })?;
+    Ok(ToolDef {
+        name,
+        description,
+        parameters,
+    })
 }
 
 struct WasmTool {
@@ -1204,5 +1222,62 @@ mod large_payload_tests {
             }
         }
         assert_eq!(text, "still alive ");
+    }
+}
+
+#[cfg(test)]
+mod schema_strictness_tests {
+    use std::path::PathBuf;
+
+    fn artifact() -> Option<PathBuf> {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/bad-schema/target/wasm32-wasip2/release/bad_schema.wasm");
+        path.exists().then_some(path)
+    }
+
+    #[test]
+    fn valid_parameters_json_builds_a_tool_def() {
+        let def = super::tool_def_strict(
+            "upper".into(),
+            "shout".into(),
+            r#"{"type": "object", "properties": {"text": {"type": "string"}}}"#,
+        )
+        .expect("valid schema");
+        assert_eq!(def.name, "upper");
+        assert_eq!(def.parameters["type"], "object");
+    }
+
+    #[test]
+    fn invalid_parameters_json_names_the_tool() {
+        let err = super::tool_def_strict("bad_schema".into(), "d".into(), "this is not json {")
+            .expect_err("invalid schema must be refused");
+        assert!(err.contains("bad_schema"), "tool not named: {err}");
+        assert!(err.contains("parameters-json"), "field not named: {err}");
+    }
+
+    #[test]
+    fn empty_parameters_json_is_invalid() {
+        assert!(super::tool_def_strict("t".into(), "d".into(), "").is_err());
+    }
+
+    /// End-to-end: a component declaring an invalid parameters-json is
+    /// refused at load (not silently widened to an open schema), and the
+    /// load error names the broken tool.
+    #[test]
+    fn a_component_with_an_invalid_schema_is_refused_at_load() {
+        let Some(path) = artifact() else {
+            eprintln!("skipping: bad_schema.wasm not built");
+            return;
+        };
+        let host = super::ExtensionHost::new();
+        let shown = match host.load(&path) {
+            Err(e) => e.to_string(),
+            Ok(_) => panic!("load must fail closed"),
+        };
+        assert!(shown.contains("bad_schema"), "tool not named: {shown}");
+        assert!(
+            shown.contains("invalid parameters-json"),
+            "reason not named: {shown}"
+        );
     }
 }

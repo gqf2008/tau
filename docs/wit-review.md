@@ -79,14 +79,18 @@ image/audio/video/file 块，但**工具无法返回媒体**——截图工具�
 处置：0.3.0 评估项。改动面到 session 线格式（与 pi 的兼容性），
 动手前先查 pi 的 ToolResult 线格式是否支持多块内容。
 
-### F5 [中·fail-loud] parameters-json 解析失败静默降级为全开放 schema
+### F5 [中·fail-loud] parameters-json 解析失败静默降级为全开放 schema —— 已落地
 
-证据：`lib.rs:426`——`.unwrap_or_else(|_| json!({"type":"object"}))`。
+证据（修复前）：`.unwrap_or_else(|_| json!({"type":"object"}))`。
 组件给了坏 schema，宿主静默当成「任意对象」，模型自由发挥参数。
 与信任体系全线的 fail-closed 原则不一致（gc 坏路径、坏签名、坏
 consent 文件全部 fail-closed，唯独这里 fail-open）。
 
-处置：load 期警告（渲染层可见）或直接拒载，0.2.x 即可改，不等契约。
+处置（2026-09-27 落地，随 0.2.0 批次）：**拒载并点名工具**（jev
+裁决：strict→lenient 是单向门，且与 provider --model 拒载先例一致）。
+`tau-ext::tool_def_strict` 统一 extension 与 bridge 两个加载点；
+负面夹具 `examples/bad-schema`（永不发布）+ 单元测试 +
+validate.sh 断言三重验收。
 
 ### F6 [低·一致性] `events.emit` 无返回 vs 0.2.0 设计全 result
 
@@ -129,7 +133,7 @@ idle 超时的处置语义（bridge 长连是断线敏感场景，参照飞书�
 1. F2/F6：`host` 接口 + `events.emit` 全部返回 `result`；host-channel.md
    补观测腿设计（observe-probe 点 + 高频拉取订阅）。
 2. F3：probes.md/events.md 的未实现段落已标注；实现并入观测腿。
-3. F5：parameters-json 坏 schema fail-loud（可先行，不等契约）。
+3. ~~F5~~：parameters-json 坏 schema 拒载并点名工具（已落地）。
 4. F7/F8：hooks→probes 正名、kill 返回 result、句柄代数，随 0.2.0。
 5. F1：ambient 侧门处置（A/B/C）留用户拍板，0.3.0 决策项。
 6. F4：工具媒体结果，0.3.0 评估项（先查 pi 线格式）。
@@ -157,6 +161,7 @@ idle 超时的处置语义（bridge 长连是断线敏感场景，参照飞书�
   （`AgentEvent::ExtensionNotice`/`ExtensionFact`），steer/follow-up
   过 consent 新门类 `inject`（--allow-inject / --remember），
   enqueue-only 走控制通道既有 checkpoint。load 错误点名契约版本错配。
+  F5 同批落地：坏 parameters-json 拒载并点名工具。
   F2 观测腿的高频拉取订阅仍是设计项。models.run 的 request-json
   **保持 JSON**（评审确认）：provider 的职责是翻译到厂商 JSON 线格式，
   本路径无热路径，类型化收益为零；若未来反序列化成本显现再评估。

@@ -833,6 +833,17 @@ else
     echo "skip — dist copy of a 0.1.0-contract component not found"
 fi
 
+# A component declaring an invalid parameters-json is refused at load,
+# naming the broken tool (wit-review F5 — never degrade to an open schema).
+BAD_SCHEMA="$ROOT/examples/bad-schema/target/wasm32-wasip2/release/bad_schema.wasm"
+if [ ! -f "$BAD_SCHEMA" ]; then
+    cargo build --manifest-path "$ROOT/examples/bad-schema/Cargo.toml"         --target wasm32-wasip2 --release --quiet
+fi
+OUT="$("$TAU" --allow-unsigned -e "$BAD_SCHEMA" --demo -p "hi" 2>&1)" &&     fail "bad-schema component loaded: $OUT"
+echo "$OUT" | grep -q "tool 'bad_schema'" || fail "broken tool not named: $OUT"
+echo "$OUT" | grep -q "invalid parameters-json" || fail "reason not named: $OUT"
+echo "ok — invalid parameters-json refused at load, tool named"
+
 # --- step 11: interactive REPL over a real pty -------------------------
 step "11/11 interactive REPL (pty: banner, turn, /help, Ctrl-C, /quit, history)"
 if python -c "import winpty" 2> /dev/null; then

@@ -349,20 +349,19 @@ impl ExtensionHost {
             })?;
 
         let shared: SharedBridge = Arc::new(Mutex::new(SharedBridgeInstance { instance, factory }));
-        Ok(definitions
-            .into_iter()
-            .map(|def| {
-                Box::new(BridgeTool {
-                    def: ToolDef {
-                        name: def.name,
-                        description: def.description,
-                        parameters: serde_json::from_str(&def.parameters_json)
-                            .unwrap_or_else(|_| serde_json::json!({ "type": "object" })),
-                    },
-                    shared: shared.clone(),
-                }) as Box<dyn Tool>
-            })
-            .collect())
+        let mut tools: Vec<Box<dyn Tool>> = Vec::with_capacity(definitions.len());
+        for def in definitions {
+            let tool_def = crate::tool_def_strict(def.name, def.description, &def.parameters_json)
+                .map_err(|reason| ExtError::Load {
+                    path: path.display().to_string(),
+                    reason,
+                })?;
+            tools.push(Box::new(BridgeTool {
+                def: tool_def,
+                shared: shared.clone(),
+            }) as Box<dyn Tool>);
+        }
+        Ok(tools)
     }
 }
 
