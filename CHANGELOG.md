@@ -1,6 +1,10 @@
 # Changelog
 
-## [Unreleased]
+## [0.2.0] — 2026-09-27
+
+Examples-and-docs-only release: the five crates are byte-identical
+to 0.1.0 in code; the version bump carries the multi-language example
+suite into the tagged tree and the dist zip.
 
 ### Added
 

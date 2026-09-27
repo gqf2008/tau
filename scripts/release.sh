@@ -42,6 +42,14 @@ for ex in upper echo_provider mcp_bridge http_provider guard; do
     cp "${wasm}" "${DIST}/examples/"
 done
 
+# Prebuilt multi-language examples (built by their own build.sh, which needs
+# non-cargo toolchains): ship the small ones so a stranger can load-test
+# without any toolchain; python/js/ts stay build-it-yourself (12-18MB each,
+# one pip/npx command — see docs/wasm-languages.md). Copy when present.
+for wasm in examples/c-upper/target/c_upper.wasm             examples/cpp-upper/target/cpp_upper.wasm             examples/go-upper/target/go_upper.wasm; do
+    [ -f "${wasm}" ] && cp "${wasm}" "${DIST}/examples/"         || echo "note: ${wasm} not built, skipping"
+done
+
 # The zip ships UNSIGNED components (README says so): a cargo no-op build
 # would otherwise copy whatever is in target/ — including artifacts signed
 # locally during development — and a stranger's tau would then refuse them

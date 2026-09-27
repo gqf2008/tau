@@ -10,7 +10,7 @@ members = [
 exclude = ["examples/upper"]
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 license = "MIT"
 keywords = ["agent", "llm", "wasm", "ai", "cli"]

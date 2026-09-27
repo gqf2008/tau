@@ -1,7 +1,11 @@
 # Releasing tau to crates.io
 
 Five publishable crates, one workspace version (`[workspace.package]
-version` in the root `Cargo.toml` — bump it once, every crate follows).
+version` in the root `Cargo.toml`). Bump it once, then also bump the
+`version = "x.y.z"` pins on the inter-crate path deps in
+`crates/*/Cargo.toml` (tau-core/tau-openai/tau-anthropic/tau-ext edges) —
+cargo refuses to resolve otherwise. `cargo check --workspace` then
+refreshes the lockfile.
 0.x semantics: any minor bump may break.
 
 Publish order (each depends on the previous being live on crates.io):
