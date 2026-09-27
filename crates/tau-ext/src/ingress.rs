@@ -156,6 +156,15 @@ fn serve_loop(registry: Arc<IngressRegistry>, server: tiny_http::Server) {
 fn dispatch(registry: &Arc<IngressRegistry>, mut request: tiny_http::Request) {
     let url = request.url().to_string();
     let path = url.split(['?', '#']).next().unwrap_or("/").to_string();
+    // The query passes through RAW (pipe doctrine): signature schemes
+    // live in it (wecom msg_signature), and parsing is the component's
+    // semantics, not the host's.
+    let query = url
+        .split('#')
+        .next()
+        .and_then(|no_frag| no_frag.split_once('?'))
+        .map(|(_, q)| q.to_string())
+        .unwrap_or_default();
     let respond = |request: tiny_http::Request,
                    status: u16,
                    headers: Vec<(String, String)>,
@@ -207,6 +216,7 @@ fn dispatch(registry: &Arc<IngressRegistry>, mut request: tiny_http::Request) {
         route: path.clone(),
         method,
         path,
+        query,
         headers,
         body,
     };

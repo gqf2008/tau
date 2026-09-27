@@ -473,6 +473,12 @@ interface ingress-handler {
         /// The request path (== route today; a route is an exact path —
         /// prefix matching is a future contract item, not guessed here).
         path: string,
+        /// The raw query string exactly as received (no leading `?`,
+        /// empty when absent) — NOT parsed: percent-decoding, repeated
+        /// keys and pair order are the component's semantics (signature
+        /// schemes like wecom's msg_signature live in the query, and
+        /// the host is a pipe).
+        query: string,
         /// Headers as received (lower-cased names by the HTTP layer).
         headers: list<tuple<string, string>>,
         /// Raw body bytes.
