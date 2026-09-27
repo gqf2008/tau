@@ -33,7 +33,12 @@ it becomes a blocked tool result handed back to the model, and
 | 8 | `before_compaction` | `{"reason": "manual", "messages": [Message]}` | continue / replace{messages} / block{reason} | custom summarizer (replace the message set the summarizer sees); veto compaction during a critical phase |
 | 9 | `before_navigation` | `{"target": entry-id, "summary": string — first line of the target's message}` | continue / replace{target} / block{reason} | policy: veto rewinding past a critical point; redirect navigation to a sanctioned entry |
 
-## Session lifecycle (observe-only in v0)
+## Session lifecycle (**not implemented in v0.1.0/0.2.0** — see
+       `docs/wit-review.md` F3; lands with the observe leg of
+       `docs/host-channel.md`)
+
+The points below are a design commitment, not shipping code: `ProbePoint`
+has only the nine wired points above and no guest can register these today.
 
 | point | payload |
 |-------|---------|

@@ -19,7 +19,8 @@ decision trail — the two channels never diverge.
 ## Who subscribes
 
 - the CLI renderer (one task, prints text deltas and tool activity);
-- wasm extensions that observe (via tau-ext; observe-only, never blocking);
+- (planned, **not implemented** — `docs/wit-review.md` F2/F3) wasm
+  extensions that observe (via tau-ext; observe-only, never blocking);
 - telemetry / session recording (future), all without touching the loop.
 
 Subscribers cannot wedge the harness: the bus is bounded
