@@ -14,17 +14,20 @@ Prints "im mock ready PORT" once listening.
 import base64
 import hashlib
 import json
+import os
 import struct
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 GUID = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
+# The sender is parameterizable so validate.sh can exercise the identity
+# allowlist's refusal leg (IM_MOCK_USER=intruder).
 INBOUND = json.dumps(
     {
         "type": "message",
         "chat_id": "loopback-c1",
-        "user": "loopback-user",
+        "user": os.environ.get("IM_MOCK_USER", "loopback-user"),
         "text": "ping from the IM platform",
     }
 )

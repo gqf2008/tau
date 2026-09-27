@@ -489,13 +489,38 @@ IM_PORT=$(sed -n 's/^im mock ready //p' im_mock.log)
 [ -n "$IM_PORT" ] || fail "im mock did not start: $(cat im_mock.log)"
 # Consented: ws origin covers the connect AND the reply POST (same
 # origin), --allow-inject consents the steer. Semantic anchors only —
-# the faux model owns the reply wording.
-OUT="$("$TAU" --allow-unsigned --mcp-bridge "$FEISHU"     --mcp-url "ws://127.0.0.1:$IM_PORT/im" --allow-inject --demo -p "hi" 2>&1)" || fail "im run: $OUT"
+# the faux model owns the reply wording. The mapping config file
+# (docs/im-channels.md) is written once the mock's port is known — the
+# channel endpoint must equal the consented TAU_MCP_URL.
+cat > im-config.json <<CONFIG
+{"version": 1, "channels": [{"id": "feishu-loopback", "platform": "feishu",
+  "endpoint": "ws://127.0.0.1:$IM_PORT/im",
+  "chats": {"loopback-c1": {"session": ".tau/sessions/feishu-loopback-c1.jsonl", "threads": "branch"}},
+  "users": {"allow": ["loopback-user"]}}]}
+CONFIG
+OUT="$(TAU_IM_CONFIG="$WORK/im-config.json" "$TAU" --allow-unsigned --mcp-bridge "$FEISHU"     --mcp-url "ws://127.0.0.1:$IM_PORT/im" --allow-inject --demo -p "hi" 2>&1)" || fail "im run: $OUT"
 echo "$OUT" | grep -q "steer: .IM chat loopback-c1"     || fail "IM message was not steered into the session: $OUT"
+echo "$OUT" | grep -q "chat loopback-c1 → .tau/sessions/feishu-loopback-c1.jsonl"     || fail "session mapping did not come from the config file: $OUT"
 echo "$OUT" | grep -q "feishu: reply posted to loopback-c1"     || fail "reply was not posted back: $OUT"
 grep -q "IM REPLY: " im_mock.log     || fail "mock never received the reply POST: $(cat im_mock.log)"
 grep -q "loopback-c1" im_mock.log     || fail "reply lost the chat mapping: $(cat im_mock.log)"
 kill "$IM_MOCK_PID" 2> /dev/null || true
+# Identity leg: the same config but the platform message comes from a
+# user outside users.allow — consumed, noted, never steered, no reply.
+IM_MOCK_USER=intruder-user python "$ROOT/scripts/im_mock.py" > im_mock_intruder.log 2>&1 &
+IM_MOCK_PID=$!
+for _ in $(seq 1 20); do
+    grep -q "im mock ready" im_mock_intruder.log 2> /dev/null && break
+    sleep 0.5
+done
+IM_PORT=$(sed -n 's/^im mock ready //p' im_mock_intruder.log)
+[ -n "$IM_PORT" ] || fail "im mock (identity leg) did not start: $(cat im_mock_intruder.log)"
+sed "s/endpoint\": \"ws:\/\/127.0.0.1:[0-9]*/endpoint\": \"ws:\/\/127.0.0.1:$IM_PORT/" im-config.json > im-config-intruder.json
+OUT="$(TAU_IM_CONFIG="$WORK/im-config-intruder.json" "$TAU" --allow-unsigned --mcp-bridge "$FEISHU"     --mcp-url "ws://127.0.0.1:$IM_PORT/im" --allow-inject --demo -p "hi" 2>&1)" || fail "im identity run: $OUT"
+kill "$IM_MOCK_PID" 2> /dev/null || true
+echo "$OUT" | grep -q "feishu: ignored message (chat loopback-c1 configured: true, user intruder-user allowed: false)"     || fail "unauthorized user was not ignored: $OUT"
+echo "$OUT" | grep -q "steer: .IM chat"     && fail "unauthorized user was steered into the session: $OUT"
+grep -q "IM REPLY: " im_mock_intruder.log     && fail "unauthorized user got a reply: $(cat im_mock_intruder.log)"
 # Refusal path: without --allow-inject the steer must fail loud and no
 # reply may leave. Fresh mock + fresh log (truncating a live mock's log
 # file fights its open fd).
@@ -507,11 +532,15 @@ for _ in $(seq 1 20); do
 done
 IM_PORT=$(sed -n 's/^im mock ready //p' im_mock2.log)
 [ -n "$IM_PORT" ] || fail "im mock (refusal leg) did not start: $(cat im_mock2.log)"
-OUT="$("$TAU" --allow-unsigned --mcp-bridge "$FEISHU"     --mcp-url "ws://127.0.0.1:$IM_PORT/im" --demo -p "hi" 2>&1)" || fail "im refusal run: $OUT"
+# The refusal leg carries an authorized config too — without it the
+# fail-closed identity gate eats the message before steer is even
+# attempted, and this leg would stop measuring injection consent.
+sed "s/endpoint\": \"ws:\/\/127.0.0.1:[0-9]*/endpoint\": \"ws:\/\/127.0.0.1:$IM_PORT/" im-config.json > im-config-refusal.json
+OUT="$(TAU_IM_CONFIG="$WORK/im-config-refusal.json" "$TAU" --allow-unsigned --mcp-bridge "$FEISHU"     --mcp-url "ws://127.0.0.1:$IM_PORT/im" --demo -p "hi" 2>&1)" || fail "im refusal run: $OUT"
 kill "$IM_MOCK_PID" 2> /dev/null || true
 echo "$OUT" | grep -q "feishu: steer refused: session injection not consented"     || fail "unconsented steer was not refused: $OUT"
 grep -q "IM REPLY: " im_mock2.log     && fail "reply left without inject consent: $(cat im_mock2.log)"
-echo "ok — IM loop closed (ws inbound → steer → turn → reply POST); unconsented steer refused"
+echo "ok — IM loop closed (ws inbound → steer → turn → reply POST); config-gated identity: unauthorized user ignored; unconsented steer refused"
 
 # --- step 6: remembered consent lifecycle ------------------------------
 step "6/11 remembered consent (--remember / --list / --revoke)"

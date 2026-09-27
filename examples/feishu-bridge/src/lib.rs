@@ -9,8 +9,11 @@
 //! - outbound: `after_response` posts the assembled assistant message
 //!   back over the origin-allowlisted `http` capability (the reply API,
 //!   derived from the ws URL: same origin, `/reply`).
-//! - session mapping: minimal in-memory chat_id tracking (the config
-//!   file format is a separate backlog item).
+//! - session/identity mapping: the channel config file
+//!   (docs/im-channels.md 会话/身份映射配置文件格式) read from
+//!   TAU_IM_CONFIG via ambient WASI — endpoint cross-checked against the
+//!   consented TAU_MCP_URL, unknown chats ignored, users.allow is
+//!   fail-closed (identity is a consent question).
 //!
 //! Speaks the loopback protocol from docs/im-channels.md (JSON frames
 //! standing in for feishu's proprietary binary frames — the translation
@@ -37,6 +40,17 @@ use tau::extension::{host, http, ws};
 
 /// Adapter state. Lives in statics because probe calls are plain
 /// function calls — there is no per-instance object on the guest side.
+/// The channel's slice of the mapping config (the channel whose
+/// `endpoint` equals the consented TAU_MCP_URL governs this run).
+struct ChannelConfig {
+    /// chat_id → session file path (echoed in notices; a single-session
+    /// run never switches sessions — the path serves supervisors and
+    /// restart recovery).
+    chats: std::collections::HashMap<String, String>,
+    /// Identity allowlist — fail-closed: absent/empty admits nobody.
+    users_allow: Vec<String>,
+}
+
 struct Adapter {
     /// Open ws handle to the platform (None until session_start).
     ws: Option<u64>,
@@ -44,8 +58,12 @@ struct Adapter {
     chat_id: Option<String>,
     /// A steered IM message is waiting for its assistant reply.
     awaiting_reply: bool,
-    /// The ws drain already injected once (loopback demo: one message).
+    /// The ws drain already consumed its one demo message.
     steered: bool,
+    /// Channel config: None = not loaded yet; Some governs; a failed
+    /// load is fail-closed (config_error set, nothing is ever steered).
+    config: Option<ChannelConfig>,
+    config_error: bool,
 }
 
 static ADAPTER: Mutex<Adapter> = Mutex::new(Adapter {
@@ -53,6 +71,8 @@ static ADAPTER: Mutex<Adapter> = Mutex::new(Adapter {
     chat_id: None,
     awaiting_reply: false,
     steered: false,
+    config: None,
+    config_error: false,
 });
 
 struct FeishuBridge;
@@ -82,6 +102,74 @@ fn reply_url(ws_url: &str) -> Option<String> {
     Some(format!("{httpish}://{authority}/reply"))
 }
 
+/// Load the channel config (TAU_IM_CONFIG → JSON file, ambient WASI
+/// fs). Every failure is a notice + fail-closed: no config, no steering.
+fn load_config(adapter: &mut Adapter) {
+    if adapter.config.is_some() || adapter.config_error {
+        return;
+    }
+    let fail = |adapter: &mut Adapter, reason: String| {
+        adapter.config_error = true;
+        let _ = host::notify("error", &[Content::Text(format!("feishu: config: {reason}"))]);
+    };
+    let Ok(path) = std::env::var("TAU_IM_CONFIG") else {
+        return fail(adapter, "TAU_IM_CONFIG not set — identity is fail-closed".into());
+    };
+    // The host preopens each drive as /<letter> (Windows) / `/`
+    // (elsewhere), but the env var arrives in the host's own spelling
+    // ("C:/..." — MSYS converts it on the way in). Translate a
+    // drive-absolute path into the preopen namespace.
+    let path = {
+        let path = path.replace('\\', "/");
+        let bytes = path.as_bytes();
+        if bytes.len() > 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':' {
+            let letter = (bytes[0] as char).to_ascii_lowercase();
+            format!("/{}/{}", letter, path[2..].trim_start_matches('/'))
+        } else {
+            path
+        }
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) => return fail(adapter, format!("cannot read {path}: {e}")),
+    };
+    let parsed: serde_json::Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(e) => return fail(adapter, format!("{path} is not valid JSON: {e}")),
+    };
+    if parsed["version"] != 1 {
+        return fail(adapter, format!("unsupported config version: {}", parsed["version"]));
+    }
+    let endpoint = std::env::var("TAU_MCP_URL").unwrap_or_default();
+    let channels = parsed["channels"].as_array().cloned().unwrap_or_default();
+    // The channel whose endpoint equals the consented one governs — a
+    // config can never smuggle in an endpoint the user did not consent.
+    let channel = channels
+        .iter()
+        .find(|c| c["endpoint"].as_str() == Some(endpoint.as_str()));
+    let Some(channel) = channel else {
+        return fail(adapter, format!("no channel matches consented endpoint {endpoint}"));
+    };
+    let mut chats = std::collections::HashMap::new();
+    if let Some(map) = channel["chats"].as_object() {
+        for (chat_id, spec) in map {
+            chats.insert(
+                chat_id.clone(),
+                spec["session"].as_str().unwrap_or_default().to_string(),
+            );
+        }
+    }
+    let users_allow = channel["users"]["allow"]
+        .as_array()
+        .map(|a| {
+            a.iter()
+                .filter_map(|u| u.as_str().map(str::to_string))
+                .collect()
+        })
+        .unwrap_or_default();
+    adapter.config = Some(ChannelConfig { chats, users_allow });
+}
+
 /// Drain one inbound frame; on an IM message event, steer it into the
 /// session. Runs at probe call points — the synchronous guest model
 /// means the pump only moves when the host calls us (docs/im-channels.md
@@ -90,6 +178,7 @@ fn pump_inbound(adapter: &mut Adapter) {
     if adapter.steered {
         return;
     }
+    load_config(adapter);
     let Some(handle) = adapter.ws else { return };
     // One short-timeout recv per call point: no frame is normal (the
     // platform is just quiet), a frame is drained and injected.
@@ -108,6 +197,25 @@ fn pump_inbound(adapter: &mut Adapter) {
     ) else {
         return;
     };
+    // Identity + mapping gate (fail-closed, docs/im-channels.md): the
+    // chat must be configured and the user allowlisted; anything else is
+    // consumed, noted, and never steered.
+    let Some(config) = adapter.config.as_ref() else { return };
+    let session = config.chats.get(chat_id);
+    let allowed = config.users_allow.iter().any(|u| u == user);
+    if session.is_none() || !allowed {
+        adapter.steered = true; // consumed — do not re-litigate
+        let _ = host::notify(
+            "info",
+            &[Content::Text(format!(
+                "feishu: ignored message (chat {chat_id} configured: {}, user {user} allowed: {})",
+                session.is_some(),
+                allowed
+            ))],
+        );
+        return;
+    }
+    let session = session.cloned().unwrap_or_default();
     let message = Message {
         role: Role::User,
         content: vec![Content::Text(format!(
@@ -122,7 +230,7 @@ fn pump_inbound(adapter: &mut Adapter) {
             let _ = host::notify(
                 "info",
                 &[Content::Text(format!(
-                    "feishu: inbound message from {user} steered into the session"
+                    "feishu: inbound message from {user} steered into the session (chat {chat_id} → {session})"
                 ))],
             );
         }

@@ -109,6 +109,50 @@ media 工具能力，或交给 provider 侧（realtime API 多直接吃 PCM）�
 图片/文件：入站下载 → blob store → `Blob{hash}` 引用；出站从
 `Content` 块物化 → 平台 media 上传 API。
 
+## 会话/身份映射配置文件（2026-09-28 定稿，jev 裁决 component_reads_file @ 0.79）
+
+通道级单文件，JSON（仓内状态文件一律 JSON：consent/keys/trust 同款，
+组件侧 serde_json 解析有 mcp-bridge 先例）。**组件自读**：宿主经环境
+变量 `TAU_IM_CONFIG` 把路径交给 bridge，组件用 ambient WASI fs 读
+（默认 allow-all；`--deny-wasi` 下读失败 = fail-loud，文档即本文）。
+否决项：宿主解析后经 env 内联（宿主开始懂 IM 通道 schema，违背
+「宿主不懂 IM 协议」分层红线）；只写规范不落地（清单不前进）。
+
+```json
+{
+  "version": 1,
+  "channels": [
+    {
+      "id": "feishu-main",
+      "platform": "feishu",
+      "endpoint": "wss://open.feishu.cn/...",
+      "chats": {
+        "oc_abc": {
+          "session": ".tau/sessions/feishu-oc_abc.jsonl",
+          "threads": "branch"
+        }
+      },
+      "users": { "allow": ["ou_xyz"] }
+    }
+  ]
+}
+```
+
+语义红线：
+
+- **`endpoint` 必须与 consent 的端点一致**（组件对照 TAU_MCP_URL，
+  不匹配 fail-loud）——配置不能偷渡一个没 consent 的端点。
+- **未知 chat 的消息忽略**（notify 记录，不 steer）：映射是显式的，
+  不存在「默认会话」。
+- **`users.allow` 缺席或空 = 无人可说话**（fail-closed：身份是
+  consent 问题，不是协议问题）。白名单外的 user 消息忽略。
+- `session` 是会话文件路径：tau 是单会话 CLI，该路径给 supervisor
+  /重启恢复用；单 run 内组件不切换会话（如实在示例里只回显）。
+- `threads`: `branch`（平台 thread 键映射到会话内分支）|
+  `session`（每话题独立会话文件）。本轮只记录不执行——分支导航是
+  宿主侧能力，组件够不着，如实留白。
+- 版本门禁：`version` 不认识即报错，不猜。
+
 ## 落地顺序
 
 1. **前置契约**：host-channel（steer/follow-up/notify/emit + consent）
@@ -163,7 +207,10 @@ agent loop 跑出新回合
       字段在标签前（`{"text":…,"type":"text"}`），抽取勿假设键序；
       mock 平台必须 threaded（ws 长连 handler 终身阻塞，回帖 POST 要
       并发服务）
-- [ ] 会话/身份映射配置文件格式
+- [x] 会话/身份映射配置文件格式（2026-09-28 定稿 + 落地）：规范见
+      本文「会话/身份映射配置文件格式」节；feishu-bridge 经
+      TAU_IM_CONFIG 读文件，endpoint 对照 consent、未知 chat 忽略、
+      users.allow fail-closed；validate.sh 5c 加未授权 user 拒绝腿
 - [ ] `ingress` 能力（排到企微/WhatsApp 之前）
 - [x] validate.sh IM 回环案例（步骤 5c，`scripts/im_mock.py`）：
       注入→steer→turn 2→回帖 POST 全链断言 + 无 --allow-inject 时

@@ -80,6 +80,19 @@
   boundary from inside a guest (guard example's `fscheck` leg) so a
   host-side-only green can never pass again.
 
+### Added — IM channel mapping config (docs/im-channels.md, 0.3.0)
+
+- `feishu-bridge` reads its session/identity mapping from a JSON config
+  file: the host hands the path over via `TAU_IM_CONFIG`, the component
+  reads and parses it over ambient WASI fs (the host never learns the IM
+  schema). The channel whose `endpoint` equals the consented
+  `TAU_MCP_URL` governs — a config can never smuggle in an endpoint the
+  user did not consent. Unknown chats are ignored (noted, never
+  steered); `users.allow` absent or empty admits nobody (identity is a
+  consent question — fail-closed). validate.sh step 5c gained the
+  identity leg: a platform message from a user outside the allowlist is
+  consumed with a notice, steered nowhere, and answered with silence.
+
 ### Added — `ws` capability for bridges (docs/im-channels.md, 0.3.0)
 
 - The bridge world imports `ws`: `connect` / `send` / `recv` / `close`
