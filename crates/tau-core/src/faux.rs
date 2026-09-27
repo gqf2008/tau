@@ -125,8 +125,12 @@ fn demo_round(req: &Request) -> Vec<ModelEvent> {
             _ => None,
         });
     let middle = match outcome {
-        Some((content, false)) => format!("The tool answered: {content}. "),
-        Some((content, true)) => format!("The tool failed: {content}. "),
+        Some((content, false)) => {
+            format!("The tool answered: {}. ", crate::types::tool_result_text(&content))
+        }
+        Some((content, true)) => {
+            format!("The tool failed: {}. ", crate::types::tool_result_text(&content))
+        }
         None => String::new(),
     };
     vec![
@@ -300,7 +304,7 @@ mod tests {
             role: crate::types::Role::Assistant,
             content: vec![crate::types::Content::ToolResult {
                 call_id: "demo-call-1".into(),
-                content: "SAY HI".into(),
+                content: vec![crate::types::Content::Text { text: "SAY HI".into() }],
                 is_error: false,
             }],
         });
@@ -435,7 +439,7 @@ mod tests {
             produced[2].content[0],
             Content::ToolResult {
                 call_id: "call-1".into(),
-                content: "cba".into(),
+                content: vec![crate::types::Content::Text { text: "cba".into() }],
                 is_error: false,
             }
         );
@@ -465,7 +469,7 @@ mod tests {
             produced[2].content[0],
             Content::ToolResult {
                 call_id: "call-1".into(),
-                content: "unknown tool: reverse".into(),
+                content: vec![crate::types::Content::Text { text: "unknown tool: reverse".into() }],
                 is_error: true,
             }
         );
@@ -542,7 +546,7 @@ mod tests {
             produced[2].content[0],
             Content::ToolResult {
                 call_id: "call-1".into(),
-                content: "blocked: policy: 'abc' is on the deny list".into(),
+                content: vec![crate::types::Content::Text { text: "blocked: policy: 'abc' is on the deny list".into() }],
                 is_error: true,
             }
         );
@@ -723,7 +727,7 @@ mod control_tests {
 
         async fn execute(&self, _arguments: serde_json::Value) -> ToolOutput {
             ToolOutput {
-                content: "done".into(),
+                content: vec![crate::types::Content::Text { text: "done".into() }],
                 is_error: false,
             }
         }

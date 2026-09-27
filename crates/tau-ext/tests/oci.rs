@@ -124,7 +124,7 @@ async fn pulls_loads_and_caches_from_registry() {
     let out = tools[0]
         .execute(serde_json::json!({ "text": "from oci" }))
         .await;
-    assert_eq!(out.content, "FROM OCI");
+    assert_eq!(out.text(), "FROM OCI");
 
     let _ = std::fs::remove_dir_all(&cache);
 }
@@ -255,7 +255,7 @@ async fn corrupt_cache_entry_is_verified_and_re_pulled() {
     let out = tools[0]
         .execute(serde_json::json!({ "text": "healed" }))
         .await;
-    assert_eq!(out.content, "HEALED");
+    assert_eq!(out.text(), "HEALED");
 
     // Atomic writes leave no temp-file litter in the cache.
     let litter: Vec<_> = std::fs::read_dir(&cache)

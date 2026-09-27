@@ -9,9 +9,17 @@ interface Definition {
     parametersJson: string;
 }
 
+// 0.3.0 (docs/tool-media.md): tool-result content is a list of
+// result-blocks; a WIT variant maps to { tag, val }.
+type ResultBlock = { tag: "text"; val: string } | { tag: "media"; val: unknown };
+
 interface ToolResult {
-    content: string;
+    content: ResultBlock[];
     isError: boolean;
+}
+
+function textBlock(text: string): ResultBlock {
+    return { tag: "text", val: text };
 }
 
 type Action = "continue" | "replace" | "block";
@@ -36,7 +44,7 @@ export const tools = {
 
     execute(name: string, argumentsJson: string): ToolResult {
         if (name !== "upper") {
-            return { content: `unknown tool: ${name}`, isError: true };
+            return { content: [textBlock(`unknown tool: ${name}`)], isError: true };
         }
         let text: unknown;
         try {
@@ -45,9 +53,9 @@ export const tools = {
             text = undefined;
         }
         if (typeof text !== "string") {
-            return { content: "missing string argument 'text'", isError: true };
+            return { content: [textBlock("missing string argument 'text'")], isError: true };
         }
-        return { content: text.toUpperCase(), isError: false };
+        return { content: [textBlock(text.toUpperCase())], isError: false };
     },
 };
 

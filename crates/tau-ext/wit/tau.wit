@@ -1,4 +1,4 @@
-package tau:extension@0.2.0;
+package tau:extension@0.3.0;
 
 /// ---- Message trunk: tau owns this schema, so it is typed, not JSON ----
 ///
@@ -51,13 +51,24 @@ interface types {
         arguments-json: string,
     }
 
-    /// The outcome of one tool call, as conversation content. Text only;
-    /// media tool results are a 0.3.0 evaluation item (wit-review F4).
+    /// A block of a tool result. A separate, non-recursive variant: a
+    /// tool result never contains tool calls or nested results (and
+    /// wasmtime's host bindgen rejects recursive types outright).
+    variant result-block {
+        /// A plain text block.
+        text(string),
+        /// A media block (image, audio, video, file).
+        media(media),
+    }
+
+    /// The outcome of one tool call, as conversation content. Multi-block
+    /// since 0.3.0 (docs/tool-media.md, wit-review F4): text and/or media;
+    /// media bytes cross the ABI raw, never base64.
     record tool-result {
         /// The call this answers.
         call-id: string,
-        /// Textual result content.
-        content: string,
+        /// Result blocks: text and/or media.
+        content: list<result-block>,
         /// True when the tool reported failure.
         is-error: bool,
     }
@@ -87,6 +98,8 @@ interface types {
 
 /// Tools an extension contributes to the agent.
 interface tools {
+    use types.{result-block};
+
     /// A tool the model may call, described with a JSON Schema parameter object.
     record definition {
         name: string,
@@ -97,8 +110,10 @@ interface tools {
     }
 
     record tool-result {
-        /// Text content handed back to the model as the tool result.
-        content: string,
+        /// Result blocks handed back to the model: text and/or media
+        /// (multi-block since 0.3.0, docs/tool-media.md). The call-id is
+        /// paired host-side; the guest never sees it.
+        content: list<result-block>,
         is-error: bool,
     }
 

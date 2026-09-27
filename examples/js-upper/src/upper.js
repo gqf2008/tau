@@ -2,6 +2,12 @@
 // examples/upper (Rust). Build: ./build.sh (npm i + npx jco componentize).
 // Exported WIT interfaces map to named ES exports; kebab-case WIT fields
 // map to camelCase; the action enum maps to its string tag.
+// 0.3.0 (docs/tool-media.md): tool-result content is a list of
+// result-blocks; a WIT variant maps to { tag, val }.
+
+function textBlock(text) {
+    return { tag: "text", val: text };
+}
 
 export const tools = {
     definitions() {
@@ -15,7 +21,7 @@ export const tools = {
 
     execute(name, argumentsJson) {
         if (name !== "upper") {
-            return { content: `unknown tool: ${name}`, isError: true };
+            return { content: [textBlock(`unknown tool: ${name}`)], isError: true };
         }
         let text;
         try {
@@ -24,9 +30,9 @@ export const tools = {
             text = undefined;
         }
         if (typeof text !== "string") {
-            return { content: "missing string argument 'text'", isError: true };
+            return { content: [textBlock("missing string argument 'text'")], isError: true };
         }
-        return { content: text.toUpperCase(), isError: false };
+        return { content: [textBlock(text.toUpperCase())], isError: false };
     },
 };
 

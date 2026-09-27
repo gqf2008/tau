@@ -99,13 +99,13 @@ async fn bridge_exposes_mcp_tools() {
         .execute(serde_json::json!({ "text": "hello over stdio" }))
         .await;
     assert!(!out.is_error);
-    assert_eq!(out.content, "hello over stdio");
+    assert_eq!(out.text(), "hello over stdio");
 
     // MCP isError surfaces as a tau tool error, not a trap.
     let fail = &tools[1];
     let out = fail.execute(serde_json::json!({})).await;
     assert!(out.is_error);
-    assert_eq!(out.content, "tool failed on purpose");
+    assert_eq!(out.text(), "tool failed on purpose");
 
     // echo with a non-string argument still yields a result, not a trap.
     let out = echo.execute(serde_json::json!({ "text": 42 })).await;
@@ -194,7 +194,7 @@ async fn bridge_exposes_mcp_tools_over_http() {
         .execute(serde_json::json!({ "text": "hello over http" }))
         .await;
     assert!(!out.is_error);
-    assert_eq!(out.content, "hello over http");
+    assert_eq!(out.text(), "hello over http");
 
     let out = tools[1].execute(serde_json::json!({})).await;
     assert!(out.is_error);
@@ -281,7 +281,7 @@ async fn bridge_reconnects_after_server_death() {
     // The mock exits right after replying to this first call.
     let out = echo.execute(serde_json::json!({ "text": "one" })).await;
     assert!(
-        !out.is_error && out.content == "one",
+        !out.is_error && out.text() == "one",
         "first call must work: {out:?}"
     );
 
@@ -297,7 +297,7 @@ async fn bridge_reconnects_after_server_death() {
     // re-handshaked, and the bridge works again.
     let out = echo.execute(serde_json::json!({ "text": "three" })).await;
     assert!(
-        !out.is_error && out.content == "three",
+        !out.is_error && out.text() == "three",
         "the bridge must reconnect after server death: {out:?}"
     );
 }

@@ -530,7 +530,9 @@ impl Agent {
                         });
                         results.push(Content::ToolResult {
                             call_id: id,
-                            content: format!("blocked: {reason}"),
+                            content: vec![Content::Text {
+                                text: format!("blocked: {reason}"),
+                            }],
                             is_error: true,
                         });
                         continue;
@@ -548,18 +550,23 @@ impl Agent {
                             "id": id,
                             "name": name,
                             "args": args,
-                            "content": output.content,
+                            "content": output.text(),
                             "isError": output.is_error,
                         }),
                     )
                     .await
                 {
-                    Verdict::Replace(payload) => crate::tool::ToolOutput {
-                        content: payload["content"]
-                            .as_str()
-                            .map(str::to_string)
-                            .unwrap_or(output.content),
-                        is_error: payload["isError"].as_bool().unwrap_or(output.is_error),
+                    Verdict::Replace(payload) => match payload["content"].as_str() {
+                        // replace{content} rewrites the result as a single
+                        // text block (the probe payload is text-shaped).
+                        Some(text) => crate::tool::ToolOutput {
+                            content: vec![Content::Text { text: text.to_string() }],
+                            is_error: payload["isError"].as_bool().unwrap_or(output.is_error),
+                        },
+                        None => crate::tool::ToolOutput {
+                            content: output.content,
+                            is_error: payload["isError"].as_bool().unwrap_or(output.is_error),
+                        },
                     },
                     _ => output,
                 };
@@ -567,7 +574,7 @@ impl Agent {
                     id: id.clone(),
                     name,
                     is_error: output.is_error,
-                    output: output.content.clone(),
+                    output: output.text(),
                 });
                 results.push(Content::ToolResult {
                     call_id: id,

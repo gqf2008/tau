@@ -95,13 +95,38 @@ fn content_blocks(message: &Message) -> Vec<Json> {
             } => blocks.push(json!({
                 "type": "tool_result",
                 "tool_use_id": call_id,
-                "content": content,
+                "content": tool_result_blocks(content),
                 "is_error": is_error,
             })),
             Content::ToolCall { .. } => {}
         }
     }
     blocks
+}
+
+/// Tool-result blocks for the Messages API (multi-block since 0.3.0,
+/// docs/tool-media.md): text and image map natively; audio/video/file
+/// have no tool_result block and degrade to a text placeholder — context
+/// is never silently dropped.
+fn tool_result_blocks(blocks: &[Content]) -> Vec<Json> {
+    let mut out: Vec<Json> = blocks
+        .iter()
+        .map(|block| match block {
+            Content::Text { text } => json!({ "type": "text", "text": text }),
+            Content::Image { media } => match media_source(media) {
+                Some(source) => json!({ "type": "image", "source": source }),
+                None => json!({ "type": "text", "text": "[image unavailable]" }),
+            },
+            other => json!({
+                "type": "text",
+                "text": tau_core::types::tool_result_text(std::slice::from_ref(other)),
+            }),
+        })
+        .collect();
+    if out.is_empty() {
+        out.push(json!({ "type": "text", "text": "(no tool output)" }));
+    }
+    out
 }
 
 fn media_source(media: &Media) -> Option<Json> {
@@ -219,7 +244,7 @@ mod tests {
                     role: Role::Tool,
                     content: vec![Content::ToolResult {
                         call_id: "t1".into(),
-                        content: "a cat".into(),
+                        content: vec![Content::Text { text: "a cat".into() }],
                         is_error: false,
                     }],
                 },
@@ -246,6 +271,44 @@ mod tests {
         assert_eq!(body["messages"][2]["role"], "user");
         assert_eq!(body["messages"][2]["content"][0]["type"], "tool_result");
         assert_eq!(body["tools"][0]["input_schema"]["type"], "object");
+    }
+
+    #[test]
+    fn tool_result_maps_image_and_degrades_audio() {
+        // 0.3.0 (docs/tool-media.md): text and image map to native
+        // tool_result blocks; audio/video/file have no such block and
+        // degrade to a text placeholder — context is never dropped.
+        let req = Request {
+            system: None,
+            messages: vec![Message {
+                role: Role::Tool,
+                content: vec![Content::ToolResult {
+                    call_id: "t1".into(),
+                    content: vec![
+                        Content::Text {
+                            text: "look: ".into(),
+                        },
+                        Content::Image {
+                            media: Media::bytes("image/png", b"hello"),
+                        },
+                        Content::Audio {
+                            media: Media::bytes("audio/pcm;rate=24000", b"\x00\x01"),
+                        },
+                    ],
+                    is_error: false,
+                }],
+            }],
+            tools: vec![],
+        };
+        let body = request_body("claude-sonnet-4-5", 8192, &req);
+        let blocks = &body["messages"][0]["content"][0]["content"];
+        assert_eq!(blocks[0], json!({ "type": "text", "text": "look: " }));
+        assert_eq!(blocks[1]["type"], "image");
+        assert_eq!(blocks[1]["source"]["data"], "aGVsbG8=");
+        assert_eq!(
+            blocks[2],
+            json!({ "type": "text", "text": "[audio: audio/pcm;rate=24000]" })
+        );
     }
 
     #[test]

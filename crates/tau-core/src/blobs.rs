@@ -167,15 +167,29 @@ pub struct GcReport {
 
 /// The blob hashes referenced by `message` (externalized media only).
 pub fn blob_hashes(message: &Message) -> impl Iterator<Item = &str> {
-    message.content.iter().filter_map(|content| match content {
+    message.content.iter().flat_map(|content| match content {
         Content::Image { media }
         | Content::Audio { media }
         | Content::Video { media }
         | Content::File { media, .. } => match &media.source {
-            MediaSource::Blob { hash } => Some(hash.as_str()),
-            _ => None,
+            MediaSource::Blob { hash } => vec![hash.as_str()],
+            _ => Vec::new(),
         },
-        _ => None,
+        // Tool results carry media blocks since 0.3.0 (F4) — descend.
+        Content::ToolResult { content, .. } => content
+            .iter()
+            .filter_map(|block| match block {
+                Content::Image { media }
+                | Content::Audio { media }
+                | Content::Video { media }
+                | Content::File { media, .. } => match &media.source {
+                    MediaSource::Blob { hash } => Some(hash.as_str()),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect(),
+        _ => Vec::new(),
     })
 }
 
@@ -197,49 +211,75 @@ pub fn externalize(message: &mut Message, store: &BlobStore) -> io::Result<()> {
 /// provider request. A missing blob degrades to a text placeholder — the
 /// run continues with a gap, it does not fail.
 pub fn materialize(message: &mut Message, store: &BlobStore) {
-    let mut notes = Vec::new();
-    for content in &mut message.content {
-        let (media_type, hash) = match content {
-            Content::Image { media }
-            | Content::Audio { media }
-            | Content::Video { media }
-            | Content::File { media, .. } => match &media.source {
-                MediaSource::Blob { hash } => (media.media_type.clone(), hash.clone()),
-                _ => continue,
-            },
-            _ => continue,
-        };
-        match store.get(&hash) {
-            Ok(Some(bytes)) => {
-                let media = match content {
-                    Content::Image { media }
-                    | Content::Audio { media }
-                    | Content::Video { media }
-                    | Content::File { media, .. } => media,
-                    _ => unreachable!(),
+    materialize_blocks(&mut message.content, store);
+}
+
+fn materialize_blocks(blocks: &mut [Content], store: &BlobStore) {
+    for content in blocks.iter_mut() {
+        match content {
+            Content::Image { .. }
+            | Content::Audio { .. }
+            | Content::Video { .. }
+            | Content::File { .. } => {
+                let (hash, media_type) = match media_of(content) {
+                    Some(media) => match &media.source {
+                        MediaSource::Blob { hash } => {
+                            (hash.clone(), media.media_type.clone())
+                        }
+                        _ => continue,
+                    },
+                    None => continue,
                 };
-                media.source = MediaSource::Bytes(bytes);
+                match store.get(&hash) {
+                    Ok(Some(bytes)) => {
+                        if let Some(media) = media_of_mut(content) {
+                            media.source = MediaSource::Bytes(bytes);
+                        }
+                    }
+                    Ok(None) => {
+                        *content = Content::Text {
+                            text: format!(
+                                "[media unavailable: {media_type} blob {hash} not in store]"
+                            ),
+                        };
+                    }
+                    Err(e) => {
+                        // A corrupt blob (the read verified the hash and it
+                        // did not match) degrades the same way — but says so.
+                        *content = Content::Text {
+                            text: format!(
+                                "[media unavailable: {media_type} blob {hash}: {e}]"
+                            ),
+                        };
+                    }
+                }
             }
-            Ok(None) => {
-                notes.push((
-                    content.clone(),
-                    format!("[media unavailable: {media_type} blob {hash} not in store]"),
-                ));
+            // Tool results carry media blocks since 0.3.0 (F4) — descend.
+            Content::ToolResult { content: inner, .. } => {
+                materialize_blocks(inner, store);
             }
-            Err(e) => {
-                // A corrupt blob (the read verified the hash and it did
-                // not match) degrades the same way — but says so.
-                notes.push((
-                    content.clone(),
-                    format!("[media unavailable: {media_type} blob {hash}: {e}]"),
-                ));
-            }
+            _ => {}
         }
     }
-    for (old, note) in notes {
-        if let Some(slot) = message.content.iter_mut().find(|c| **c == old) {
-            *slot = Content::Text { text: note };
-        }
+}
+
+fn media_of(content: &Content) -> Option<&crate::types::Media> {
+    match content {
+        Content::Image { media }
+        | Content::Audio { media }
+        | Content::Video { media }
+        | Content::File { media, .. } => Some(media),
+        _ => None,
+    }
+}
+
+fn media_of_mut(content: &mut Content) -> Option<&mut crate::types::Media> {
+    match content {
+        Content::Image { media }
+        | Content::Audio { media }
+        | Content::Video { media }
+        | Content::File { media, .. } => Some(media),
+        _ => None,
     }
 }
 
@@ -247,12 +287,23 @@ fn media_mut(message: &mut Message) -> impl Iterator<Item = &mut crate::types::M
     message
         .content
         .iter_mut()
-        .filter_map(|content| match content {
+        .flat_map(|content| match content {
             Content::Image { media }
             | Content::Audio { media }
             | Content::Video { media }
-            | Content::File { media, .. } => Some(media),
-            _ => None,
+            | Content::File { media, .. } => vec![media],
+            // Tool results carry media blocks since 0.3.0 (F4) — descend.
+            Content::ToolResult { content, .. } => content
+                .iter_mut()
+                .filter_map(|block| match block {
+                    Content::Image { media }
+                    | Content::Audio { media }
+                    | Content::Video { media }
+                    | Content::File { media, .. } => Some(media),
+                    _ => None,
+                })
+                .collect(),
+            _ => Vec::new(),
         })
 }
 

@@ -14,6 +14,7 @@ wit_bindgen::generate!({
 
 use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
+use tau::extension::types::ResultBlock;
 
 struct BadSchema;
 
@@ -28,7 +29,7 @@ impl Tools for BadSchema {
 
     fn execute(_name: String, _arguments_json: String) -> ToolResult {
         ToolResult {
-            content: "unreachable: the host refuses to load this component".into(),
+            content: vec![ResultBlock::Text("unreachable: the host refuses to load this component".into())],
             is_error: true,
         }
     }

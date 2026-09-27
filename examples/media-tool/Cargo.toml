@@ -1,0 +1,13 @@
+[package]
+name = "media-tool"
+version = "0.1.0"
+edition = "2024"
+description = "Example tau extension: a tool that returns a media block (a 1x1 PNG) — F4 tool media results"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.46"
+
+[workspace]

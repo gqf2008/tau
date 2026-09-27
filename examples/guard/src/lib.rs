@@ -29,7 +29,7 @@ wit_bindgen::generate!({
 use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
 use tau::extension::host;
-use tau::extension::types::Content;
+use tau::extension::types::{Content, ResultBlock};
 
 struct Guard;
 
@@ -41,7 +41,7 @@ impl Tools for Guard {
 
     fn execute(name: String, _arguments_json: String) -> ToolResult {
         ToolResult {
-            content: format!("guard provides no tools (called: {name})"),
+            content: vec![ResultBlock::Text(format!("guard provides no tools (called: {name})"))],
             is_error: true,
         }
     }

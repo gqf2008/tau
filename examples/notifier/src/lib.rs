@@ -27,7 +27,7 @@ wit_bindgen::generate!({
 use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
 use tau::extension::host;
-use tau::extension::types::{Content, Message, Role};
+use tau::extension::types::{Content, Message, ResultBlock, Role};
 
 struct Notifier;
 
@@ -49,7 +49,7 @@ impl Tools for Notifier {
     fn execute(name: String, arguments_json: String) -> ToolResult {
         if name != "poke" {
             return ToolResult {
-                content: format!("unknown tool: {name}"),
+                content: vec![ResultBlock::Text(format!("unknown tool: {name}"))],
                 is_error: true,
             };
         }
@@ -86,7 +86,7 @@ impl Tools for Notifier {
         }
 
         ToolResult {
-            content: report.join("; "),
+            content: vec![ResultBlock::Text(report.join("; "))],
             is_error: false,
         }
     }

@@ -98,17 +98,57 @@ pub fn request_body(model: &str, req: &Request) -> Json {
                 messages.push(m);
             }
             Role::Tool => {
+                // Chat-completions tool messages are text-only: images ride
+                // as a trailing user message of image_url parts (pi's
+                // pattern); audio/video/file degrade to text placeholders
+                // (docs/tool-media.md).
+                let mut images = Vec::new();
                 for content in &message.content {
                     if let Content::ToolResult {
                         call_id, content, ..
                     } = content
                     {
+                        let images_before = images.len();
+                        let mut text = String::new();
+                        for block in content {
+                            match block {
+                                Content::Text { text: t } => text.push_str(t),
+                                Content::Image { media } => {
+                                    if let Some(data) = media.source.encode_base64() {
+                                        images.push(json!({
+                                            "type": "image_url",
+                                            "image_url": {
+                                                "url": format!("data:{};base64,{data}", media.media_type),
+                                            },
+                                        }));
+                                    }
+                                }
+                                other => text.push_str(
+                                    &tau_core::types::tool_result_text(
+                                        std::slice::from_ref(other),
+                                    ),
+                                ),
+                            }
+                        }
+                        if text.is_empty() {
+                            text = if images.len() > images_before {
+                                "(see attached image)".into()
+                            } else {
+                                "(no tool output)".into()
+                            };
+                        }
                         messages.push(json!({
                             "role": "tool",
                             "tool_call_id": call_id,
-                            "content": content,
+                            "content": text,
                         }));
                     }
+                }
+                if !images.is_empty() {
+                    let mut parts =
+                        vec![json!({ "type": "text", "text": "Attached image(s) from tool result:" })];
+                    parts.extend(images);
+                    messages.push(json!({ "role": "user", "content": parts }));
                 }
             }
         }
@@ -204,7 +244,7 @@ mod tests {
                     role: Role::Tool,
                     content: vec![Content::ToolResult {
                         call_id: "c1".into(),
-                        content: "cba".into(),
+                        content: vec![Content::Text { text: "cba".into() }],
                         is_error: false,
                     }],
                 },
@@ -223,6 +263,60 @@ mod tests {
         );
         assert_eq!(body["messages"][3]["tool_call_id"], "c1");
         assert_eq!(body["tools"][0]["function"]["name"], "reverse");
+    }
+
+    #[test]
+    fn tool_result_image_rides_trailing_user_message() {
+        // 0.3.0 (docs/tool-media.md): chat-completions tool messages are
+        // text-only — an image block becomes an image_url part on a
+        // trailing user message; audio degrades to a text placeholder.
+        let req = Request {
+            system: None,
+            messages: vec![
+                Message::user("dot please"),
+                Message {
+                    role: Role::Assistant,
+                    content: vec![Content::ToolCall {
+                        id: "c1".into(),
+                        name: "dot_png".into(),
+                        arguments: json!({}),
+                    }],
+                },
+                Message {
+                    role: Role::Tool,
+                    content: vec![Content::ToolResult {
+                        call_id: "c1".into(),
+                        content: vec![
+                            Content::Text {
+                                text: "a dot. ".into(),
+                            },
+                            Content::Image {
+                                media: tau_core::types::Media::bytes("image/png", b"hello"),
+                            },
+                            Content::Audio {
+                                media: tau_core::types::Media::bytes("audio/pcm", b"\x00"),
+                            },
+                        ],
+                        is_error: false,
+                    }],
+                },
+            ],
+            tools: vec![],
+        };
+        let body = request_body("test-model", &req);
+        let msgs = &body["messages"];
+        assert_eq!(msgs[2]["role"], "tool");
+        assert_eq!(msgs[2]["tool_call_id"], "c1");
+        assert_eq!(msgs[2]["content"], "a dot. [audio: audio/pcm]");
+        assert_eq!(msgs[3]["role"], "user");
+        assert_eq!(
+            msgs[3]["content"][0],
+            json!({ "type": "text", "text": "Attached image(s) from tool result:" })
+        );
+        assert_eq!(
+            msgs[3]["content"][1]["image_url"]["url"],
+            "data:image/png;base64,aGVsbG8="
+        );
     }
 
     #[test]

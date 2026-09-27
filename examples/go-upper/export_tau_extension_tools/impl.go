@@ -6,7 +6,17 @@ import (
 	"strings"
 
 	"wit_component/tau_extension_tools"
+	"wit_component/tau_extension_types"
 )
+
+// 0.3.0 (docs/tool-media.md): content is a list of result-blocks;
+// this example returns one text block.
+func textResult(text string, isError bool) tau_extension_tools.ToolResult {
+	return tau_extension_tools.ToolResult{
+		Content: []tau_extension_types.ResultBlock{tau_extension_types.MakeResultBlockText(text)},
+		IsError: isError,
+	}
+}
 
 const parametersJSON = `{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}`
 
@@ -20,13 +30,13 @@ func Definitions() []tau_extension_tools.Definition {
 
 func Execute(name string, argumentsJson string) tau_extension_tools.ToolResult {
 	if name != "upper" {
-		return tau_extension_tools.ToolResult{Content: "unknown tool: " + name, IsError: true}
+		return textResult("unknown tool: "+name, true)
 	}
 	var args struct {
 		Text string `json:"text"`
 	}
 	if err := json.Unmarshal([]byte(argumentsJson), &args); err != nil || args.Text == "" {
-		return tau_extension_tools.ToolResult{Content: "missing string argument 'text'", IsError: true}
+		return textResult("missing string argument 'text'", true)
 	}
-	return tau_extension_tools.ToolResult{Content: strings.ToUpper(args.Text), IsError: false}
+	return textResult(strings.ToUpper(args.Text), false)
 }

@@ -13,6 +13,7 @@ wit_bindgen::generate!({
 
 use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
+use tau::extension::types::ResultBlock;
 
 struct Upper;
 
@@ -33,18 +34,18 @@ impl Tools for Upper {
     fn execute(name: String, arguments_json: String) -> ToolResult {
         if name != "upper" {
             return ToolResult {
-                content: format!("unknown tool: {name}"),
+                content: vec![ResultBlock::Text(format!("unknown tool: {name}"))],
                 is_error: true,
             };
         }
         let parsed: Result<serde_json::Value, _> = serde_json::from_str(&arguments_json);
         match parsed.ok().and_then(|v| v["text"].as_str().map(str::to_string)) {
             Some(text) => ToolResult {
-                content: text.to_uppercase(),
+                content: vec![ResultBlock::Text(text.to_uppercase())],
                 is_error: false,
             },
             None => ToolResult {
-                content: "missing string argument 'text'".into(),
+                content: vec![ResultBlock::Text("missing string argument 'text'".into())],
                 is_error: true,
             },
         }

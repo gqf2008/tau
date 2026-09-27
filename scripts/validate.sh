@@ -49,7 +49,7 @@ trap cleanup EXIT
 # --- pre-flight -------------------------------------------------------
 step "build release binary + wasm examples"
 cargo build --release -p tau-cli --quiet
-for ex in upper http-provider mcp-bridge guard echo-provider notifier; do
+for ex in upper http-provider mcp-bridge guard echo-provider notifier media-tool; do
     cargo build --manifest-path "examples/${ex}/Cargo.toml" \
         --target wasm32-wasip2 --release --quiet
 done
@@ -59,12 +59,14 @@ MCP_BRIDGE="$ROOT/examples/mcp-bridge/target/wasm32-wasip2/release/mcp_bridge.wa
 GUARD="$ROOT/examples/guard/target/wasm32-wasip2/release/guard.wasm"
 ECHO_PROVIDER="$ROOT/examples/echo-provider/target/wasm32-wasip2/release/echo_provider.wasm"
 NOTIFIER="$ROOT/examples/notifier/target/wasm32-wasip2/release/notifier.wasm"
+MEDIA_TOOL="$ROOT/examples/media-tool/target/wasm32-wasip2/release/media_tool.wasm"
 [ -f "$UPPER" ] || fail "upper example missing"
 [ -f "$HTTP_PROVIDER" ] || fail "http-provider example missing"
 [ -f "$MCP_BRIDGE" ] || fail "mcp-bridge example missing"
 [ -f "$GUARD" ] || fail "guard example missing"
 [ -f "$ECHO_PROVIDER" ] || fail "echo-provider example missing"
 [ -f "$NOTIFIER" ] || fail "notifier example missing"
+[ -f "$MEDIA_TOOL" ] || fail "media-tool example missing"
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
@@ -75,6 +77,20 @@ step "1/11 demo"
 OUT="$("$TAU" --demo -p "hello from validation" 2>&1)" || fail "demo exited $?"
 echo "$OUT" | grep -q "tau is alive" || fail "demo answer missing: $OUT"
 echo "ok — faux model answered"
+
+# --- step 1b: tool media results (F4, docs/tool-media.md) -------------
+step "1b/11 tool media result (image block end to end)"
+# The media-tool example's dot_png returns a text block plus a real
+# 1x1 PNG image block (tau:extension@0.3.0). Assert the whole path:
+# guest → host conversion → faux model's text projection shows the
+# [image: …] marker, and the session JSONL persisted the image inline
+# (68 bytes is under the blob threshold).
+OUT="$("$TAU" --allow-unsigned -e "$MEDIA_TOOL" --demo --session media.jsonl -p "show me a dot" 2>&1)" || fail "media-tool run: $OUT"
+echo "$OUT" | grep -q "tool ← dot_png" || fail "dot_png never executed: $OUT"
+echo "$OUT" | grep -q "\[image: image/png\]" || fail "image block missing from the text projection: $OUT"
+grep -q '"media_type":"image/png"' media.jsonl || fail "session JSONL lacks the image block: $(cat media.jsonl)"
+grep -q "iVBORw0KGgo" media.jsonl || fail "PNG bytes not inline-base64 in the session: $(cat media.jsonl)"
+echo "ok — image block crossed guest→host→model and persisted inline"
 
 # --- step 2: signing + trust chain ------------------------------------
 step "2/11 signing and trust chain"

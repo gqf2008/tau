@@ -53,10 +53,32 @@ pub fn content_to_core(content: wit::Content) -> Result<Content, ConvertError> {
         },
         wit::Content::ToolResult(result) => Content::ToolResult {
             call_id: result.call_id,
-            content: result.content,
+            content: tool_result_blocks_to_core(result.content)?,
             is_error: result.is_error,
         },
     })
+}
+
+/// Convert a guest tool result's blocks (0.3.0 multi-block contract,
+/// docs/tool-media.md), enforcing the same total size cap as the host
+/// channel: oversize fails closed, it never silently truncates.
+pub fn tool_result_blocks_to_core(
+    blocks: Vec<wit::ResultBlock>,
+) -> Result<Vec<Content>, ConvertError> {
+    let mut total = 0usize;
+    for block in &blocks {
+        total += result_block_bytes(block);
+        if total > MAX_HOST_MESSAGE_BYTES {
+            return Err(ConvertError::TooLarge(total));
+        }
+    }
+    blocks
+        .into_iter()
+        .map(|block| match block {
+            wit::ResultBlock::Text(text) => Ok(Content::Text { text }),
+            wit::ResultBlock::Media(media) => media_to_core(media),
+        })
+        .collect()
 }
 
 /// Core → WIT for one content block. Total conversion: every core
@@ -83,7 +105,30 @@ pub fn content_to_wit(content: &Content) -> wit::Content {
             is_error,
         } => wit::Content::ToolResult(wit::ToolResult {
             call_id: call_id.clone(),
-            content: content.clone(),
+            content: content
+                .iter()
+                .map(|block| match block {
+                    Content::Text { text } => wit::ResultBlock::Text(text.clone()),
+                    Content::Image { media } => {
+                        wit::ResultBlock::Media(media_to_wit(media, None))
+                    }
+                    Content::Audio { media } => {
+                        wit::ResultBlock::Media(media_to_wit(media, None))
+                    }
+                    Content::Video { media } => {
+                        wit::ResultBlock::Media(media_to_wit(media, None))
+                    }
+                    Content::File { media, name } => {
+                        wit::ResultBlock::Media(media_to_wit(media, name.clone()))
+                    }
+                    // The wire's result-block is deliberately narrower than
+                    // content: nested calls/results degrade to their text
+                    // projection.
+                    other => wit::ResultBlock::Text(tau_core::types::tool_result_text(
+                        std::slice::from_ref(other),
+                    )),
+                })
+                .collect(),
             is_error: *is_error,
         }),
     }
@@ -192,6 +237,21 @@ pub fn message_to_wit(message: &Message) -> wit::Message {
 
 /// What a block costs against [`MAX_HOST_MESSAGE_BYTES`]: text bytes,
 /// inline media bytes, and the reference strings for the rest.
+fn result_block_bytes(block: &wit::ResultBlock) -> usize {
+    match block {
+        wit::ResultBlock::Text(text) => text.len(),
+        wit::ResultBlock::Media(media) => {
+            media.media_type.len()
+                + media.name.as_ref().map_or(0, String::len)
+                + match &media.source {
+                    wit::MediaSource::Bytes(bytes) => bytes.len(),
+                    wit::MediaSource::Url(url) => url.len(),
+                    wit::MediaSource::Blob(hash) => hash.len(),
+                }
+        }
+    }
+}
+
 fn block_bytes(content: &wit::Content) -> usize {
     match content {
         wit::Content::Text(text) => text.len(),
@@ -205,7 +265,9 @@ fn block_bytes(content: &wit::Content) -> usize {
                 }
         }
         wit::Content::ToolCall(call) => call.id.len() + call.name.len() + call.arguments_json.len(),
-        wit::Content::ToolResult(result) => result.call_id.len() + result.content.len(),
+        wit::Content::ToolResult(result) => {
+            result.call_id.len() + result.content.iter().map(result_block_bytes).sum::<usize>()
+        }
     }
 }
 
@@ -260,13 +322,39 @@ mod tests {
             },
             Content::ToolResult {
                 call_id: "call_1".into(),
-                content: "HI".into(),
+                content: vec![tau_core::Content::Text { text: "HI".into() }],
                 is_error: false,
             },
             Content::ToolResult {
                 call_id: "call_2".into(),
-                content: "boom".into(),
+                content: vec![tau_core::Content::Text { text: "boom".into() }],
                 is_error: true,
+            },
+            // 0.3.0 (docs/tool-media.md): a tool result carrying real
+            // media — bytes, url, and blob sources must all round-trip.
+            Content::ToolResult {
+                call_id: "call_3".into(),
+                content: vec![
+                    tau_core::Content::Text {
+                        text: "the dot: ".into(),
+                    },
+                    tau_core::Content::Image {
+                        media: Media::bytes("image/png", b"\x89PNG"),
+                    },
+                    tau_core::Content::Video {
+                        media: Media::url("video/mp4", "https://example.com/v.mp4"),
+                    },
+                    tau_core::Content::File {
+                        media: Media {
+                            media_type: "application/pdf".into(),
+                            source: MediaSource::Blob {
+                                hash: "sha256:deadbeef".into(),
+                            },
+                        },
+                        name: Some("out.pdf".into()),
+                    },
+                ],
+                is_error: false,
             },
         ]
     }
@@ -278,6 +366,26 @@ mod tests {
             let back = content_to_core(wire).expect("corpus converts back");
             assert_eq!(back, block, "round trip changed the block");
         }
+    }
+
+    #[test]
+    fn oversize_tool_result_fails_closed() {
+        // The host-channel cap applies to tool-result blocks too: one
+        // giant block or a total over the limit both fail closed.
+        let huge = vec![wit::ResultBlock::Text("x".repeat(MAX_HOST_MESSAGE_BYTES + 1))];
+        assert!(matches!(
+            tool_result_blocks_to_core(huge),
+            Err(ConvertError::TooLarge(_))
+        ));
+        let half = "x".repeat(MAX_HOST_MESSAGE_BYTES / 2 + 1);
+        let blocks = vec![
+            wit::ResultBlock::Text(half.clone()),
+            wit::ResultBlock::Text(half),
+        ];
+        assert!(matches!(
+            tool_result_blocks_to_core(blocks),
+            Err(ConvertError::TooLarge(_))
+        ));
     }
 
     #[test]

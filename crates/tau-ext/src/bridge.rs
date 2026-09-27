@@ -21,6 +21,8 @@ use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 use crate::http::HttpRegistry;
 use crate::{ExtError, ExtensionHost, WasiPolicy, bridge_bindings};
 
+impl bridge_bindings::tau::extension::types::Host for BridgeState {}
+
 struct BridgeState {
     ctx: WasiCtx,
     table: ResourceTable,
@@ -365,6 +367,27 @@ impl ExtensionHost {
     }
 }
 
+/// Bridge-world result block → host-bindings result block. The two
+/// bindgen invocations generate distinct types for the same WIT shapes.
+fn bridge_block_to_host(
+    block: bridge_bindings::tau::extension::types::ResultBlock,
+) -> crate::bindings::tau::extension::types::ResultBlock {
+    use bridge_bindings::tau::extension::types as bt;
+    use crate::bindings::tau::extension::types as ht;
+    match block {
+        bt::ResultBlock::Text(text) => ht::ResultBlock::Text(text),
+        bt::ResultBlock::Media(media) => ht::ResultBlock::Media(ht::Media {
+            media_type: media.media_type,
+            source: match media.source {
+                bt::MediaSource::Bytes(bytes) => ht::MediaSource::Bytes(bytes),
+                bt::MediaSource::Url(url) => ht::MediaSource::Url(url),
+                bt::MediaSource::Blob(hash) => ht::MediaSource::Blob(hash),
+            },
+            name: media.name,
+        }),
+    }
+}
+
 struct BridgeTool {
     def: ToolDef,
     shared: SharedBridge,
@@ -398,9 +421,17 @@ impl Tool for BridgeTool {
         })
         .await;
         match result {
-            Ok(Ok(r)) => ToolOutput {
-                content: r.content,
-                is_error: r.is_error,
+            Ok(Ok(r)) => match crate::convert::tool_result_blocks_to_core(
+                // The bridge world bindgen has its own copies of the types
+                // interface; translate field-by-field into the host-side
+                // bindings' shapes (identical by construction).
+                r.content.into_iter().map(bridge_block_to_host).collect(),
+            ) {
+                Ok(content) => ToolOutput {
+                    content,
+                    is_error: r.is_error,
+                },
+                Err(e) => ToolOutput::err(format!("invalid tool result: {e}")),
             },
             Ok(Err(e)) => {
                 ToolOutput::err(format!("bridge trap: {}", crate::compact_wasm_error(&e)))

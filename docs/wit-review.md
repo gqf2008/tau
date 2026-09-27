@@ -70,7 +70,7 @@ extensions that observe (via tau-ext; observe-only)」同样无实现支撑。
 `Agent::observe`）；text_delta/tool_progress 保持 reserved（高频拉取
 订阅设计落地前不接线），`tau probes` 目录列出 wired/reserved 状态。
 
-### F4 [中·全模态] 工具结果只能是文本 —— 设计定稿（docs/tool-media.md），0.3.0 实现
+### F4 [中·全模态] 工具结果只能是文本 —— 已落地（tau:extension@0.3.0，docs/tool-media.md）
 
 证据链：`wit tool-result{content: string}` ↔
 `tau-core ToolOutput{content: String}`（tool.rs:21）↔
@@ -88,12 +88,14 @@ image/audio/video/file 块，但**工具无法返回媒体**——截图工具�
 - 厂商边：Anthropic/OpenAI 的 tool_result 内容块只收 text/image，
   非 image 媒体须在 provider 边降级为文本占位符。
 
-0.3.0 改动面：WIT `tool-result.content: string → list<content>`
-（契约 breaking）；`ToolOutput.content: String → Vec<Content>`；
+落地改动面（2026-09-27）：WIT `tool-result.content: string →
+list<result-block>`（契约 breaking 至 0.3.0；**非递归 result-block
+变体**替代原草样的 `list<content>`——wasmtime 宿主侧 bindgen 拒编
+任何递归 WIT 类型，且工具结果本不该嵌套调用/结果，与 pi 的
+text|image 块对齐）；`ToolOutput.content: String → Vec<Content>`；
 convert.rs 映射 + 尺寸上限沿用；provider 边非 image 媒体降级；
-旧 session 文件读兼容（string → [Text]）。设计定稿见
-`docs/tool-media.md`（2026-09-27，jev 裁决：本轮只落设计文档，
-实现排下一轮）。
+旧 session 文件读兼容（string → [Text]）。设计与验收清单见
+`docs/tool-media.md`（2026-09-27 定稿并落地，jev 裁决先行文档）。
 
 ### F5 [中·fail-loud] parameters-json 解析失败静默降级为全开放 schema —— 已落地
 
@@ -153,8 +155,9 @@ error（永不永阻）；`http` 增量读带 idle 超时，连接级 keepalive 
 3. ~~F5~~：parameters-json 坏 schema 拒载并点名工具（已落地）。
 4. F7/F8：hooks→probes 正名、kill 返回 result、句柄代数，随 0.2.0。
 5. F1：ambient 侧门处置（A/B/C）留用户拍板，0.3.0 决策项。
-6. F4：工具媒体结果——已评估（pi 线格式 text+image 多块，tau 走
-   blob 引用无新不兼容），0.3.0 实现项。
+6. ~~F4~~：工具媒体结果——已落地（0.3.0：`tool-result.content` 收
+   `list<result-block>`，非递归变体绕开 wasmtime bindgen 的递归类型
+   拒编；provider 边非 image 媒体降级为占位符；旧 session 读兼容）。
 
 ## 修订记录
 

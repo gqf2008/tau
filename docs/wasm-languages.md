@@ -5,9 +5,14 @@
 ——工具名 `upper`，把入参 `text` 转大写——用七种主流语言各写一个最小
 扩展，并用同一条验收命令**真加载**验证。
 
-契约版本 `tau:extension@0.2.0`（0.1.0 → 0.2.0：`hooks` 接口正名
-`probes`，extension world 新增 `host` import）。0.1.0 契约的旧产物
-会被宿主点名拒载（版本错配写进 load 错误），重建即迁移。
+契约版本 `tau:extension@0.3.0`（0.1.0 → 0.2.0：`hooks` 接口正名
+`probes`，extension world 新增 `host` import；0.2.0 → 0.3.0：
+`tool-result.content` 从 `string` 改为 `list<result-block>`——
+工具可返回媒体块，见 docs/tool-media.md）。旧契约产物会被宿主
+点名拒载（版本错配写进 load 错误），重建即迁移。各语言的
+result-block 构造：C 填 tag+union，C++ 用 variant 转换构造
+（cxxshim 已补），Python `ResultBlock_Text(...)`，
+JS/TS `{ tag: "text", val: ... }`，Go `MakeResultBlockText(...)`。
 
 ## 验收标准
 

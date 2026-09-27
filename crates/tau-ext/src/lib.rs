@@ -354,7 +354,7 @@ impl WasiPolicy {
 }
 
 /// If the component exports `tau:extension` interfaces of another
-/// contract version, say so — "missing export tau:extension/tools@0.2.0"
+/// contract version, say so — "missing export tau:extension/tools@0.3.0"
 /// alone leaves the user guessing what the component was built against
 /// (docs/host-channel.md 兼容性: load errors name the version mismatch).
 fn version_hint(component: &Component) -> String {
@@ -369,11 +369,11 @@ fn version_hint(component: &Component) -> String {
     }
     found.sort();
     found.dedup();
-    if found.is_empty() || found.iter().any(|v| v == "0.2.0") {
+    if found.is_empty() || found.iter().any(|v| v == "0.3.0") {
         String::new()
     } else {
         format!(
-            " [component targets tau:extension@{}; this host requires @0.2.0 — rebuild it with the 0.2.0 bindings, see docs/host-channel.md]",
+            " [component targets tau:extension@{}; this host requires @0.3.0 — rebuild it with the 0.3.0 bindings, see docs/tool-media.md]",
             found.join(", ")
         )
     }
@@ -684,9 +684,14 @@ impl Tool for WasmTool {
         })
         .await;
         match result {
-            Ok(Ok(r)) => ToolOutput {
-                content: r.content,
-                is_error: r.is_error,
+            Ok(Ok(r)) => match convert::tool_result_blocks_to_core(r.content) {
+                // 校验即错误: invalid/oversize blocks become a tool error
+                // the model sees — never silently truncated or dropped.
+                Ok(content) => ToolOutput {
+                    content,
+                    is_error: r.is_error,
+                },
+                Err(e) => ToolOutput::err(format!("invalid tool result: {e}")),
             },
             Ok(Err(e)) => ToolOutput::err(format!("wasm trap: {}", compact_wasm_error(&e))),
             Err(e) => ToolOutput::err(format!("extension task failed: {e}")),

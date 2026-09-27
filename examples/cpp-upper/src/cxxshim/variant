@@ -4,8 +4,10 @@
 // variants (0.2.0 types interface): a `variants` member read via
 // .index() and std::get<Tag>(v).value, with the value semantics
 // Message/Content need as by-value parameters. Alternatives are
-// constructed by placement through assignment in generated code; the
-// upper example itself never builds one.
+// constructed by placement through assignment in generated code.
+// 0.3.0 added the converting constructor variant(alternative): guest
+// code builds result-blocks, and Text/Media hold a wit::string with no
+// default constructor, so default-construct-then-assign is impossible.
 #include <stddef.h>
 #include <utility>
 
@@ -24,15 +26,37 @@ struct is_same<A, A> {
 
 template <class T, class... Ts>
 struct type_index;
+// Match-first specialization: the ternary form eagerly instantiated the
+// tail even on a hit, so get<Text> on variant<Text, Media> failed the
+// base-case static_assert (latent until 0.3.0's converting ctor used it).
+template <class T, class... Ts>
+struct type_index<T, T, Ts...> {
+    static constexpr size_t value = 0;
+};
 template <class T, class U, class... Ts>
 struct type_index<T, U, Ts...> {
-    static constexpr size_t value =
-        is_same<T, U>::value ? 0 : 1 + type_index<T, Ts...>::value;
+    static constexpr size_t value = 1 + type_index<T, Ts...>::value;
 };
 template <class T, class U>
 struct type_index<T, U> {
     static_assert(is_same<T, U>::value, "get<T>: T is not a variant alternative");
     static constexpr size_t value = 0;
+};
+
+template <bool B, class T = void>
+struct enable_if {};
+template <class T>
+struct enable_if<true, T> {
+    using type = T;
+};
+
+template <class T>
+struct bare {
+    using type = T;
+};
+template <class T>
+struct bare<const T> {
+    using type = T;
 };
 
 template <class T, class... Ts>
@@ -97,6 +121,13 @@ class variant {
 
   public:
     variant() : tag(0) { new (buf) typename detail::first<Ts...>::type(); }
+    // Converting constructor from an alternative (see header comment).
+    template <class T,
+              class U = typename detail::bare<typename std::remove_reference<T>::type>::type,
+              typename detail::enable_if<!detail::is_same<U, variant>::value, int>::type = 0>
+    variant(T&& v) : tag(detail::type_index<U, Ts...>::value) {
+        new (buf) U(std::move(v));
+    }
     variant(const variant& o) : tag(o.tag) { copy_at<0, Ts...>(tag, buf, o.buf); }
     variant(variant&& o) : tag(o.tag) { move_at<0, Ts...>(tag, buf, o.buf); }
     variant& operator=(const variant& o) {

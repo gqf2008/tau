@@ -19,6 +19,7 @@ wit_bindgen::generate!({
 use std::sync::{Mutex, MutexGuard};
 
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
+use tau::extension::types::ResultBlock;
 use tau::extension::{http, process as proc};
 
 /// The version this bridge asks for (its newest).
@@ -109,7 +110,7 @@ impl Tools for McpBridge {
                 }
             }
             Ok(ToolResult {
-                content,
+                content: vec![ResultBlock::Text(content)],
                 is_error: result["isError"].as_bool().unwrap_or(false),
             })
         };
@@ -127,7 +128,10 @@ impl Tools for McpBridge {
                     }
                 }
                 ToolResult {
-                    content: format!("mcp-bridge: {}", failure.into_message()),
+                    content: vec![ResultBlock::Text(format!(
+                        "mcp-bridge: {}",
+                        failure.into_message()
+                    ))],
                     is_error: true,
                 }
             }

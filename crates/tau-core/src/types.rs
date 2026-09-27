@@ -196,11 +196,34 @@ pub enum Content {
     ToolResult {
         /// The call this answers.
         call_id: String,
-        /// Textual result content.
-        content: String,
+        /// Result blocks: text and/or media (tool media results since
+        /// 0.3.0 — docs/tool-media.md, wit-review F4). Sessions written
+        /// before 0.3.0 carry a plain string here; reads upgrade it to a
+        /// single text block. Writes always use the block array.
+        #[serde(deserialize_with = "string_or_blocks")]
+        content: Vec<Content>,
         /// True when the tool reported failure.
         is_error: bool,
     },
+}
+
+/// Read-compat for pre-0.3.0 sessions: a tool result's `content` was a
+/// plain string; upgrade it to one text block. New writes are always the
+/// block array (pi's shape).
+fn string_or_blocks<'de, D>(deserializer: D) -> Result<Vec<Content>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum StringOrBlocks {
+        String(String),
+        Blocks(Vec<Content>),
+    }
+    Ok(match StringOrBlocks::deserialize(deserializer)? {
+        StringOrBlocks::String(text) => vec![Content::Text { text }],
+        StringOrBlocks::Blocks(blocks) => blocks,
+    })
 }
 
 /// One message in the conversation: a role plus ordered content blocks.
@@ -244,6 +267,42 @@ impl Message {
             .collect()
     }
 
+}
+
+/// Text projection of tool-result blocks: text concatenated, media as
+/// `[image: mime]`-style placeholders. Used for the ToolCallEnd event,
+/// the after_tool probe payload, and anywhere a string is needed off
+/// the wire.
+pub fn tool_result_text(blocks: &[Content]) -> String {
+    let mut out = String::new();
+    for block in blocks {
+        match block {
+            Content::Text { text } => out.push_str(text),
+            Content::Image { media } => {
+                out.push_str(&format!("[image: {}]", media.media_type))
+            }
+            Content::Audio { media } => {
+                out.push_str(&format!("[audio: {}]", media.media_type))
+            }
+            Content::Video { media } => {
+                out.push_str(&format!("[video: {}]", media.media_type))
+            }
+            Content::File { media, name } => out.push_str(&format!(
+                "[file: {}]",
+                name.as_deref().unwrap_or(&media.media_type)
+            )),
+            Content::ToolCall { name, .. } => {
+                out.push_str(&format!("[tool-call: {name}]"))
+            }
+            Content::ToolResult { call_id, .. } => {
+                out.push_str(&format!("[tool-result: {call_id}]"))
+            }
+        }
+    }
+    out
+}
+
+impl Message {
     /// Media blocks (image/audio/video/file), in order.
     pub fn media(&self) -> impl Iterator<Item = &Media> {
         self.content.iter().filter_map(|c| match c {
@@ -285,6 +344,27 @@ mod tests {
         let back: Message =
             serde_json::from_str(&serde_json::to_string(&url_message).unwrap()).unwrap();
         assert_eq!(url_message, back);
+    }
+
+    #[test]
+    fn legacy_string_tool_result_reads_as_text_block() {
+        // Sessions written before 0.3.0 carry a tool result's content as
+        // a plain string; reads upgrade it to one text block and writes
+        // re-emit the block array (docs/tool-media.md).
+        let json = r#"{"role":"tool","content":[{"type":"toolResult","call_id":"c1","content":"plain output","is_error":false}]}"#;
+        let message: Message = serde_json::from_str(json).unwrap();
+        assert_eq!(
+            message.content[0],
+            Content::ToolResult {
+                call_id: "c1".into(),
+                content: vec![Content::Text {
+                    text: "plain output".into()
+                }],
+                is_error: false,
+            }
+        );
+        let out = serde_json::to_string(&message).unwrap();
+        assert!(out.contains(r#""content":[{"type":"text","text":"plain output"}]"#));
     }
 
     #[test]

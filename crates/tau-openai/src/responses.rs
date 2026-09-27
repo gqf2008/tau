@@ -12,6 +12,36 @@ use tau_core::types::{Content, Role};
 
 pub const PATH: &str = "/responses";
 
+/// function_call_output content parts (Responses API; multi-block since
+/// 0.3.0 — docs/tool-media.md): input_text + input_image; audio/video/
+/// file degrade to text placeholders.
+fn tool_result_output(blocks: &[Content]) -> Vec<serde_json::Value> {
+    let mut parts = Vec::new();
+    for block in blocks {
+        match block {
+            Content::Text { text } => {
+                parts.push(serde_json::json!({ "type": "input_text", "text": text }))
+            }
+            Content::Image { media } => {
+                if let Some(data) = media.source.encode_base64() {
+                    parts.push(serde_json::json!({
+                        "type": "input_image",
+                        "image_url": format!("data:{};base64,{data}", media.media_type),
+                    }));
+                }
+            }
+            other => parts.push(serde_json::json!({
+                "type": "input_text",
+                "text": tau_core::types::tool_result_text(std::slice::from_ref(other)),
+            })),
+        }
+    }
+    if parts.is_empty() {
+        parts.push(serde_json::json!({ "type": "input_text", "text": "(no tool output)" }));
+    }
+    parts
+}
+
 pub fn request_body(model: &str, req: &Request) -> Json {
     let mut input = Vec::new();
     for message in &req.messages {
@@ -27,7 +57,7 @@ pub fn request_body(model: &str, req: &Request) -> Json {
                         } => Some(json!({
                             "type": "function_call_output",
                             "call_id": call_id,
-                            "output": content,
+                            "output": tool_result_output(content),
                         })),
                         _ => None,
                     })
@@ -98,7 +128,7 @@ pub fn request_body(model: &str, req: &Request) -> Json {
                         input.push(json!({
                             "type": "function_call_output",
                             "call_id": call_id,
-                            "output": content,
+                            "output": tool_result_output(content),
                         }));
                     }
                 }
@@ -280,7 +310,7 @@ mod tests {
                     role: Role::Tool,
                     content: vec![Content::ToolResult {
                         call_id: "fc1".into(),
-                        content: "HI".into(),
+                        content: vec![Content::Text { text: "HI".into() }],
                         is_error: false,
                     }],
                 },
@@ -291,6 +321,57 @@ mod tests {
         assert_eq!(body["instructions"], "be brief");
         assert_eq!(body["input"][1]["type"], "function_call");
         assert_eq!(body["input"][2]["type"], "function_call_output");
-        assert_eq!(body["input"][2]["output"], "HI");
+        assert_eq!(
+            body["input"][2]["output"],
+            json!([{ "type": "input_text", "text": "HI" }])
+        );
+    }
+
+    #[test]
+    fn tool_result_maps_media_and_placeholders() {
+        // 0.3.0 (docs/tool-media.md): function_call_output carries
+        // input_text + input_image parts; audio degrades to a text
+        // placeholder.
+        let req = Request {
+            system: None,
+            messages: vec![
+                tau_core::types::Message {
+                    role: Role::Assistant,
+                    content: vec![Content::ToolCall {
+                        id: "fc1".into(),
+                        name: "dot_png".into(),
+                        arguments: json!({}),
+                    }],
+                },
+                tau_core::types::Message {
+                    role: Role::Tool,
+                    content: vec![Content::ToolResult {
+                        call_id: "fc1".into(),
+                        content: vec![
+                            Content::Text {
+                                text: "a dot. ".into(),
+                            },
+                            Content::Image {
+                                media: tau_core::types::Media::bytes("image/png", b"hello"),
+                            },
+                            Content::Audio {
+                                media: tau_core::types::Media::bytes("audio/pcm", b"\x00"),
+                            },
+                        ],
+                        is_error: false,
+                    }],
+                },
+            ],
+            tools: vec![],
+        };
+        let body = request_body("gpt-5", &req);
+        assert_eq!(
+            body["input"][1]["output"],
+            json!([
+                { "type": "input_text", "text": "a dot. " },
+                { "type": "input_image", "image_url": "data:image/png;base64,aGVsbG8=" },
+                { "type": "input_text", "text": "[audio: audio/pcm]" },
+            ])
+        );
     }
 }

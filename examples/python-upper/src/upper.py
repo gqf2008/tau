@@ -7,6 +7,7 @@ attribute name: `Tools` for tau:extension/tools, `Probes` for probes."""
 import json
 
 from wit_world import exports as _exports
+from wit_world.imports.types import ResultBlock_Text
 
 
 class Tools(_exports.Tools):
@@ -21,14 +22,21 @@ class Tools(_exports.Tools):
 
     def execute(self, name, arguments_json):
         if name != "upper":
-            return _exports.tools.ToolResult(content="unknown tool: " + name, is_error=True)
+            return _exports.tools.ToolResult(
+                content=[ResultBlock_Text("unknown tool: " + name)], is_error=True
+            )
         try:
             text = json.loads(arguments_json).get("text")
         except ValueError:
             text = None
         if not isinstance(text, str):
-            return _exports.tools.ToolResult(content="missing string argument 'text'", is_error=True)
-        return _exports.tools.ToolResult(content=text.upper(), is_error=False)
+            return _exports.tools.ToolResult(
+                content=[ResultBlock_Text("missing string argument 'text'")], is_error=True
+            )
+        # 0.3.0 (docs/tool-media.md): content is a list of result-blocks.
+        return _exports.tools.ToolResult(
+            content=[ResultBlock_Text(text.upper())], is_error=False
+        )
 
 
 class Probes(_exports.Probes):

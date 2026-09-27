@@ -2,6 +2,33 @@
 
 ## [Unreleased]
 
+### Breaking — contract `tau:extension@0.3.0` (tool media results, wit-review F4)
+
+- Tool results are **multi-block**: `tool-result.content` is now
+  `list<result-block>` (`text(string)` / `media(media)`) instead of a
+  plain string — tools can return images, audio, video, and files, with
+  media bytes crossing the ABI raw (never base64). The variant is
+  deliberately non-recursive (a tool result never contains tool calls or
+  nested results; wasmtime's host bindgen rejects recursive WIT types
+  outright). tau-core: `ToolOutput.content` and
+  `Content::ToolResult.content` are `Vec<Content>`; `ToolOutput::ok/err`
+  stay as text conveniences, `ok_blocks`/`err_blocks` carry media;
+  `ToolOutput::text()` gives the text projection. Sessions written
+  before 0.3.0 read without migration (a legacy string `content`
+  upgrades to one text block; writes always emit the block array).
+  Providers degrade at the wire edge: Anthropic maps text/image
+  natively; OpenAI chat sends images as a trailing user message of
+  `image_url` parts; OpenAI responses uses `input_text`/`input_image`;
+  audio/video/file become text placeholders everywhere
+  (docs/tool-media.md).
+- Components built against 0.2.0 must be rebuilt; load errors name the
+  mismatch ("component targets tau:extension@0.2.0; this host requires
+  @0.3.0 — rebuild…"). All seven Rust examples and all six language
+  examples (C/C++/Python/JS/TS/Go) are rebuilt and live-verified.
+- New example `media-tool` (`dot_png` returns a 1x1 PNG image block);
+  validate.sh step 1b asserts the image block end to end (guest → host
+  → model projection → inline base64 in the session JSONL).
+
 ### Breaking — contract `tau:extension@0.2.0` (docs/wit-review.md batch)
 
 - **Host channel** (`docs/host-channel.md`, landed): the extension

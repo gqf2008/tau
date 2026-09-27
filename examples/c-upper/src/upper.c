@@ -30,9 +30,14 @@ static int extract_text(const extension_string_t *json, char *out, size_t cap) {
     return 0;
 }
 
+/* 0.3.0 (docs/tool-media.md): content is a list of result-blocks;
+ * this example only ever returns one text block. */
 static void set_result(exports_tau_extension_tools_tool_result_t *ret,
                        const char *content, int is_error) {
-    extension_string_dup(&ret->content, content);
+    ret->content.ptr = malloc(sizeof(exports_tau_extension_tools_result_block_t));
+    ret->content.len = 1;
+    ret->content.ptr[0].tag = TAU_EXTENSION_TYPES_RESULT_BLOCK_TEXT;
+    extension_string_dup(&ret->content.ptr[0].val.text, content);
     ret->is_error = is_error;
 }
 

@@ -29,7 +29,7 @@ async fn loads_tool_and_executes() {
         .execute(serde_json::json!({ "text": "hello tau" }))
         .await;
     assert!(!out.is_error);
-    assert_eq!(out.content, "HELLO TAU");
+    assert_eq!(out.text(), "HELLO TAU");
 }
 
 fn provider_artifact() -> Option<PathBuf> {

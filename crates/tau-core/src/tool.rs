@@ -19,28 +19,48 @@ pub struct ToolDef {
 /// The result of one tool execution.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ToolOutput {
-    /// Textual content; the model reads it as the tool result block.
-    pub content: String,
+    /// Result blocks; the model reads them as the tool result content.
+    /// Multi-block (text and/or media) since 0.3.0 — docs/tool-media.md.
+    pub content: Vec<crate::types::Content>,
     /// True when the tool itself reported failure (still a *result*, not
     /// an exception — the model gets to see and recover from it).
     pub is_error: bool,
 }
 
 impl ToolOutput {
-    /// A successful result.
+    /// A successful text result.
     pub fn ok(content: impl Into<String>) -> Self {
+        Self::ok_blocks(vec![crate::types::Content::Text {
+            text: content.into(),
+        }])
+    }
+
+    /// A failed text result (tool-side error the model should see).
+    pub fn err(content: impl Into<String>) -> Self {
+        Self::err_blocks(vec![crate::types::Content::Text {
+            text: content.into(),
+        }])
+    }
+
+    /// A successful multi-block result (text and/or media).
+    pub fn ok_blocks(content: Vec<crate::types::Content>) -> Self {
         Self {
-            content: content.into(),
+            content,
             is_error: false,
         }
     }
 
-    /// A failed result (tool-side error the model should see).
-    pub fn err(content: impl Into<String>) -> Self {
+    /// A failed multi-block result.
+    pub fn err_blocks(content: Vec<crate::types::Content>) -> Self {
         Self {
-            content: content.into(),
+            content,
             is_error: true,
         }
+    }
+
+    /// Text projection (media as placeholders) for events and probes.
+    pub fn text(&self) -> String {
+        crate::types::tool_result_text(&self.content)
     }
 }
 

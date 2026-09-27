@@ -97,9 +97,15 @@ Implement `exports::tau::extension::tools::Guest`:
   not parse **fails the whole load**, naming the tool — a broken schema
   is never silently widened to an open one (wit-review F5).
 - `execute(name, arguments-json)` — called per tool call. Return
-  `ToolResult { content, is_error }`; the content string goes back to
-  the model as the tool result. Never panic: a trap kills the load, but
-  an `is_error` result is just a tool failure the model can react to.
+  `ToolResult { content, is_error }`; the content blocks go back to the
+  model as the tool result. Since tau:extension@0.3.0 `content` is a
+  **list of result-blocks** (docs/tool-media.md): `text(string)` and/or
+  `media(media)` — a tool can return images/audio/files, with raw bytes
+  crossing the ABI (never base64). Providers that only accept text/image
+  tool results get media degraded to a text placeholder at the provider
+  edge; the bytes are still persisted in the session. Never panic: a
+  trap kills the load, but an `is_error` result is just a tool failure
+  the model can react to.
 
 Reference: `examples/upper/src/lib.rs` (an `upper` tool, ~60 lines
 including a no-op probes impl). Build and load:
