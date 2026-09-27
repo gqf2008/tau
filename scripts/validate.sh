@@ -508,10 +508,12 @@ echo "ok — trust --from-component onboards the verified key from oci://"
 
 # --- step 8: blob GC ----------------------------------------------------
 step "8/10 blob GC (dry-run reports, --yes deletes, live blobs kept)"
-# Seed the real blob store with two blobs only this run could own
-# (random content, unique digests): one referenced by a crafted
-# session, one orphan. A gc bug that eats live blobs would eat real
-# user data, so this checks the live-set math against the real store.
+# Seed the real blob store with four blobs only this run could own
+# (random content, unique digests): one referenced on the active
+# branch, one inside a compaction summary, one on an abandoned branch,
+# one orphan. A gc bug that eats live blobs would eat real user data,
+# so this checks the live-set math against the real store — and the
+# mark must cover the WHOLE session tree, compaction entries included.
 mkdir -p "$HOME/.tau/blobs"
 HASHES=$(python - << 'PYEOF'
 import hashlib, os, random
@@ -519,7 +521,7 @@ import hashlib, os, random
 random.seed()
 blobs = os.path.expanduser("~/.tau/blobs")
 out = []
-for _ in range(2):
+for _ in range(4):
     data = random.randbytes(300 * 1024)
     digest = "sha256:" + hashlib.sha256(data).hexdigest()
     with open(os.path.join(blobs, digest.replace(":", "_")), "wb") as f:
@@ -529,30 +531,41 @@ print(" ".join(out))
 PYEOF
 )
 LIVE_HASH=$(echo "$HASHES" | cut -d' ' -f1)
-ORPHAN_HASH=$(echo "$HASHES" | cut -d' ' -f2)
-GC_BLOB=$(echo "$LIVE_HASH" | tr ':' '_')
+COMPACT_HASH=$(echo "$HASHES" | cut -d' ' -f2)
+BRANCH_HASH=$(echo "$HASHES" | cut -d' ' -f3)
+ORPHAN_HASH=$(echo "$HASHES" | cut -d' ' -f4)
 ORPHAN_FILE="$HOME/.tau/blobs/$(echo "$ORPHAN_HASH" | tr ':' '_')"
 
+# a (active message, LIVE) → b (compaction summary, COMPACT) → d (head);
+# c hangs off a as an abandoned branch (BRANCH). The mark walks the
+# whole tree, so all three survive and only the orphan goes.
 cat > gc-session.jsonl << EOF
 {"id":"a","parent":null,"type":"message","message":{"role":"user","content":[{"type":"text","text":"look"},{"type":"image","media":{"media_type":"image/png","source":"blob","hash":"$LIVE_HASH"}}]}}
+{"id":"b","parent":"a","type":"compaction","summary":{"role":"user","content":[{"type":"text","text":"[summary] still referencing"},{"type":"image","media":{"media_type":"image/png","source":"blob","hash":"$COMPACT_HASH"}}]}}
+{"id":"c","parent":"a","type":"message","message":{"role":"user","content":[{"type":"text","text":"abandoned branch"},{"type":"image","media":{"media_type":"image/png","source":"blob","hash":"$BRANCH_HASH"}}]}}
+{"id":"d","parent":"b","type":"message","message":{"role":"user","content":[{"type":"text","text":"after the compaction"}]}}
 EOF
 
 OUT="$("$TAU" gc --session gc-session.jsonl 2>&1)" || fail "gc dry-run: $OUT"
 echo "$OUT" | grep -q "would free 1 blob(s)" || fail "dry-run report: $OUT"
 echo "$OUT" | grep -q "$ORPHAN_HASH" || fail "dry-run hides the orphan: $OUT"
-if echo "$OUT" | grep -q "$LIVE_HASH"; then
-    fail "dry-run marks the live blob for removal: $OUT"
-fi
+for live in "$LIVE_HASH" "$COMPACT_HASH" "$BRANCH_HASH"; do
+    if echo "$OUT" | grep -q "$live"; then
+        fail "dry-run marks a live blob for removal: $live"
+    fi
+done
 [ -f "$ORPHAN_FILE" ] || fail "dry-run deleted the orphan"
-echo "ok — dry-run reports the orphan, keeps the live blob, deletes nothing"
+echo "ok — dry-run reports the orphan, keeps every tree-referenced blob, deletes nothing"
 
 OUT="$("$TAU" gc --session gc-session.jsonl --yes 2>&1)" || fail "gc --yes: $OUT"
 echo "$OUT" | grep -q "freed 1 blob(s)" || fail "--yes report: $OUT"
 [ ! -f "$ORPHAN_FILE" ] || fail "--yes left the orphan"
-[ -f "$HOME/.tau/blobs/$GC_BLOB" ] || fail "--yes deleted the LIVE blob"
-echo "ok — --yes frees exactly the orphan; the live blob survives"
-
-rm -f "$HOME/.tau/blobs/$GC_BLOB"
+for hash in "$LIVE_HASH" "$COMPACT_HASH" "$BRANCH_HASH"; do
+    f="$HOME/.tau/blobs/$(echo "$hash" | tr ':' '_')"
+    [ -f "$f" ] || fail "--yes deleted a LIVE blob: $hash"
+    rm -f "$f"
+done
+echo "ok — --yes frees exactly the orphan; active, compacted, and abandoned-branch blobs survive"
 GC_BLOB=""
 
 # --- step 9: compaction --------------------------------------------------
