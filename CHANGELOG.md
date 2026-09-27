@@ -128,8 +128,47 @@
   Interrupted assembly split, and uplink facts never entering
   assistant content.
 
+### Added — realtime-av Phase 2b: world `realtime` + device consent categories (docs/realtime-av.md)
+
+- WIT (still `tau:extension@0.3.0`): `model-event` gains the four
+  realtime kinds (`input-audio-chunk`, `speech-started`,
+  `speech-stopped`, `interrupted`); new interface `session`
+  (`open`/`push-audio`/`push-image`/`interrupt`/`close`, all
+  door-refusing `result<_, string>`) and new world `realtime` —
+  `import events + http`, `export models + session`, so a realtime
+  component doubles as an ordinary provider and downlink events reuse
+  `events.emit`. One session per instance.
+- tau-ext: `ExtensionHost::load_realtime` → `WasmRealtimeModel`
+  (`stream()` via `models.run` like any provider; `realtime()` builds
+  a FRESH instance per session, opens it, wires the session-long event
+  channel; `close()` consumes the instance so the event stream ends
+  after terminal events flush — a trapped session poisons only its own
+  instance). `ExtensionHost::is_realtime_component` probes the
+  component's exports — the CLI picks the world by reading the type,
+  never by error-driven fallback.
+- Consent taxonomy gains sticky per-fingerprint `microphone`/`camera`
+  categories. The category guards the DEVICE, not the session:
+  `/live N` (real mic) with a wasm realtime provider requires
+  `--microphone` (remembered with `--remember`); `/live N sine`
+  synthesizes and needs no grant. `camera` is registered but admits no
+  capture path yet — always absent.
+- `examples/realtime-echo` (world `realtime`): the SAME deterministic
+  script as `FauxRealtime` — one script, two carriers, the gate's
+  native and wasm paths cross-prove each other.
+- Acceptance: validate.sh step 11d (pty, two legs — refusal names
+  `--microphone` while sine flows, then consented duplex with exact
+  32000-sample accounting across the wasm boundary); tau-ext
+  `realtime_echo` integration tests pin the per-event sequence, the
+  door refusal after close, and the probe's negative case.
+
 ### Breaking — contract `tau:extension@0.3.0` (tool media results, wit-review F4)
 
+- `model-event` grows four realtime cases (`input-audio-chunk`,
+  `speech-started`, `speech-stopped`, `interrupted`) and the package
+  gains interface `session` + world `realtime` — additive at the WIT
+  level, but the interface version hash changes, so 0.2.0-built
+  components must rebuild against the new tau.wit (the load error
+  names the missing/mismatched instance).
 - Tool results are **multi-block**: `tool-result.content` is now
   `list<result-block>` (`text(string)` / `media(media)`) instead of a
   plain string — tools can return images, audio, video, and files, with

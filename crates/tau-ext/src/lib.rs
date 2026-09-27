@@ -74,6 +74,8 @@ mod bridge_bindings {
 
 pub mod bridge;
 pub mod consent;
+mod realtime;
+pub use realtime::WasmRealtimeModel;
 mod ingress;
 pub mod convert;
 mod http;
@@ -561,9 +563,9 @@ fn preopen_host_fs(ctx: &mut WasiCtxBuilder) {
 /// Loads wasm components and exposes their contributions as tau
 /// tools and probe handlers. One host = one wasmtime engine.
 pub struct ExtensionHost {
-    engine: Engine,
+    pub(crate) engine: Engine,
     policy: sign::TrustPolicy,
-    wasi: WasiPolicy,
+    pub(crate) wasi: WasiPolicy,
     /// pub(crate): bridge loading wires the same channel into bridge
     /// instances (docs/im-channels.md contract amendment).
     pub(crate) channel: Arc<HostChannel>,
@@ -960,6 +962,18 @@ impl provider_events::Host for ProviderState {
                     media_type: a.media_type,
                 }
             }
+            provider_events::ModelEvent::InputAudioChunk(a) => {
+                if a.media_type.is_empty() {
+                    return Err("emit input-audio-chunk: media-type must not be empty".into());
+                }
+                tau_core::ModelEvent::InputAudioChunk {
+                    data: a.data,
+                    media_type: a.media_type,
+                }
+            }
+            provider_events::ModelEvent::SpeechStarted => tau_core::ModelEvent::SpeechStarted,
+            provider_events::ModelEvent::SpeechStopped => tau_core::ModelEvent::SpeechStopped,
+            provider_events::ModelEvent::Interrupted => tau_core::ModelEvent::Interrupted,
             provider_events::ModelEvent::Done(stop) => tau_core::ModelEvent::Done {
                 stop: match stop {
                     provider_events::StopReason::Stop => tau_core::StopReason::Stop,
@@ -1152,7 +1166,7 @@ impl provider_bindings::tau::extension::http::Host for ProviderState {
 
 /// The payload handed to a provider component's `run`: the documented
 /// wire shape, plus `auth` when the caller consented a token.
-fn request_json(model: &str, req: &tau_core::Request, auth: Option<&str>) -> String {
+pub(crate) fn request_json(model: &str, req: &tau_core::Request, auth: Option<&str>) -> String {
     let mut payload = serde_json::json!({
         "model": model,
         "system": req.system,

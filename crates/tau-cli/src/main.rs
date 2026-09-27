@@ -71,6 +71,13 @@ struct Cli {
     #[arg(long)]
     provider_wasm: Option<PathBuf>,
 
+    /// Consent: this wasm realtime provider may drive HOST-side
+    /// microphone capture (docs/realtime-av.md — the category guards
+    /// the device; `/live N sine` synthesizes and needs no grant).
+    /// Remembered per signing fingerprint with --remember.
+    #[arg(long, requires = "provider_wasm")]
+    microphone: bool,
+
     /// Run against the scripted faux model; no API key needed.
     #[arg(long)]
     demo: bool,
@@ -710,8 +717,10 @@ async fn main() -> Result<()> {
         )?;
     }
 
-    let (model, model_label): (Box<dyn Model>, String) = if cli.demo {
-        (Box::new(FauxModel::demo()), "demo".into())
+    let (model, model_label, mic_consent): (Box<dyn Model>, String, bool) = if cli.demo {
+        // Host doctrine: the CLI on an explicit user command holds the
+        // user's authority (same as /mic) — no device consent category.
+        (Box::new(FauxModel::demo()), "demo".into(), true)
     } else if let Some(raw) = &cli.provider_wasm {
         let path = &resolve_component(raw).await?;
         let name = cli
@@ -731,22 +740,37 @@ async fn main() -> Result<()> {
         }
         let auth = resolve_provider_auth(cli.provider_auth.clone(), remembered.auth_delivery);
         let wasi = effective_wasi(cli.deny_wasi, &remembered);
+        let mic = cli.microphone || remembered.microphone;
         let label = format!("{name} @ {}", path.display());
-        let model = Box::new(
-            host.with_wasi_policy(wasi)
-                .load_provider(path, name, consent.origins.clone(), auth)
-                .with_context(|| format!("loading provider {}", path.display()))?,
-        );
+        let host_wasi = host.with_wasi_policy(wasi);
+        // Capability probe on the component's actual exports (no
+        // error-driven fallback): a component exporting the `session`
+        // interface is a realtime provider.
+        let model: Box<dyn Model> = if host.is_realtime_component(&bytes) {
+            eprintln!("[tau] provider has realtime sessions (world realtime)");
+            Box::new(
+                host_wasi
+                    .load_realtime(path, name, consent.origins.clone(), auth)
+                    .with_context(|| format!("loading realtime provider {}", path.display()))?,
+            )
+        } else {
+            Box::new(
+                host_wasi
+                    .load_provider(path, name, consent.origins.clone(), auth)
+                    .with_context(|| format!("loading provider {}", path.display()))?,
+            )
+        };
         maybe_remember(
             cli.remember,
             &fingerprint,
             tau_ext::consent::RememberedConsent {
                 auth_delivery: cli.provider_auth.is_some(),
                 wasi_deny: wasi == tau_ext::WasiPolicy::DenyAll,
+                microphone: cli.microphone,
                 ..tau_ext::consent::RememberedConsent::from(consent)
             },
         )?;
-        (model, label)
+        (model, label, mic)
     } else {
         let provider = cli.provider.clone().unwrap_or_else(|| {
             if std::env::var("ANTHROPIC_API_KEY").is_ok()
@@ -774,7 +798,9 @@ async fn main() -> Result<()> {
             ),
             other => anyhow::bail!("unknown provider: {other}"),
         };
-        (model, label)
+        // Native providers are host code — the user's explicit /live
+        // command IS the consent (same doctrine as /mic).
+        (model, label, true)
     };
 
     let mut store = JsonlStore::open(&cli.session)
@@ -879,7 +905,8 @@ async fn main() -> Result<()> {
     }
 
     if interactive {
-        return repl::interactive(agent, store, history, base, session_payload, inject_rx).await;
+        return repl::interactive(agent, store, history, base, session_payload, inject_rx, mic_consent)
+            .await;
     }
     let prompt_text = cli.print.expect("print mode checked above");
 

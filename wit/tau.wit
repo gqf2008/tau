@@ -208,6 +208,19 @@ interface events {
         tool-call-delta(tool-call-delta),
         /// Incremental assistant audio.
         audio-delta(audio-delta),
+        /// Uplink fact (realtime sessions): a chunk was pushed toward
+        /// the provider. Reuses the audio-delta record (data +
+        /// media-type); recorded so the session tree can reconstruct
+        /// what the model heard.
+        input-audio-chunk(audio-delta),
+        /// Server VAD: the user started speaking (realtime sessions).
+        speech-started,
+        /// Server VAD: the user stopped speaking (realtime sessions).
+        speech-stopped,
+        /// Barge-in (realtime sessions): the provider truncated the
+        /// in-flight assistant response; hosts freeze the current
+        /// assembly segment and clear playback buffers.
+        interrupted,
         /// Terminal: the response ended successfully for the given reason.
         done(stop-reason),
         /// Terminal failure — always followed by `done(error)`.
@@ -345,6 +358,47 @@ world provider {
     import events;
     import http;
     export models;
+}
+
+/// Realtime session function group (docs/realtime-av.md; exported by
+/// the `realtime` world — interface named `session` to dodge the
+/// world/interface name collision in bindgen). One session
+/// per component instance: `open` is called once, right after
+/// instantiation; every method refuses at the door once closed.
+/// Contract (same as the native RealtimeSession trait): never trap for
+/// request/transport failures — report via an error event.
+interface session {
+    /// Open the session. config-json: {"input-media-type": string,
+    ///   "output-media-type": string|null, "instructions": string|null}.
+    open: func(config-json: string) -> result<_, string>;
+
+    /// Uplink audio chunk in the session's input-media-type.
+    push-audio: func(data: list<u8>) -> result<_, string>;
+
+    /// Uplink image frame (JPEG) — the video uplink, ~1fps or
+    /// scene-triggered.
+    push-image: func(jpeg: list<u8>) -> result<_, string>;
+
+    /// Barge-in: truncate the in-flight assistant response.
+    interrupt: func() -> result<_, string>;
+
+    /// End the session; terminal events may still flush first.
+    close: func() -> result<_, string>;
+}
+
+/// Realtime provider (docs/realtime-av.md): a persistent bidirectional
+/// session (the OpenAI Realtime / Gemini Live shape). Discovery and
+/// request/response stay — the component doubles as an ordinary
+/// provider. Downlink events push through `events.emit`, including the
+/// realtime model-event kinds. Microphone capture is performed BY THE
+/// HOST on the session's behalf and gated by the per-fingerprint
+/// `microphone` consent category; the `camera` category is registered
+/// but admits no capture path yet (always absent).
+world realtime {
+    import events;
+    import http;
+    export models;
+    export session;
 }
 
 /// Spawn-with-pipes: a generic host capability for bridge components.

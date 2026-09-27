@@ -49,7 +49,7 @@ trap cleanup EXIT
 # --- pre-flight -------------------------------------------------------
 step "build release binary + wasm examples"
 cargo build --release -p tau-cli --quiet
-for ex in upper http-provider mcp-bridge guard echo-provider notifier media-tool streamer ws-echo-bridge feishu-bridge whatsapp-bridge wecom-bridge dingtalk-bridge; do
+for ex in upper http-provider mcp-bridge guard echo-provider notifier media-tool streamer ws-echo-bridge feishu-bridge whatsapp-bridge wecom-bridge dingtalk-bridge realtime-echo; do
     cargo build --manifest-path "examples/${ex}/Cargo.toml" \
         --target wasm32-wasip2 --release --quiet
 done
@@ -71,6 +71,8 @@ DINGTALK="$ROOT/examples/dingtalk-bridge/target/wasm32-wasip2/release/dingtalk_b
 [ -f "$MCP_BRIDGE" ] || fail "mcp-bridge example missing"
 [ -f "$GUARD" ] || fail "guard example missing"
 [ -f "$ECHO_PROVIDER" ] || fail "echo-provider example missing"
+REALTIME_ECHO="$ROOT/examples/realtime-echo/target/wasm32-wasip2/release/realtime_echo.wasm"
+[ -f "$REALTIME_ECHO" ] || fail "realtime-echo example missing"
 [ -f "$NOTIFIER" ] || fail "notifier example missing"
 [ -f "$MEDIA_TOOL" ] || fail "media-tool example missing"
 [ -f "$STREAMER" ] || fail "streamer example missing"
@@ -1061,6 +1063,18 @@ if python -c "import winpty" 2> /dev/null; then
     python "$ROOT/scripts/av_live_e2e.py" "$TAU" "$WORK/av-live-e2e"         || fail "av live e2e failed"
 else
     echo "skip — pywinpty not installed; av live e2e not run"
+fi
+
+# --- step 11d: realtime-av Phase 2b (docs/realtime-av.md) ---
+# The same full-duplex loop behind the wasm boundary (world realtime,
+# examples/realtime-echo), plus the microphone consent category: the
+# grant guards the DEVICE (real-mic path refuses without it; the sine
+# path never touches a device and flows regardless).
+step "11d/11 realtime over wasm (consent gate + duplex through world realtime)"
+if python -c "import winpty" 2> /dev/null; then
+    python "$ROOT/scripts/av_wasm_live_e2e.py" "$TAU" "$REALTIME_ECHO" "$WORK/av-wasm-live-e2e" || fail "av wasm live e2e failed"
+else
+    echo "skip — pywinpty not installed; av wasm live e2e not run"
 fi
 
 step "ALL ELEVEN STEPS PASSED — the release candidate stands"

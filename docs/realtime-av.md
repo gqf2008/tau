@@ -162,6 +162,48 @@ Phase 2 按 Phase 0/1 的既定姿势再拆两刀：**2a 宿主先行**（trait 
   REPL 存活（再发 /quit 正常退出）。截断语义由单元测试精确
   覆盖（interrupt 后旧段冻结、新块开新段）。
 
+### Phase 2b 实施定稿（2026-09-28，契约封印 + consent 门类 + wasm 示例）
+
+2a 已在宿主侧把语义跑真；2b 把**已验证的形状**封印进契约，一字不多。
+
+- **WIT（package 已是 0.3.0，本批并入）**：
+  - `model-event` variant 增四案：`input-audio-chunk(audio-delta)`
+    （复用 data+media-type record）、`speech-started`、`speech-stopped`、
+    `interrupted`——与 tau-core 2a 的 kind 一一对应。
+  - 新 interface `realtime`：`open(config-json) / push-audio(list<u8>)
+    / push-image(list<u8>) / interrupt() / close()`，全
+    `result<_, string>`（关门的会话当场拒收）。
+  - 新 world `realtime { import events; import http; export models;
+    export realtime; }`——发现（models）与流式请求（models.run）
+    不丢：realtime 组件同时是普通 provider；下行推送复用
+    `events.emit`，不发明第二条回传通道。**一个实例一条会话**
+    （session-per-instance，open 即 instantiate）。
+- **tau-ext**：`realtime_bindings` 模块；`emit` 增四臂（语义校验同
+  既有姿势：空 media-type 拒收）；`ExtensionHost::load_realtime()`
+  返回 `WasmRealtimeModel`（`stream()` 走 `models.run`，与
+  WasmModel 同 idiom；`realtime()` 每调 instantiate 一条新实例、
+  调 `open`、把事件通道接上 → `WasmRealtimeSession`）。guest
+  trap = 该会话当场 `Err`（门拒收姿势），不毒化后续会话
+  （session-per-instance 天然隔离）。
+- **consent 门类**：`RememberedConsent` 增 `microphone`/`camera`
+  两个 sticky bool（与 wasi_deny/inject 同姿势）。**门类管的是
+  设备，不是会话**：wasm realtime provider 驱动宿主采集真实
+  麦克风须持 microphone 授予（`--microphone`，`--remember` 可记）；
+  sine 合成路径不碰设备、不需要授予（门禁因此可无硬件跑全链）。
+  camera 门类先行入册但**无采集路径即恒拒**——不为不存在的路径
+  发明 UX。原生/demo provider 走宿主显式命令 doctrine（录制即
+  consent），不需门类授予。
+- **示例 `examples/realtime-echo`**（world realtime）：与
+  FauxRealtime 同剧本（首块 VAD-started + 文本注记；每块回
+  input-audio-chunk 事实 + audio-delta 回声；interrupt →
+  interrupted；close → speech-stopped + done）——**同一剧本两种
+  载体**（Rust 原生替身 + wasm 组件），门禁两路互证。
+- **验收**（validate.sh 11d，pty，两腿）：①无 `--microphone`：
+  `/live 2`（真实麦路径）被拒且点名 `--microphone`，`/live 2 sine`
+  照样通（设备语义而非会话语义）；②持授予 + sine：VAD 行、sink
+  announce（pcm 裸流）、逐样本账目 32000、会话树双块——全链
+  隔着 wasm 边界断言。
+
 ### Phase 3 — wasip3 换 ABI
 
 base64-JSON 块调用换 `stream<u8>`，按 `docs/wasip3-streams.md` 的
@@ -188,7 +230,7 @@ base64-JSON 块调用换 `stream<u8>`，按 `docs/wasip3-streams.md` 的
       打断/换段清缓冲；`AgentEvent::AudioDelta` 为此携带字节
       （WIT 契约不变）；validate.sh 11b 断言逐样本账目
       （32000 == 2s @ 16kHz）
-- [~] Phase 2：**2a 已落地**（2026-09-28）：`RealtimeSession` trait
+- [x] Phase 2：**2a + 2b 均已落地**（2026-09-28）：`RealtimeSession` trait
       （`Model::realtime` 能力发现，默认 None）+ 新事件 kind
       （`InputAudioChunk`/`SpeechStarted`/`SpeechStopped`/`Interrupted`，
       ModelEvent + AgentEvent 镜像，Interrupted 截断组装段并清 sink）
@@ -196,6 +238,12 @@ base64-JSON 块调用换 `stream<u8>`，按 `docs/wasip3-streams.md` 的
       [sine]` 全双工环（合成 RunStart/RunEnd 复用 Phase 1 全部
       sink 臂，Ctrl-C = barge-in，close 后双块落账）；validate.sh
       11c 两腿 pty 门禁（账目 32000 逐样本精确 + barge-in 存活）。
-      **待 2b**：WIT world `realtime` + consent 门类
-      （microphone/camera）+ wasm realtime provider 示例
+      **2b**（同日落地）：WIT world `realtime`（interface `session`，
+      `model-event` 增四案 realtime kind）+ consent 门类
+      `microphone`/`camera` 入册（门类管设备不管会话——sine 路径无需
+      授予；camera 无采集路径恒拒）+ `examples/realtime-echo`（与
+      FauxRealtime 同剧本双载体互证）+ `is_realtime_component` 导出
+      探针（读组件类型，不用错误驱动控制流）；validate.sh 11d 两腿
+      + tau-ext realtime_echo 集成测试（跨界逐事件序列断言 + 关门
+      拒收）
 - [ ] Phase 3：按 wasip3-streams.md 执行

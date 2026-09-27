@@ -51,6 +51,7 @@ pub(crate) async fn interactive(
     base: Option<String>,
     session_payload: serde_json::Value,
     inject: UnboundedReceiver<Control>,
+    mic_consent: bool,
 ) -> Result<()> {
     let agent = Arc::new(agent);
     let (line_tx, line_rx) = unbounded_channel();
@@ -130,6 +131,7 @@ pub(crate) async fn interactive(
         print.as_ref(),
         Some(session_payload.clone()),
         inject,
+        mic_consent,
     )
     .await;
     if result.is_ok() {
@@ -158,6 +160,10 @@ pub(crate) async fn drive(
     print: impl Fn(&str) + Send + Sync,
     session_start: Option<serde_json::Value>,
     mut inject: UnboundedReceiver<Control>,
+    // May the host capture the real microphone for THIS model?
+    // (Consent category per fingerprint for wasm providers; host
+    // doctrine grants it to native/demo — docs/realtime-av.md.)
+    mic_consent: bool,
 ) -> Result<()> {
     // Renderer: another event-bus subscriber, formatting events into
     // complete lines for the printer. It also owns the live playback
@@ -488,6 +494,17 @@ pub(crate) async fn drive(
                                 .unwrap_or(10)
                                 .clamp(1, 120);
                             let sine = parts.next() == Some("sine");
+                            if !sine && !mic_consent {
+                                // The category guards the DEVICE, not
+                                // the session: synthetic uplink never
+                                // touches the mic and needs no grant.
+                                print(
+                                    "[tau] microphone capture for this provider needs consent — \
+                                     rerun with --microphone (remember with --remember); \
+                                     `/live N sine` synthesizes and needs no grant",
+                                );
+                                continue;
+                            }
                             let config = tau_core::RealtimeConfig {
                                 input_media_type: "audio/pcm;rate=16000".into(),
                                 ..Default::default()
@@ -818,7 +835,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("two".into())).unwrap();
@@ -861,6 +878,7 @@ mod tests {
             capture.printer(),
             None,
             inject_rx,
+            true,
         ));
         // No typed line at all: the injection alone must run the turn.
         inject_tx
@@ -922,6 +940,7 @@ mod tests {
             capture.printer(),
             Some(serde_json::json!({ "session": "s.jsonl", "model": "demo" })),
             unbounded_channel().1,
+            true,
         ));
         tx.send(LineEvent::Line("/quit".into())).unwrap();
         task.await.unwrap().unwrap();
@@ -949,7 +968,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true));
 
         tx.send(LineEvent::Line("start".into())).unwrap();
         started.notified().await; // model is mid-stream now
@@ -986,7 +1005,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("two".into())).unwrap();
@@ -1034,7 +1053,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("/compact".into())).unwrap();
@@ -1084,7 +1103,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true));
         tx.send(LineEvent::Line("/help".into())).unwrap();
         tx.send(LineEvent::Line("/bogus".into())).unwrap();
         tx.send(LineEvent::Line("/quit".into())).unwrap();
@@ -1137,7 +1156,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true));
         tx.send(LineEvent::Line("hi".into())).unwrap();
         wait_for(&capture, "run failed: model error: boom").await;
         // The loop survived: the next prompt runs and completes.
@@ -1167,7 +1186,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("two".into())).unwrap();

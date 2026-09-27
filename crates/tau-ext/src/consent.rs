@@ -48,6 +48,17 @@ pub struct RememberedConsent {
     /// (docs/im-channels.md). Unions on merge like origins.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub ingress: Vec<String>,
+    /// Microphone: this realtime provider may drive HOST-side mic
+    /// capture (docs/realtime-av.md — the category guards the DEVICE,
+    /// not the session; synthetic uplink like `/live N sine` needs no
+    /// grant). Sticky like wasi_deny.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub microphone: bool,
+    /// Camera: registered with the taxonomy but admits no capture path
+    /// yet — always absent in practice (no UX is invented for a path
+    /// that does not exist).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub camera: bool,
 }
 
 impl RememberedConsent {
@@ -60,6 +71,8 @@ impl RememberedConsent {
             && !self.wasi_deny
             && !self.inject
             && self.ingress.is_empty()
+            && !self.microphone
+            && !self.camera
     }
 }
 
@@ -73,6 +86,10 @@ impl From<BridgeConsent> for RememberedConsent {
             wasi_deny: false,
             inject: consent.inject,
             ingress: consent.ingress,
+            // Bridge consent carries no device categories (realtime-av
+            // guards provider-driven capture, not bridges).
+            microphone: false,
+            camera: false,
         }
     }
 }
@@ -109,6 +126,8 @@ pub fn remember_into(existing: RememberedConsent, grant: RememberedConsent) -> R
         wasi_deny: existing.wasi_deny || grant.wasi_deny,
         inject: existing.inject || grant.inject,
         ingress,
+        microphone: existing.microphone || grant.microphone,
+        camera: existing.camera || grant.camera,
     }
 }
 
@@ -250,6 +269,8 @@ mod tests {
             wasi_deny: false,
             inject: true,
             ingress: Vec::new(),
+            microphone: false,
+            camera: false,
         };
         store.save("abc123abc123abc1", &consent).unwrap();
         assert_eq!(store.load("abc123abc123abc1"), Some(consent));
@@ -329,6 +350,8 @@ mod tests {
             wasi_deny: false,
             inject: false,
             ingress: Vec::new(),
+            microphone: false,
+            camera: false,
         };
         let grant = RememberedConsent {
             command: None,
@@ -338,6 +361,8 @@ mod tests {
             wasi_deny: true,
             inject: true,
             ingress: Vec::new(),
+            microphone: false,
+            camera: false,
         };
         let merged = remember_into(existing, grant);
         assert_eq!(merged.command, Some(vec!["old".into()]));
@@ -370,6 +395,8 @@ mod tests {
             wasi_deny: false,
             inject: false,
             ingress: Vec::new(),
+            microphone: false,
+            camera: false,
         };
         let merged = merge(explicit, remembered);
         assert_eq!(merged.command, Some(vec!["explicit".into()]));
