@@ -275,7 +275,9 @@ digest）、blob 先验 sha256 再落盘、内容寻址缓存命中校验、腐�
   能力的宿主实现，没有额外的进程隔离层（被 spawn 的 MCP server 是
   用户自己选的风险，与原生 MCP 客户端相同）。
 - **wasip3 流式 ABI**：当前边界是「字符串整体拷入 guest」，大 ABI
-  改造是保留给未来的显式决策，不被动滑入。
+  改造是保留给未来的显式决策，不被动滑入。工具链现状已 spike
+  钉死：guest 侧 stable 阻塞至 Rust 1.100（预计 2026-11），host
+  侧就绪——解锁条件与迁移草案见 `docs/wasip3-streams.md`。
 
 ## 7. 文档地图
 
@@ -289,4 +291,5 @@ digest）、blob 先验 sha256 再落盘、内容寻址缓存命中校验、腐�
 | `docs/signing.md` | 签名格式、信任存储、授权记忆 |
 | `docs/oci.md` | OCI 分发链路 |
 | `docs/media.md` | 多模态与 blob 存储 |
+| `docs/wasip3-streams.md` | wasip3 stream 迁移的工具链现状与解锁条件 |
 | `docs/release.md` / `docs/perf.md` | 发布流程 / 性能基线 |
