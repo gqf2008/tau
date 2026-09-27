@@ -61,10 +61,13 @@ direct `eprintln` status lines.
 ### Reserved (design commitment, not shipping code)
 
 `text_delta` / `tool_progress` — streaming progress, high volume, never
-blocking. They stay reserved slots in the `tau probes` catalog until the
-high-frequency pull-subscription design (`docs/host-channel.md` /
-`docs/wit-review.md` F2) lands; `ProbePoint::from_name` rejects them
-today, so no guest can register them.
+blocking. `text_delta` is covered by the pull subscription
+(`host.subscribe(["text-delta"])` + `host.poll`,
+`docs/stream-subscribe.md`, landed in 0.3.0): the probe slot stays
+reserved — probes on high-frequency paths remain forbidden — and
+`ProbePoint::from_name` still rejects both names. `tool_progress` stays
+reserved outright: the bus has no tool-progress event producer, and the
+subscription does not invent one.
 
 ## Rules
 

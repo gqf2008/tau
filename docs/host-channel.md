@@ -99,6 +99,13 @@ world extension {
 （消灭 audio-delta 的 base64 热路径）与 F6 的 result 化同属 0.2.0
 breaking 批次，见 wit-review.md 修订记录。
 
+## 0.3.0 追加：高频流订阅
+
+`host` 接口在 0.3.0 增加 `subscribe`/`poll`/`unsubscribe`——F2 观测腿
+的高频段（拉取订阅，有界环 + lagged 标记，句柄实例作用域）。设计与
+裁决记录独立成篇：`docs/stream-subscribe.md`；语义红线与本文一致
+（校验即错误、观测无门、绝不阻塞运行）。
+
 ## 语义红线（从现有脊柱继承，不得发明新时序）
 
 1. **enqueue-only**：host 调用一律排队，绝不同步执行。probe 中途调

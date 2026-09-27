@@ -1,0 +1,13 @@
+[package]
+name = "streamer"
+version = "0.1.0"
+edition = "2024"
+description = "Example tau extension: observes high-frequency stream deltas via host.subscribe/poll (F2)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.46"
+
+[workspace]

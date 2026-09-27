@@ -161,11 +161,23 @@ always allowed; decisions are consent-gated:
   size (4 MiB). Enqueue-only: delivery follows the control channel's
   checkpoints (steer after the current turn's tool results, follow-up
   when the run finishes) — a probe mid-call never re-enters the loop.
+- `subscribe(topics)` / `poll(handle)` / `unsubscribe(handle)` —
+  observe the run's high-frequency streams (since 0.3.0, design:
+  `docs/stream-subscribe.md`). Topics: `text-delta`, `audio-delta`.
+  The guest **pulls**: the host hangs a bounded ring (1024 events) on
+  the bus per subscription and the guest drains it with `poll` inside
+  its own invocations — the host never calls into a component
+  asynchronously, so granularity is the guest's own call frequency and
+  an overrun surfaces as a `lagged(n)` marker. Handles are
+  instance-scoped: a trap rebuild invalidates them. Unknown topics and
+  handles fail loud.
 
-All four return `result<_, string>`: validation failures reach the
-guest; nothing is silently swallowed. Demo: `examples/notifier` — its
-`poke` tool does all three kinds of call and reports each outcome in
-the tool result, so the consent gate is visible in the transcript.
+All seven return `result<_, string>`: validation failures reach the
+guest; nothing is silently swallowed. Demos: `examples/notifier` — its
+`poke` tool does notify/emit/steer and reports each outcome in the tool
+result, so the consent gate is visible in the transcript;
+`examples/streamer` — subscribes at `session_start` and polls at
+`before_run_end`, reporting the observed delta count via `notify`.
 
 ## 5. Providers (world `provider`)
 

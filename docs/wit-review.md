@@ -39,23 +39,23 @@ import 什么 + 宿主授予什么决定」（architecture.md）在默认策略�
   针对的组件闭合，usability 损失最小（推荐）；
 - C. 全局翻转默认为 deny（最严，破坏性最大）。
 
-### F2 [高·双向机制] extension world 只有半条双向通道
+### F2 [高·双向机制] extension world 只有半条双向通道 —— 已全部落地（0.2.0 + 0.3.0）
 
 用户裁定：MCP 可以经 mcp-bridge 包装，但**内部**必须有完善的双向
 调用机制。评审结论：「完善」要三条腿，目前只有一条半——
 
 | 腿 | 状态 | 证据 |
 |---|---|---|
-| 注入（guest→host 发消息进会话） | ✅ 已设计未落地 | `docs/host-channel.md`（steer/follow-up） |
-| 反馈（host→guest 告知调用结果） | ❌ 缺 | `events.emit` 无返回（`lib.rs:573`）；malformed frame 静默 skip（`lib.rs:806` `Err(_) => continue`），guest 的事件 schema 错了只会流进虚空，无任何信号 |
-| 观测（guest 订阅宿主事件） | ❌ 缺 | extension world 无事件 import；observe-only probe 点未实现（F3） |
+| 注入（guest→host 发消息进会话） | ✅ 已落地（0.2.0） | `host.steer/follow-up`，consent 门（`docs/host-channel.md`） |
+| 反馈（host→guest 告知调用结果） | ✅ 已落地（0.2.0） | `host.*` 与 `events.emit` 全部返回 `result<_, string>` |
+| 观测·低频（生命周期点） | ✅ 已落地（0.2.0） | observe-only probes：session_start/branch/session_end |
+| 观测·高频（流 delta） | ✅ 已落地（0.3.0） | `host.subscribe/poll/unsubscribe` 拉取订阅（`docs/stream-subscribe.md`，jev 裁决 pull_buffer） |
 
-处置：host-channel.md 修订补两条腿——① `host` 接口与 `events.emit`
-统一返回 `result<_, string>`（0.2.0 一并改，0.x 允许 breaking）；
-② 观测腿设计二选一：observe-only probe 点（低频生命周期事件，复用
-probe 语义）+ host import 拉取订阅（高频 delta，events.md 规则 3
-禁止 probe 上高频路径，所以 probe 形态覆盖不了 text/audio delta，
-**两条腿都要**）。
+处置（均已落地）：① `host` 接口与 `events.emit` 统一返回
+`result<_, string>`（0.2.0）；② 观测腿两条腿——observe-only probe
+点（低频生命周期，0.2.0）+ `host` 拉取订阅（高频 delta，0.3.0：
+`subscribe/poll/unsubscribe`，有界环 + lagged 标记，句柄随实例作用域，
+events.md 规则 3 不变——高频路径永远不放 probe）。
 
 ### F3 [高·文档漂移] probes.md 承诺的 observe-only 点位未实现 —— 低频三点已落地
 
@@ -149,8 +149,9 @@ error（永不永阻）；`http` 增量读带 idle 超时，连接级 keepalive 
 
 ## 0.2.0 契约动作清单（从 findings 汇总）
 
-1. F2/F6：`host` 接口 + `events.emit` 全部返回 `result`；host-channel.md
-   补观测腿设计（observe-probe 点 + 高频拉取订阅）。
+1. F2/F6：`host` 接口 + `events.emit` 全部返回 `result`（0.2.0）；
+   观测腿两腿全落地——observe-probe 点（0.2.0）+ 高频拉取订阅
+   `host.subscribe/poll/unsubscribe`（0.3.0，docs/stream-subscribe.md）。
 2. F3：probes.md/events.md 的未实现段落已标注；实现并入观测腿。
 3. ~~F5~~：parameters-json 坏 schema 拒载并点名工具（已落地）。
 4. F7/F8：hooks→probes 正名、kill 返回 result、句柄代数，随 0.2.0。

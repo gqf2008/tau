@@ -29,6 +29,23 @@
   validate.sh step 1b asserts the image block end to end (guest → host
   → model projection → inline base64 in the session JSONL).
 
+### Added — high-frequency stream subscription (wit-review F2, 0.3.0)
+
+- `host.subscribe(topics)` / `host.poll(handle)` /
+  `host.unsubscribe(handle)`: extensions observe the run's
+  high-frequency streams (`text-delta`, `audio-delta`) by pulling — a
+  bounded per-subscription ring (1024, mirroring the bus) drained inside
+  the guest's own invocations, with a `lagged(n)` marker on overrun
+  (docs/stream-subscribe.md). Handles are instance-scoped: a trap
+  rebuild invalidates them instead of aliasing. Unknown topics and
+  handles fail loud; subscribing outside a run (bus not wired) errors.
+  `probes.md`'s reserved `text_delta` slot is now covered by
+  `subscribe(["text-delta"])`; `tool_progress` stays reserved (no bus
+  producer).
+- New example `streamer`: subscribes at `session_start`, polls at
+  `before_run_end`, notifies the observed delta count; validate.sh
+  step 1c asserts the notice end to end.
+
 ### Breaking — contract `tau:extension@0.2.0` (docs/wit-review.md batch)
 
 - **Host channel** (`docs/host-channel.md`, landed): the extension

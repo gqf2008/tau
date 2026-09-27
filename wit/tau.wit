@@ -263,6 +263,29 @@ interface models {
 interface host {
     use types.{message, content};
 
+    /// A provider audio segment on the stream subscription. The bytes
+    /// themselves never travel this channel (same rule as the bus: they
+    /// land in the assistant message as content); observers see the
+    /// count and media type.
+    record audio-segment {
+        /// How many bytes arrived in this segment.
+        bytes: u64,
+        /// The media type of the segment they belong to.
+        media-type: string,
+    }
+
+    /// One high-frequency stream event drained by `poll`
+    /// (docs/stream-subscribe.md).
+    variant stream-event {
+        /// The subscription's ring overran: n events were dropped
+        /// before the next event in this batch.
+        lagged(u64),
+        /// A fragment of assistant text.
+        text-delta(string),
+        /// A provider audio segment.
+        audio-delta(audio-segment),
+    }
+
     /// User-visible notification; the renderer draws text blocks and a
     /// placeholder for media blocks. Not added to model history.
     /// level: "info" | "warn" | "error".
@@ -281,6 +304,26 @@ interface host {
     /// Queue a message to run after the agent finishes. Same consent and
     /// validation as steer.
     follow-up: func(message: message) -> result<_, string>;
+
+    /// Subscribe to high-frequency stream events, returning a handle
+    /// (docs/stream-subscribe.md — F2's high-frequency leg). Topic
+    /// catalog: "text-delta", "audio-delta"; an unknown topic fails
+    /// loudly. Guests pull — the host never calls into a component
+    /// asynchronously, so the drain happens inside the guest's own
+    /// invocations and the subscription's granularity is the guest's
+    /// own call frequency. Outside a run (e.g. during definitions) the
+    /// bus is not wired and subscribe fails.
+    subscribe: func(topics: list<string>) -> result<u64, string>;
+
+    /// Non-blocking drain of a subscription's backlog (empty when
+    /// nothing accumulated). The ring holds 1024 events (mirroring the
+    /// bus); on overrun the batch starts with lagged(n). An unknown
+    /// handle — including one from before a trap rebuild, handles do
+    /// not survive it — is an error.
+    poll: func(subscription: u64) -> result<list<stream-event>, string>;
+
+    /// Unsubscribe and drop the backlog. An unknown handle is an error.
+    unsubscribe: func(subscription: u64) -> result<_, string>;
 }
 
 /// General extension: tools and/or probes, plus the host channel.

@@ -49,7 +49,7 @@ trap cleanup EXIT
 # --- pre-flight -------------------------------------------------------
 step "build release binary + wasm examples"
 cargo build --release -p tau-cli --quiet
-for ex in upper http-provider mcp-bridge guard echo-provider notifier media-tool; do
+for ex in upper http-provider mcp-bridge guard echo-provider notifier media-tool streamer; do
     cargo build --manifest-path "examples/${ex}/Cargo.toml" \
         --target wasm32-wasip2 --release --quiet
 done
@@ -60,6 +60,7 @@ GUARD="$ROOT/examples/guard/target/wasm32-wasip2/release/guard.wasm"
 ECHO_PROVIDER="$ROOT/examples/echo-provider/target/wasm32-wasip2/release/echo_provider.wasm"
 NOTIFIER="$ROOT/examples/notifier/target/wasm32-wasip2/release/notifier.wasm"
 MEDIA_TOOL="$ROOT/examples/media-tool/target/wasm32-wasip2/release/media_tool.wasm"
+STREAMER="$ROOT/examples/streamer/target/wasm32-wasip2/release/streamer.wasm"
 [ -f "$UPPER" ] || fail "upper example missing"
 [ -f "$HTTP_PROVIDER" ] || fail "http-provider example missing"
 [ -f "$MCP_BRIDGE" ] || fail "mcp-bridge example missing"
@@ -67,6 +68,7 @@ MEDIA_TOOL="$ROOT/examples/media-tool/target/wasm32-wasip2/release/media_tool.wa
 [ -f "$ECHO_PROVIDER" ] || fail "echo-provider example missing"
 [ -f "$NOTIFIER" ] || fail "notifier example missing"
 [ -f "$MEDIA_TOOL" ] || fail "media-tool example missing"
+[ -f "$STREAMER" ] || fail "streamer example missing"
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
@@ -91,6 +93,16 @@ echo "$OUT" | grep -q "\[image: image/png\]" || fail "image block missing from t
 grep -q '"media_type":"image/png"' media.jsonl || fail "session JSONL lacks the image block: $(cat media.jsonl)"
 grep -q "iVBORw0KGgo" media.jsonl || fail "PNG bytes not inline-base64 in the session: $(cat media.jsonl)"
 echo "ok — image block crossed guest→host→model and persisted inline"
+
+# --- step 1c: stream subscription (F2, docs/stream-subscribe.md) ------
+step "1c/11 stream subscription (guest polls text deltas)"
+# The streamer example subscribes to "text-delta" at session_start and
+# polls at before_run_end, then notifies the count. The notice proves
+# the full path: model delta → bus → per-subscription ring → guest poll
+# → host.notify → renderer.
+OUT="$("$TAU" --allow-unsigned -e "$STREAMER" --demo -p "hello" 2>&1)" || fail "streamer run: $OUT"
+echo "$OUT" | grep -qE "ext info: stream observed: [1-9][0-9]* text deltas" || fail "stream observation notice missing or empty: $OUT"
+echo "ok — guest polled the run's text deltas and reported them"
 
 # --- step 2: signing + trust chain ------------------------------------
 step "2/11 signing and trust chain"

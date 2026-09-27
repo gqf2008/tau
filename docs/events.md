@@ -25,8 +25,10 @@ harness never pauses, and a misused verdict surfaces as action `ignored`
 - wasm extensions publishing through the host channel: `host.notify`
   lands as `AgentEvent::ExtensionNotice`, `host.emit` as
   `AgentEvent::ExtensionFact` (observe-only facts; the schema is the
-  extension's own). A pull-subscription for high-frequency deltas
-  remains a design item (`docs/wit-review.md` F2);
+  extension's own). Extensions observe high-frequency deltas through
+  the pull subscription (`host.subscribe`/`poll`,
+  `docs/stream-subscribe.md`): the guest drains a bounded ring during
+  its own invocations, with a `lagged(n)` marker on overrun;
 - telemetry / session recording (future), all without touching the loop.
 
 Subscribers cannot wedge the harness: the bus is bounded

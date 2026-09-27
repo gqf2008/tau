@@ -27,6 +27,7 @@
 //! // tau_core::ProbeRegistry, then build the Agent as usual.
 //! ```
 
+use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -176,6 +177,23 @@ struct ComponentState {
     table: ResourceTable,
     channel: Arc<HostChannel>,
     inject: bool,
+    /// Stream subscriptions (host.subscribe/poll/unsubscribe,
+    /// docs/stream-subscribe.md). Deliberately on the per-instance state,
+    /// not the shared channel: a trap rebuild creates a fresh
+    /// ComponentState, so old handles stop resolving and the receivers
+    /// drop with the old instance — handles never alias across a rebuild.
+    subscriptions: HashMap<u64, StreamSubscription>,
+    next_subscription: u64,
+}
+
+/// One open host.subscribe handle: the topic filter plus the bus
+/// receiver backing the bounded ring (capacity = the bus's own).
+struct StreamSubscription {
+    /// Subscribed to AgentEvent::TextDelta.
+    text_delta: bool,
+    /// Subscribed to AgentEvent::AudioDelta.
+    audio_delta: bool,
+    rx: tau_core::bus::EventStream,
 }
 
 impl WasiView for ComponentState {
@@ -248,6 +266,80 @@ impl bindings::tau::extension::host::Host for ComponentState {
     fn follow_up(&mut self, message: wit::Message) -> Result<(), String> {
         self.inject_message(message, false)
     }
+
+    /// host.subscribe (docs/stream-subscribe.md): hang a bounded ring on
+    /// the bus; the guest drains it with poll inside its own
+    /// invocations. Fail-loud on unknown topics — a silent empty
+    /// subscription looks identical to "no events".
+    fn subscribe(&mut self, topics: Vec<String>) -> Result<u64, String> {
+        let mut sub = StreamSubscription {
+            text_delta: false,
+            audio_delta: false,
+            rx: self.channel.bus()?.subscribe(),
+        };
+        if topics.is_empty() {
+            return Err("host.subscribe: no topics (catalog: text-delta, audio-delta)".into());
+        }
+        for topic in &topics {
+            match topic.as_str() {
+                "text-delta" => sub.text_delta = true,
+                "audio-delta" => sub.audio_delta = true,
+                other => {
+                    return Err(format!(
+                        "host.subscribe: unknown topic {other:?} (catalog: text-delta, audio-delta)"
+                    ));
+                }
+            }
+        }
+        let id = self.next_subscription;
+        self.next_subscription += 1;
+        self.subscriptions.insert(id, sub);
+        Ok(id)
+    }
+
+    /// host.poll: non-blocking drain (try_recv — a synchronous host
+    /// function must never block_on on the runtime thread). Off-topic
+    /// events are dropped on the floor; an overrun surfaces as one
+    /// lagged(n) marker at the head of the batch.
+    fn poll(
+        &mut self,
+        subscription: u64,
+    ) -> Result<Vec<bindings::tau::extension::host::StreamEvent>, String> {
+        use bindings::tau::extension::host::{AudioSegment, StreamEvent};
+        use tokio::sync::broadcast::error::TryRecvError;
+        let sub = self.subscriptions.get_mut(&subscription).ok_or_else(|| {
+            format!(
+                "host.poll: unknown subscription {subscription}                  (handles do not survive a trap rebuild)"
+            )
+        })?;
+        let mut out = Vec::new();
+        loop {
+            match sub.rx.try_recv() {
+                Ok(tau_core::AgentEvent::TextDelta(text)) if sub.text_delta => {
+                    out.push(StreamEvent::TextDelta(text));
+                }
+                Ok(tau_core::AgentEvent::AudioDelta { bytes, media_type })
+                    if sub.audio_delta =>
+                {
+                    out.push(StreamEvent::AudioDelta(AudioSegment {
+                        bytes: bytes as u64,
+                        media_type,
+                    }));
+                }
+                Ok(_) => {} // off-topic: advance the ring, drop the event
+                Err(TryRecvError::Lagged(n)) => out.push(StreamEvent::Lagged(n)),
+                Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
+            }
+        }
+        Ok(out)
+    }
+
+    fn unsubscribe(&mut self, subscription: u64) -> Result<(), String> {
+        self.subscriptions
+            .remove(&subscription)
+            .map(|_| ())
+            .ok_or_else(|| format!("host.unsubscribe: unknown subscription {subscription}"))
+    }
 }
 
 struct ComponentInstance {
@@ -275,6 +367,8 @@ impl InstanceFactory {
             table: ResourceTable::new(),
             channel: self.channel.clone(),
             inject: self.inject,
+            subscriptions: HashMap::new(),
+            next_subscription: 0,
         };
         let mut store = Store::new(&self.engine, state);
         let bindings = bindings::Extension::instantiate(&mut store, &self.component, &self.linker)?;
@@ -1284,5 +1378,136 @@ mod schema_strictness_tests {
             shown.contains("invalid parameters-json"),
             "reason not named: {shown}"
         );
+    }
+}
+
+#[cfg(test)]
+mod stream_subscription_tests {
+    //! host.subscribe/poll/unsubscribe (docs/stream-subscribe.md): the
+    //! high-frequency observation leg of F2. ComponentState is built
+    //! directly — no component needed, the host functions under test
+    //! never touch wasm.
+    use super::bindings::tau::extension::host::{Host, StreamEvent};
+    use super::*;
+    use tau_core::AgentEvent;
+
+    fn state() -> ComponentState {
+        ComponentState {
+            ctx: WasiCtxBuilder::new().build(),
+            table: ResourceTable::new(),
+            channel: Arc::new(HostChannel::default()),
+            inject: false,
+            subscriptions: HashMap::new(),
+            next_subscription: 0,
+        }
+    }
+
+    #[test]
+    fn poll_drains_matching_events_in_order_then_empty() {
+        let mut state = state();
+        let bus = tau_core::bus::new_bus();
+        state.channel.wire(bus.clone(), tau_core::control::channel().0);
+        let id = Host::subscribe(&mut state, vec!["text-delta".into()]).unwrap();
+
+        bus.send(AgentEvent::TextDelta("he".into())).unwrap();
+        bus.send(AgentEvent::AudioDelta {
+            bytes: 7,
+            media_type: "audio/pcm".into(),
+        })
+        .unwrap(); // off-topic: dropped
+        bus.send(AgentEvent::TextDelta("llo".into())).unwrap();
+
+        let batch = Host::poll(&mut state, id).unwrap();
+        let texts: Vec<&str> = batch
+            .iter()
+            .map(|e| match e {
+                StreamEvent::TextDelta(t) => t.as_str(),
+                other => panic!("unexpected event: {other:?}"),
+            })
+            .collect();
+        assert_eq!(texts, ["he", "llo"]);
+        assert!(Host::poll(&mut state, id).unwrap().is_empty());
+    }
+
+    #[test]
+    fn audio_topic_receives_segments_not_bytes() {
+        let mut state = state();
+        let bus = tau_core::bus::new_bus();
+        state.channel.wire(bus.clone(), tau_core::control::channel().0);
+        let id = Host::subscribe(&mut state, vec!["audio-delta".into()]).unwrap();
+        bus.send(AgentEvent::AudioDelta {
+            bytes: 2048,
+            media_type: "audio/pcm;rate=24000".into(),
+        })
+        .unwrap();
+        bus.send(AgentEvent::TextDelta("ignored".into())).unwrap();
+        match &Host::poll(&mut state, id).unwrap()[..] {
+            [StreamEvent::AudioDelta(seg)] => {
+                assert_eq!(seg.bytes, 2048);
+                assert_eq!(seg.media_type, "audio/pcm;rate=24000");
+            }
+            other => panic!("unexpected batch: {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_topic_and_handle_fail_loud() {
+        let mut state = state();
+        let bus = tau_core::bus::new_bus();
+        state.channel.wire(bus, tau_core::control::channel().0);
+        let err = Host::subscribe(&mut state, vec!["tool-progress".into()]).unwrap_err();
+        assert!(err.contains("unknown topic"), "{err}");
+        assert!(err.contains("tool-progress"), "{err}");
+        assert!(Host::subscribe(&mut state, vec![]).unwrap_err().contains("no topics"));
+        assert!(Host::poll(&mut state, 99).unwrap_err().contains("unknown subscription"));
+        assert!(Host::unsubscribe(&mut state, 99)
+            .unwrap_err()
+            .contains("unknown subscription"));
+    }
+
+    #[test]
+    fn subscribe_before_wiring_is_an_error() {
+        let mut state = state();
+        let err = Host::subscribe(&mut state, vec!["text-delta".into()]).unwrap_err();
+        assert!(err.contains("not wired"), "{err}");
+    }
+
+    #[test]
+    fn ring_overrun_marks_the_gap() {
+        let mut state = state();
+        let bus = tau_core::bus::new_bus();
+        state.channel.wire(bus.clone(), tau_core::control::channel().0);
+        let id = Host::subscribe(&mut state, vec!["text-delta".into()]).unwrap();
+        let total = tau_core::bus::BUS_CAPACITY + 76;
+        for i in 0..total {
+            bus.send(AgentEvent::TextDelta(format!("d{i}"))).unwrap();
+        }
+        let batch = Host::poll(&mut state, id).unwrap();
+        match batch[0] {
+            StreamEvent::Lagged(n) => assert_eq!(n, 76),
+            ref other => panic!("expected lagged marker, got {other:?}"),
+        }
+        assert_eq!(batch.len(), tau_core::bus::BUS_CAPACITY + 1);
+        match &batch[1] {
+            StreamEvent::TextDelta(t) => {
+                assert_eq!(t, "d76", "first retained event is the oldest survivor")
+            }
+            other => panic!("expected text delta, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn unsubscribe_stops_the_flow() {
+        let mut state = state();
+        let bus = tau_core::bus::new_bus();
+        state.channel.wire(bus.clone(), tau_core::control::channel().0);
+        let id = Host::subscribe(&mut state, vec!["text-delta".into()]).unwrap();
+        Host::unsubscribe(&mut state, id).unwrap();
+        // No receivers left: broadcast send reports SendError — fine.
+        let _ = bus.send(AgentEvent::TextDelta("gone".into()));
+        assert!(Host::poll(&mut state, id).is_err());
+        // Re-subscribing gets a fresh handle that sees only new events.
+        let id2 = Host::subscribe(&mut state, vec!["text-delta".into()]).unwrap();
+        assert!(Host::poll(&mut state, id2).unwrap().is_empty());
     }
 }
