@@ -133,3 +133,18 @@ idle 超时的处置语义（bridge 长连是断线敏感场景，参照飞书�
 4. F7/F8：hooks→probes 正名、kill 返回 result、句柄代数，随 0.2.0。
 5. F1：ambient 侧门处置（A/B/C）留用户拍板，0.3.0 决策项。
 6. F4：工具媒体结果，0.3.0 评估项（先查 pi 线格式）。
+
+## 修订记录
+
+- 2026-09-27（评审后讨论）：**信封约定被推翻**。原约定「消息载荷一律
+  JSON 信封」经质询后确认论证有误——pi 兼容约束的是 session 文件与
+  provider HTTP 两个 JSON 边，不约束组件 ABI；`tau_core::types` 本来
+  就要求二进制边界不见 base64，信封+base64 恰恰违反它。新约定（已入
+  `docs/extensions.md` 约定节）：**tau 拥有 schema 的载荷用 WIT 类型，
+  JSON 只留在外生/任意 schema 的叶**（arguments-json、parameters-json、
+  probe payload-json）。简约校准参照 pi：简约在机制（hook/tool 皆函数、
+  载荷皆plain data），不在数据结构——类型集保持最小，content 四态
+  （text/media/tool-call/tool-result），image/audio/video 塌缩为
+  media（MIME 主类型即语义）。F2 的 host-channel 设计已改类型化 v2；
+  `events.emit` 的类型化（消灭 audio-delta base64 热路径）与 F6 的
+  result 化同属 0.2.0 breaking 批次。

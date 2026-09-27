@@ -14,28 +14,70 @@ logging/progress 通知、sampling、elicitation），组件是能回嘴的对�
 契约形态上 tau 早支持双向——provider world 有 `import events`，bridge
 world 有 `import process/http`——缺的只是 extension world 的 import。
 
-## 接口（设计定稿）
+## 接口（设计定稿 v2，类型化）
+
+v1 是 JSON 信封版；v2 按「参考 pi 的简约设计——简约在机制不在数据
+结构」改为类型化主干 + 最小类型集。content 四态：text / media /
+tool-call / tool-result——image/audio/video 本质同为 raw 数据，
+MIME 主类型即语义（image/* audio/* video/*，其余=file），不另立
+kind 枚举。
 
 ```wit
 package tau:extension@0.2.0;
 
-/// 宿主回调：扩展的主动回传通道。始终链接；改变执行的两个函数
-/// 按签名指纹走 consent（与 process/http 同一姿势）。
-interface host {
-    /// 用户可见通知。content-json：Content 块的 JSON 数组
-    /// （[{"type":"text",...},{"type":"image","media":{...}}]），
-    /// 渲染层画文本块、媒体块出占位。不进模型历史。
-    notify: func(level: string, content-json: string) -> result<_, string>;
+/// ---- 消息主干：tau 拥有 schema，用 WIT 类型 ----
 
-    /// 发布一条扩展事实到事件总线（observe-only，不进控制流）。
+enum role { user, assistant, tool }
+
+record media {
+    /// MIME，如 audio/pcm;rate=24000；主类型即媒体语义。
+    media-type: string,
+    source: media-source,
+    /// 原始文件名（file 语义，可选）。
+    name: option<string>,
+}
+variant media-source {
+    /// 裸字节：二进制边界永不过 base64（tau_core::types 的一贯要求，
+    /// 信封版恰恰违反它，类型化顺带修正）。
+    bytes(list<u8>),
+    url(string),
+    /// sha256:<hex>，blob store 引用。
+    blob(string),
+}
+record tool-call {
+    id: string,
+    name: string,
+    /// 唯一保留的 JSON 叶：模型产的任意 JSON，无 schema 可类型化。
+    arguments-json: string,
+}
+record tool-result {
+    call-id: string,
+    /// 仍是文本：媒体结果属 F4 评估项（0.3.0），不进 0.2.0。
+    content: string,
+    is-error: bool,
+}
+variant content {
+    text(string),
+    media(media),
+    tool-call(tool-call),
+    tool-result(tool-result),
+}
+record message { role: role, content: list<content> }
+
+/// ---- 宿主回调：扩展的主动回传通道 ----
+
+interface host {
+    /// 用户可见通知；渲染层画文本块、媒体块出占位。不进模型历史。
+    notify: func(level: string, content: list<content>) -> result<_, string>;
+
+    /// 发布扩展事实到事件总线（observe-only）。扩展自定义事实的
+    /// schema 外生于 tau，信封保留；与 events.emit 统一返回 result。
     emit: func(event-json: string) -> result<_, string>;
 
-    /// 以下两个改变执行，consent-gated。
-    /// message-json：完整 Message 线格式（role + 有序 Content 块，
-    /// 文本/图片/音频/视频/文件混排）。宿主校验 role=="user"、
-    /// JSON 合法、尺寸上限；失败经 result 回报，不静默丢弃。
-    steer: func(message-json: string) -> result<_, string>;
-    follow-up: func(message-json: string) -> result<_, string>;
+    /// 以下两个改变执行，consent-gated。宿主校验 role==user 与尺寸
+    /// 上限；类型错误由 ABI 编译期消灭，语义错误经 result 回报。
+    steer: func(message: message) -> result<_, string>;
+    follow-up: func(message: message) -> result<_, string>;
 }
 
 world extension {
@@ -44,6 +86,13 @@ world extension {
     export hooks;
 }
 ```
+
+仍走 JSON 信封的叶（及理由）：`arguments-json`（模型产任意 JSON）、
+`parameters-json`（JSON Schema 本身是 schema 语言）、probe
+`payload-json`（每点一个 schema、高速演化、`tau probes` 可发现）、
+扩展自定义的 `emit` event-json。provider world 的 `events.emit` 类型化
+（消灭 audio-delta 的 base64 热路径）与 F6 的 result 化同属 0.2.0
+breaking 批次，见 wit-review.md 修订记录。
 
 ## 语义红线（从现有脊柱继承，不得发明新时序）
 
@@ -61,22 +110,15 @@ world extension {
 4. **校验即错误**：`result<_, string>` 回报非法输入（role 非 user、
    JSON 不合法、超过尺寸上限），不得静默吞掉。
 
-## 为什么参数在 WIT 层是 `string`
+## 类型化 ↔ serde 的边界（v2 论证）
 
-信封约定，与 `parameters-json`/`arguments-json`/`payload-json`/
-`event-json` 一致：消息线格式有**单一事实源**——serde schema 同时服务
-session JSONL、provider HTTP、probe payload（`before_compaction` 的
-`messages: [Message]`）。在 WIT 里重建 variant 等于把同一 schema 抄两份
-（且 `ToolCall.arguments` 本就是任意 JSON，variant 化不彻底）。
-string 是信封，schema 才是真类型；schema 以 `tau probes` 同款方式可发现。
-
-## 媒体路径
-
-- inline：`{"source":"base64","data":...}`（与 provider 边界现状一致；
-  validate.sh 4b 步实测 3 MiB 跨界逐字节完整）。
-- 引用：`{"source":"blob","hash":"sha256:..."}`——但 guest 今天没有
-  blob 写能力，产不出新引用。**blob-write 能力 = 后续演进项，不进
-  0.2.0 契约。**
+pi 兼容约束的是 session 文件与 provider HTTP 两个 JSON 边，**不约束
+组件 ABI**——v1 以此为理由全信封是错的。类型化后：WIT 类型在
+package 版本内冻结，演化走 minor bump（0.x 语义），过渡期宿主同时
+链接新旧版本；typed↔serde 转换在宿主侧唯一实现，CI 用往返属性测试
+钉死（message → ABI → JSON == 原值）。类型系统在组件边界做编译期
+保证——七种语言的工具链实测（docs/wasm-languages.md）证明 bindings
+生成器都能吃下这套 record/variant。
 
 ## 兼容性
 
@@ -89,6 +131,7 @@ string 是信封，schema 才是真类型；schema 以 `tau probes` 同款方式
       （`wit_vendored` 测试会盯漂移）
 - [ ] tau-ext 宿主侧链接：notify→渲染层、emit→事件总线、
       steer/follow-up→控制通道（过 consent 门类）
+- [ ] typed↔serde 转换层（宿主侧唯一实现）+ 往返属性测试
 - [ ] consent 新门类「会话注入」+ remembered-grant 生命周期
 - [ ] 演示示例（不动既有示例，新增一个）
 - [ ] `docs/extensions.md`/`docs/events.md`/`docs/probes.md` 更新

@@ -8,28 +8,36 @@ reference implementations.
 
 ## Contract conventions
 
-WIT can express the full message model as typed records/variants — the
-JSON-string parameters (`parameters-json`, `arguments-json`,
-`payload-json`, `event-json`) are a deliberate choice, not a WIT
-limitation. The rule: **small, stable structures use WIT types**
-(definition, verdict, info, handles, `result` errors); **large,
-fast-evolving message-shaped payloads travel as JSON envelopes**. Why:
+(amended 2026-09-27 after the `docs/wit-review.md` discussion — the
+earlier "JSON envelopes everywhere" rule was wrong; pi compatibility
+constrains the session-file and HTTP edges, NOT the component ABI)
 
-1. Single source of truth — the Message schema already serves session
-   JSONL (pi-compatible wire shape) and provider HTTP APIs; serde is
-   canonical, a WIT twin would drift unchecked.
-2. Evolution — adding a JSON field never breaks the ABI; adding a WIT
-   record field or variant case does (types are frozen within a package
-   version).
-3. Arbitrary-JSON holes (`ToolCall.arguments` is model-produced) would
-   still force embedded JSON strings inside typed records.
-4. Cross-language ergonomics — every guest language has JSON; nested
-   variant/option canonical-ABI mappings are verbose in C/TinyGo.
+Calibrated after pi (`packages/agent`): the minimalism lives in the
+MECHANISM (a hook is a function, a tool is a function, payloads are
+plain data) — not in elaborate data structures. So the typed surface
+stays small: a handful of records/variants, no type cathedral.
 
-The envelope is a string, but the schema is the real type: schemas are
-discoverable (`tau probes`), documented per point, and hosts validate
-fail-loud. Same reason `process`/`http` handles are plain `u64`, not
-resources — resources drag in wasi:io and strain C/TinyGo toolchains.
+The rule: **payloads whose schema tau owns use rigorous WIT types;
+JSON envelopes only where the schema is external or genuinely
+arbitrary.** Concretely:
+
+- Typed: the message trunk (`message` / `content` / `media` /
+  `tool-call` / `tool-result`), verdicts, definitions, handles, errors.
+- JSON strings only at schema-less leaves: `arguments-json` (arbitrary
+  model-produced JSON), `parameters-json` (JSON Schema is itself a
+  schema language), probe `payload-json` (per-point, fast-evolving,
+  discoverable via `tau probes`).
+
+WIT types are frozen within a package version; evolution rides package
+minor bumps (0.x semantics), with the host linking old and new versions
+during transitions. Typed↔serde conversion lives ONCE in the host and
+is pinned by round-trip property tests (message → ABI → JSON ==
+original). A bonus the envelope never had: media crosses the ABI as
+raw `list<u8>`, never base64 — which is what the data model
+(`tau_core::types`) always required of binary boundaries.
+
+`process`/`http` handles stay plain `u64`, not resources — resources
+drag in wasi:io and strain C/TinyGo toolchains.
 
 Prerequisites: a Rust toolchain with the component target —
 
