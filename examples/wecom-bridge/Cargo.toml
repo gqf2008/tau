@@ -1,0 +1,17 @@
+[package]
+name = "wecom-bridge"
+version = "0.1.0"
+edition = "2024"
+description = "Example tau bridge: wecom-shaped IM adapter — ingress webhook with component-side msg_signature verification and AES-256-CBC decrypt (docs/im-channels.md)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.46"
+sha1 = "0.10"
+aes = "0.8"
+cbc = "0.1"
+base64 = "0.22"
+
+[workspace]

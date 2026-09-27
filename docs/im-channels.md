@@ -228,6 +228,52 @@ agent loop 跑出新回合
 配置文件格式是清单独立项，不在示例里发明。媒体入 blob：示例不覆盖
 （组件无 blob 能力，如实留白）。
 
+## 企微回环协议（loopback mock，validate.sh 5e）
+
+> 优先级：企微 adapter 先于钉钉（jev @ 0.980）——钉钉是飞书机制的
+> 协议形复制，企微的增量是**组件侧签名校验 + AES 解密**：ingress
+> 设计红线「签名校验（企微 msg_signature）是组件的职责，宿主不代劳」
+> 在 whatsapp-bridge 里如实留白（loopback 无签名），企微把它做实。
+
+企微 callback 的真实线格式（示例照实实现，不发明简化版）：
+
+- **密钥派生**：EncodingAESKey 是 43 字符 base64，补 `=` 解码得
+  32 字节 AES-256 密钥；IV = 密钥前 16 字节；CBC 无填充裁剪——
+  明文尾部是 PKCS#7 填充。
+- **明文帧**：16 字节随机前缀 + 4 字节大端消息长度 + 消息 +
+  receiveid（必须等于本企业 corpid，防串企业投递）。
+- **签名**：`msg_signature = sha1(sort(token, timestamp, nonce,
+  encrypt_msg) 顺序拼接)`，query 参数携带，**每个请求都验**。
+- **URL 验证**（GET）：query 带加密 `echostr`，验签 + 解密 +
+  corpid 检查后**回明文** echostr。
+- **消息推送**（POST）：body 是 XML 信封 `<xml><ToUserName/>
+  <Encrypt/><AgentID/></xml>`；Encrypt 解开是内层 XML（文本消息
+  含 `<FromUserName>`/`<Content>`）。立即 ack 回明文 `success`；
+  异步回复走应用消息 API `POST /cgi-bin/message/send?access_token=…`
+  （JSON 明文，**出站不加密**——签名/加密只管 callback 入站）。
+
+回环形态（`scripts/wecom_mock.py` + `examples/wecom-bridge`）：
+
+- mock 说**真实密码学**：纯 Python AES-256-CBC（stdlib 无 AES，
+  内嵌实现 + 启动时 NIST 测试向量自证——仪器先证自己）+ sha1
+  签名；token/AESKey/corpid 由环境变量配置（组件读
+  `WECOM_TOKEN`/`WECOM_ENCODING_AES_KEY`/`WECOM_CORP_ID` 环境，
+  缺失即报错不 listen——密钥不进配置文件、不进 consent 存储）。
+- 验收腿（pty 驱动交互 REPL，同 5d 的理由）：
+  1. **坏签名负对照先行**：mock 首发一个篡改签名的 POST ⇒ 组件
+     403、不 steer、零回复（签名校验真的挡东西，不是摆设）；
+  2. GET URL 验证：验签 + 解密 echostr ⇒ 200 回明文；
+  3. POST 加密文本消息 ⇒ 200 `success` + steer 入会话 +
+     idle REPL 唤醒回合 + after_response 走 send API 回帖；
+     mock 的 `/cgi-bin/message/send` 打印 `WECOM SEND:` 断言。
+- 无 `--ingress` 的拒绝腿与 5d 同机制（同一 consent 门），不重复
+  验收；5e 的新断言全在密码学门上。
+
+与 whatsapp-bridge 的结构差异如实记录：企微的 ack 可以携带加密被动
+回复（5 秒窗口），示例仍选「立即 success + 异步 send API」——被动
+回复要求 ingress-handler 同步等回合结束，与 push 模型的「请求在实例
+锁下排队」语义冲突，如实不实现。
+
 ## 落地清单
 
 - [x] host-channel 落地（见 docs/host-channel.md 清单，0.2.0 已落地）
@@ -263,6 +309,13 @@ agent loop 跑出新回合
       idle steer 唤醒回合→reply POST；无 --ingress 时 listen 拒、零回帖）。
       配套修复：REPL 空闲时注入的 steer/follow-up 现在直接成为下一回合
       （此前只在运行中转发，空闲注入永远排队——idle-wake gap）
+- [x] 企微 bridge 组件（`examples/wecom-bridge`，2026-09-28 落地）：
+      组件侧 msg_signature 验签 + AES-256-CBC 解密（红线「签名校验是
+      组件职责」做实）；契约修正——ingress request 记录补 `query`
+      原始串字段（签名参数在 query 里，宿主是管道不解析；jev
+      raw_string @ 1.000）；validate.sh 5e 三腿全绿：坏签名 403
+      负对照 / echostr 验签解密回环 / 加密消息 steer→idle 唤醒→
+      send API 回帖；mock 内嵌纯 Python AES 启动即 NIST 向量自证
 - [x] validate.sh IM 回环案例（步骤 5c，`scripts/im_mock.py`）：
       注入→steer→turn 2→回帖 POST 全链断言 + 无 --allow-inject 时
       steer 拒、零回帖的拒绝路径

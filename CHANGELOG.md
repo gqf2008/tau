@@ -22,6 +22,14 @@
   the platform's send API. validate.sh step 5d drives the real REPL
   over a pty (pywinpty): delivered webhook ack 200 → idle steer wakes a
   turn → reply POST; refusal leg without `--ingress` never listens.
+- The request record carries the RAW `query` string (signature schemes
+  like wecom's msg_signature live in it; the host is a pipe and never
+  parses it). New example `wecom-bridge` + `scripts/wecom_mock.py`
+  (embedded pure-Python AES, NIST-self-tested at startup) prove the
+  component-side crypto red line end to end — validate.sh step 5e:
+  tampered msg_signature → 403 (nothing decrypted or steered), URL
+  verification echostr round-trips as plaintext, encrypted text message
+  → steer → idle wake → reply via the send API.
 - Fix (tau-cli): an injected steer/follow-up arriving while the
   interactive REPL idles now starts the next turn with the injected
   message as prompt — previously it queued in the agent's control
