@@ -296,14 +296,14 @@ echo "ok — Anthropic Messages SSE streamed end to end"
 # --- step 4: wasm provider consent gate --------------------------------
 step "4/11 wasm provider consent gate"
 if "$TAU" --allow-unsigned \
-    --provider-wasm "$HTTP_PROVIDER" --model http-echo \
+    --provider-wasm "$HTTP_PROVIDER" --model http \
     -p "http://127.0.0.1:8402/" 2>&1 | grep -q "STATUS 200"; then
     fail "http fetch succeeded with no consent — consent gate is open"
 fi
 echo "ok — no consent: fetch denied"
 
 OUT="$("$TAU" --allow-unsigned \
-    --provider-wasm "$HTTP_PROVIDER" --model http-echo \
+    --provider-wasm "$HTTP_PROVIDER" --model http \
     --provider-origin http://127.0.0.1:8402 \
     -p "http://127.0.0.1:8402/" 2>&1)" || fail "consented fetch: $OUT"
 echo "$OUT" | grep -q "STATUS 200: hello from mock origin" \
@@ -313,7 +313,7 @@ echo "ok — with --provider-origin the fetch flows"
 # A redirect would escape consent: the consented origin answers 302 to
 # an unconsented host, and the guest must see the 302, not the target.
 OUT="$("$TAU" --allow-unsigned \
-    --provider-wasm "$HTTP_PROVIDER" --model http-echo \
+    --provider-wasm "$HTTP_PROVIDER" --model http \
     --provider-origin http://127.0.0.1:8402 \
     -p "http://127.0.0.1:8402/redirect" 2>&1)" || fail "redirect run: $OUT"
 echo "$OUT" | grep -q "STATUS 302" \
@@ -325,13 +325,13 @@ echo "ok — consented origin's 302 is shown, never followed"
 # path material (stays on the consented host), and the delimiter tricks
 # plus the trailing-dot twin are refused as unconsented.
 OUT="$("$TAU" --allow-unsigned \
-    --provider-wasm "$HTTP_PROVIDER" --model http-echo \
+    --provider-wasm "$HTTP_PROVIDER" --model http \
     --provider-origin http://127.0.0.1:8402 \
     -p "http://user:pw@127.0.0.1:8402/" 2>&1)" || fail "userinfo run: $OUT"
 echo "$OUT" | grep -q "STATUS 200: hello" \
     || fail "userinfo-inside-authority fetch did not land: $OUT"
 OUT="$("$TAU" --allow-unsigned \
-    --provider-wasm "$HTTP_PROVIDER" --model http-echo \
+    --provider-wasm "$HTTP_PROVIDER" --model http \
     --provider-origin http://127.0.0.1:8402 \
     -p 'http://127.0.0.1:8402\@evil.invalid/' 2>&1)" || fail "backslash run: $OUT"
 echo "$OUT" | grep -q "STATUS 200: hello" \
@@ -340,7 +340,7 @@ for evil in 'http://evil.invalid\@127.0.0.1:8402/' \
             'http://evil.invalid?@127.0.0.1:8402/' \
             'http://127.0.0.1:8402./'; do
     OUT="$("$TAU" --allow-unsigned \
-        --provider-wasm "$HTTP_PROVIDER" --model http-echo \
+        --provider-wasm "$HTTP_PROVIDER" --model http \
         --provider-origin http://127.0.0.1:8402 \
         -p "$evil" 2>&1 || true)"
     echo "$OUT" | grep -q "not in consent allowlist" \
@@ -350,6 +350,19 @@ for evil in 'http://evil.invalid\@127.0.0.1:8402/' \
     fi
 done
 echo "ok — origin gate: userinfo/backslash stay home, tricks and twins refused"
+
+# The load contract is enforced: an unadvertised model id is refused at
+# load, naming the ids the component actually lists — never silently
+# running whatever the guest does with a model it does not advertise.
+OUT="$("$TAU" --allow-unsigned \
+    --provider-wasm "$HTTP_PROVIDER" --model nosuch \
+    --provider-origin http://127.0.0.1:8402 \
+    -p "http://127.0.0.1:8402/" 2>&1 || true)"
+echo "$OUT" | grep -q "model 'nosuch' not provided" \
+    || fail "unknown model id was not refused: $OUT"
+echo "$OUT" | grep -q "available: http" \
+    || fail "refusal does not name the available ids: $OUT"
+echo "ok — unknown model id refused at load, available ids named"
 
 # --- step 4b: large payload over the component boundary ----------------
 step "4b/11 large media crosses the component boundary intact"
@@ -414,7 +427,7 @@ cp "$HTTP_PROVIDER" prov.wasm
 "$TAU" sign prov.wasm --key "$THROWAWAY_FP" > /dev/null || fail "sign provider"
 CONSENT_FILE="$HOME/.tau/consent/$THROWAWAY_FP.json"
 
-OUT="$("$TAU" --provider-wasm prov.wasm --model http-echo \
+OUT="$("$TAU" --provider-wasm prov.wasm --model http \
     --provider-origin http://127.0.0.1:8402 --remember \
     -p "http://127.0.0.1:8402/" 2>&1)" || fail "remembered run: $OUT"
 echo "$OUT" | grep -q "STATUS 200" || fail "remembered run fetch: $OUT"
@@ -426,7 +439,7 @@ echo "$LIST" | grep -q "origin: http://127.0.0.1:8402" \
 echo "ok — grant persisted and listed"
 
 # The remembered grant flows without the flag.
-OUT="$("$TAU" --provider-wasm prov.wasm --model http-echo \
+OUT="$("$TAU" --provider-wasm prov.wasm --model http \
     -p "http://127.0.0.1:8402/" 2>&1)" || fail "recalled run: $OUT"
 echo "$OUT" | grep -q "STATUS 200" || fail "recalled grant did not flow: $OUT"
 echo "ok — remembered origin flows without --provider-origin"
@@ -434,7 +447,7 @@ echo "ok — remembered origin flows without --provider-origin"
 OUT="$("$TAU" consent --revoke "$THROWAWAY_FP")" || fail "consent --revoke: $OUT"
 echo "$OUT" | grep -q "revoked: $THROWAWAY_FP" || fail "revoke output: $OUT"
 [ ! -f "$CONSENT_FILE" ] || fail "revoke left the consent file"
-if "$TAU" --provider-wasm prov.wasm --model http-echo \
+if "$TAU" --provider-wasm prov.wasm --model http \
     -p "http://127.0.0.1:8402/" 2>&1 | grep -q "STATUS 200"; then
     fail "fetch flowed after revoke — the gate is open"
 fi
@@ -443,7 +456,7 @@ echo "ok — revoked grant is gone and the gate closes again"
 # Credential delivery: passing --provider-auth IS the consent, the token
 # reaches the origin through the guest, and the secret is never
 # persisted — the grant stores only the auth_delivery boolean.
-OUT="$("$TAU" --provider-wasm prov.wasm --model http-echo \
+OUT="$("$TAU" --provider-wasm prov.wasm --model http \
     --provider-origin http://127.0.0.1:8402 --provider-auth sekrit-123 --remember \
     -p "http://127.0.0.1:8402/" 2>&1)" || fail "auth run: $OUT"
 echo "$OUT" | grep -q "STATUS 200 \[auth\]" || fail "guest did not get the token: $OUT"
@@ -457,7 +470,7 @@ echo "ok — token delivered to the origin; consent + session carry no secret"
 
 # With the recalled grant, TAU_PROVIDER_AUTH flows without the flag.
 : > auth_capture.log
-OUT="$(TAU_PROVIDER_AUTH=sekrit-456 "$TAU" --provider-wasm prov.wasm --model http-echo \
+OUT="$(TAU_PROVIDER_AUTH=sekrit-456 "$TAU" --provider-wasm prov.wasm --model http \
     -p "http://127.0.0.1:8402/" 2>&1)" || fail "env recall run: $OUT"
 echo "$OUT" | grep -q "STATUS 200 \[auth\]" \
     || fail "recalled grant did not deliver the env token: $OUT"
@@ -468,7 +481,7 @@ echo "ok — recalled grant delivers TAU_PROVIDER_AUTH"
 # The same env var without any grant: delivered nowhere, noted loudly.
 "$TAU" consent --revoke "$THROWAWAY_FP" > /dev/null || fail "second revoke"
 : > auth_capture.log
-OUT="$(TAU_PROVIDER_AUTH=sekrit-789 "$TAU" --provider-wasm prov.wasm --model http-echo \
+OUT="$(TAU_PROVIDER_AUTH=sekrit-789 "$TAU" --provider-wasm prov.wasm --model http \
     --provider-origin http://127.0.0.1:8402 \
     -p "http://127.0.0.1:8402/" 2>&1)" || fail "no-grant run: $OUT"
 echo "$OUT" | grep -q "no auth-delivery grant" \
@@ -484,11 +497,11 @@ echo "ok — env token refused without the grant"
 
 # A corrupt consent file reads as absent: the remembered origin is
 # gone with it and the gate closes (never an error, never lenient).
-OUT="$("$TAU" --provider-wasm prov.wasm --model http-echo \
+OUT="$("$TAU" --provider-wasm prov.wasm --model http \
     --provider-origin http://127.0.0.1:8402 --remember \
     -p "http://127.0.0.1:8402/" 2>&1)" || fail "re-remember run: $OUT"
 echo "{ not json" > "$CONSENT_FILE"
-if "$TAU" --provider-wasm prov.wasm --model http-echo \
+if "$TAU" --provider-wasm prov.wasm --model http \
     -p "http://127.0.0.1:8402/" 2>&1 | grep -q "STATUS 200"; then
     fail "corrupt consent file still granted the origin"
 fi

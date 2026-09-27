@@ -682,10 +682,35 @@ impl ExtensionHost {
             wasi: self.wasi,
             origins,
         };
-        let instance = factory.instantiate().map_err(|e| ExtError::Load {
+        let mut instance = factory.instantiate().map_err(|e| ExtError::Load {
             path: path.display().to_string(),
             reason: format!("provider instantiation failed: {e}"),
         })?;
+        // The load contract is "select one of the component's models by
+        // id" — enforce it. Without this check a typo'd --model silently
+        // runs whatever the guest's run() does with an unknown model
+        // name, and the user never learns the real ids.
+        let models = instance
+            .bindings
+            .tau_extension_models()
+            .call_list_models(&mut instance.store)
+            .map_err(|e| ExtError::Load {
+                path: path.display().to_string(),
+                reason: format!("list_models trapped: {}", compact_wasm_error(&e)),
+            })?;
+        if !models.iter().any(|m| m.id == model) {
+            let available = models
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            return Err(ExtError::Load {
+                path: path.display().to_string(),
+                reason: format!(
+                    "model '{model}' not provided by this component (available: {available})"
+                ),
+            });
+        }
         Ok(WasmModel {
             shared: Arc::new(Mutex::new(SharedProviderInstance { instance, factory })),
             model,

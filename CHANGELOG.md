@@ -52,7 +52,10 @@ the extension unit instead of in-process scripts.
   Anthropic Messages providers; wasm provider components with push-mode
   streaming and consent-gated HTTP egress — a trapped provider fails
   its run and the instance is rebuilt, so one crash never fails the
-  rest of the session. Multimodal messages (text,
+  rest of the session. Loading a provider enforces its advertised
+  model list: a `--model` the component does not list is refused at
+  load, naming the available ids, instead of silently running whatever
+  the guest does with an unknown model. Multimodal messages (text,
   image, audio, video, file), media >256KB externalized to a
   content-addressed blob store with `tau gc`. Blob writes are atomic
   and reads verify the hash: a corrupt blob degrades to a placeholder,
@@ -84,7 +87,7 @@ full tour.
 in eleven steps: demo, the signing/trust chain (trusted load; untrusted,
 byte-flipped, signature-stripped, and corrupted-signature rejection),
 all three built-in providers
-against a loopback mock, wasm-provider consent gate (a consent-escaping 302 is shown to the guest, never followed; userinfo/backslash URLs stay on the consented host while delimiter tricks and normalized twins are refused), multi-MiB media crossing the session→guest boundary whole, MCP bridge spawn
+against a loopback mock, wasm-provider consent gate (a consent-escaping 302 is shown to the guest, never followed; userinfo/backslash URLs stay on the consented host while delimiter tricks and normalized twins are refused), multi-MiB media crossing the session→guest boundary whole, an unadvertised provider --model refused at load with the available ids named, MCP bridge spawn
 gate, remembered-consent lifecycle, credential delivery (the token
 reaches the origin through the guest; consent and session files never
 persist the secret; TAU_PROVIDER_AUTH flows only with the grant),
@@ -96,7 +99,7 @@ going dead), and the WASI sandbox boundary (ambient env visible by
 default, empty under --deny-wasi), and the interactive REPL over a
 real pty (banner, a full turn, /help, idle Ctrl-C, /quit, recall
 history) — restoring
-the environment exactly afterwards. 118 tests, clippy-clean across all
+the environment exactly afterwards. 119 tests, clippy-clean across all
 workspaces.
 
 Performance baseline (docs/perf.md): extension load 202ms cold → 9ms

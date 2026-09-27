@@ -31,3 +31,36 @@ async fn loads_tool_and_executes() {
     assert!(!out.is_error);
     assert_eq!(out.content, "HELLO TAU");
 }
+
+fn provider_artifact() -> Option<PathBuf> {
+    let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/echo-provider/target/wasm32-wasip2/release/echo_provider.wasm");
+    path.exists().then_some(path)
+}
+
+/// The load contract is "select one of the component's models by id":
+/// an unknown id must be refused at load, naming the available ones —
+/// never silently run whatever the guest does with a model it does not
+/// list. (A typo'd --model used to sail through and the run "worked".)
+#[tokio::test]
+async fn provider_load_refuses_an_unknown_model_id() {
+    let Some(path) = provider_artifact() else {
+        eprintln!("skipping: echo_provider.wasm not built");
+        return;
+    };
+    let host = ExtensionHost::new();
+    let err = host
+        .load_provider(&path, "nosuch", Default::default(), None)
+        .err()
+        .expect("unknown model id must not load");
+    let message = err.to_string();
+    assert!(message.contains("nosuch"), "names the bad id: {message}");
+    assert!(
+        message.contains("echo"),
+        "lists the available ids: {message}"
+    );
+
+    // The listed id still loads.
+    host.load_provider(&path, "echo", Default::default(), None)
+        .expect("the advertised model id loads");
+}

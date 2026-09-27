@@ -99,7 +99,8 @@ replacement; first `block` wins. A trapping handler degrades to
 A provider component serves models. Streaming is **push-mode**: you
 call `events.emit(json)` per chunk and return from `run` when done.
 
-- `list-models()` — ids the user can select with `--model`.
+- `list-models()` — ids the user can select with `--model`. Load fails
+  for any other id, naming the available ones, so keep this list honest.
 - `run(request-json)` — the request uses tau's wire shape
   (`{"model", "system", "messages", "tools", "auth"?}`). Emit
   `text-delta` / `audio-delta` / `tool-call-delta` events, then exactly
