@@ -3,6 +3,11 @@
 > **状态：已落地（本仓 main，契约 `tau:extension@0.2.0`），随下个
 > tau 版本发布。** 本文是设计记录；实施事实见 CHANGELOG [Unreleased]。
 > 是 `docs/im-channels.md` 与 `docs/realtime-av.md` 的契约前置。
+>
+> **0.3.0 追加**：bridge world 也 `import host`（docs/im-channels.md
+> 契约修正案）——IM 适配器的入站注入腿；steer/follow-up 走同一
+> inject consent 门（`--allow-inject` / remembered grant），宿主侧
+> 与 extension 共用同一组实现。
 
 ## 动机
 

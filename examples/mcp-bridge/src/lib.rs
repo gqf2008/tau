@@ -18,6 +18,7 @@ wit_bindgen::generate!({
 
 use std::sync::{Mutex, MutexGuard};
 
+use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
 use tau::extension::types::ResultBlock;
 use tau::extension::{http, process as proc};
@@ -421,6 +422,22 @@ fn read_all(handle: u64) -> Result<Vec<u8>, String> {
         }
         if eof {
             return Ok(body);
+        }
+    }
+}
+
+/// Nothing to observe — the bridge world exports probes since 0.3.0
+/// (docs/im-channels.md); an empty points() list opts out.
+impl Probes for McpBridge {
+    fn points() -> Vec<String> {
+        Vec::new()
+    }
+
+    fn probe(_point: String, _payload_json: String) -> Verdict {
+        Verdict {
+            action: Action::Continue,
+            payload_json: None,
+            reason: None,
         }
     }
 }

@@ -439,9 +439,18 @@ interface ws {
 /// the capabilities the bridge declares (process spawn, scoped http).
 /// Both capabilities are always linked but granted empty by default: with
 /// no consent they fail at call time, not instantiation time.
+/// Bridge components are long-lived protocol translators (MCP, IM
+/// platforms). Since 0.3.0 (docs/im-channels.md contract amendment) the
+/// world carries the full IM three-leg set: network (process/http/ws)
+/// + the host channel (steer/follow-up inbound injection, consent-gated
+/// the same way as extensions) + probes (after_response outbound
+/// observation; a bridge with nothing to observe returns an empty
+/// points() list).
 world bridge {
     import process;
     import http;
     import ws;
+    import host;
     export tools;
+    export probes;
 }

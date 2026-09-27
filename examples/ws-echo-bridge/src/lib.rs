@@ -18,6 +18,7 @@ wit_bindgen::generate!({
     world: "bridge",
 });
 
+use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
 use tau::extension::types::ResultBlock;
 use tau::extension::ws::{self, Frame};
@@ -82,6 +83,22 @@ fn round_trip(text: &str) -> Result<String, String> {
     })();
     let _ = ws::close(handle);
     result
+}
+
+/// Nothing to observe — the bridge world exports probes since 0.3.0
+/// (docs/im-channels.md); an empty points() list opts out.
+impl Probes for WsEchoBridge {
+    fn points() -> Vec<String> {
+        Vec::new()
+    }
+
+    fn probe(_point: String, _payload_json: String) -> Verdict {
+        Verdict {
+            action: Action::Continue,
+            payload_json: None,
+            reason: None,
+        }
+    }
 }
 
 export!(WsEchoBridge);

@@ -190,7 +190,8 @@ struct ComponentState {
 
 /// One open host.subscribe handle: the topic filter plus the bus
 /// receiver backing the bounded ring (capacity = the bus's own).
-struct StreamSubscription {
+/// pub(crate): bridge state holds the same per-instance subscriptions.
+pub(crate) struct StreamSubscription {
     /// Subscribed to AgentEvent::TextDelta.
     text_delta: bool,
     /// Subscribed to AgentEvent::AudioDelta.
@@ -209,138 +210,184 @@ impl WasiView for ComponentState {
 
 use bindings::tau::extension::types as wit;
 
-impl ComponentState {
-    /// steer/follow-up shared path: consent gate, role validation,
-    /// conversion (size cap included), then enqueue into the control
-    /// channel. Enqueue-only — the agent loop applies the message at its
-    /// own checkpoints (docs/host-channel.md 语义红线 1).
-    fn inject_message(&mut self, message: wit::Message, steer: bool) -> Result<(), String> {
-        if !self.inject {
-            return Err(
-                "session injection not consented for this component (host CLI: --allow-inject)"
-                    .into(),
-            );
-        }
-        if !matches!(message.role, wit::Role::User) {
-            return Err("host.steer/follow-up: message role must be user".into());
-        }
-        let message = convert::message_to_core(message).map_err(|e| e.to_string())?;
-        let control = self.channel.control()?;
-        control
-            .send(if steer {
-                tau_core::Control::Steer(message)
-            } else {
-                tau_core::Control::FollowUp(message)
-            })
-            .map_err(|_| "agent control channel closed (run over?)".to_string())
+/// steer/follow-up shared path (extensions and bridges alike): consent
+/// gate, role validation, conversion (size cap included), then enqueue
+/// into the control channel. Enqueue-only — the agent loop applies the
+/// message at its own checkpoints (docs/host-channel.md 语义红线 1).
+pub(crate) fn inject_message(
+    channel: &HostChannel,
+    inject: bool,
+    message: wit::Message,
+    steer: bool,
+) -> Result<(), String> {
+    if !inject {
+        return Err(
+            "session injection not consented for this component (host CLI: --allow-inject)"
+                .into(),
+        );
     }
+    if !matches!(message.role, wit::Role::User) {
+        return Err("host.steer/follow-up: message role must be user".into());
+    }
+    let message = convert::message_to_core(message).map_err(|e| e.to_string())?;
+    let control = channel.control()?;
+    control
+        .send(if steer {
+            tau_core::Control::Steer(message)
+        } else {
+            tau_core::Control::FollowUp(message)
+        })
+        .map_err(|_| "agent control channel closed (run over?)".to_string())
+}
+
+/// notify shared path: user-visible notice → the agent's bus as an
+/// ExtensionNotice. A fact for the UI, never model history.
+pub(crate) fn channel_notify(
+    channel: &HostChannel,
+    level: String,
+    content: Vec<wit::Content>,
+) -> Result<(), String> {
+    let content = convert::contents_to_core(content).map_err(|e| e.to_string())?;
+    let bus = channel.bus()?;
+    // No subscribers is fine; a full channel is the subscriber's problem.
+    let _ = bus.send(tau_core::AgentEvent::ExtensionNotice { level, content });
+    Ok(())
+}
+
+/// emit shared path: extension-defined fact → the bus as an
+/// ExtensionFact. The schema is external to tau (JSON leaf) but must be
+/// well-formed JSON.
+pub(crate) fn channel_emit(channel: &HostChannel, event_json: String) -> Result<(), String> {
+    let fact: serde_json::Value = serde_json::from_str(&event_json)
+        .map_err(|e| format!("host.emit: event-json is not valid JSON: {e}"))?;
+    let bus = channel.bus()?;
+    let _ = bus.send(tau_core::AgentEvent::ExtensionFact(fact));
+    Ok(())
+}
+
+/// host.subscribe shared path (docs/stream-subscribe.md): hang a bounded
+/// ring on the bus; the guest drains it with poll inside its own
+/// invocations. Fail-loud on unknown topics — a silent empty
+/// subscription looks identical to "no events".
+pub(crate) fn subscribe_topics(
+    channel: &HostChannel,
+    subscriptions: &mut HashMap<u64, StreamSubscription>,
+    next_subscription: &mut u64,
+    topics: &[String],
+) -> Result<u64, String> {
+    let mut sub = StreamSubscription {
+        text_delta: false,
+        audio_delta: false,
+        rx: channel.bus()?.subscribe(),
+    };
+    if topics.is_empty() {
+        return Err("host.subscribe: no topics (catalog: text-delta, audio-delta)".into());
+    }
+    for topic in topics {
+        match topic.as_str() {
+            "text-delta" => sub.text_delta = true,
+            "audio-delta" => sub.audio_delta = true,
+            other => {
+                return Err(format!(
+                    "host.subscribe: unknown topic {other:?} (catalog: text-delta, audio-delta)"
+                ));
+            }
+        }
+    }
+    let id = *next_subscription;
+    *next_subscription += 1;
+    subscriptions.insert(id, sub);
+    Ok(id)
+}
+
+/// host.poll shared path: non-blocking drain (try_recv — a synchronous
+/// host function must never block_on on the runtime thread). Off-topic
+/// events are dropped on the floor; an overrun surfaces as one lagged(n)
+/// marker at the head of the batch.
+pub(crate) fn poll_subscription(
+    subscriptions: &mut HashMap<u64, StreamSubscription>,
+    subscription: u64,
+) -> Result<Vec<bindings::tau::extension::host::StreamEvent>, String> {
+    use bindings::tau::extension::host::{AudioSegment, StreamEvent};
+    use tokio::sync::broadcast::error::TryRecvError;
+    let sub = subscriptions.get_mut(&subscription).ok_or_else(|| {
+        format!(
+            "host.poll: unknown subscription {subscription}                  (handles do not survive a trap rebuild)"
+        )
+    })?;
+    let mut out = Vec::new();
+    loop {
+        match sub.rx.try_recv() {
+            Ok(tau_core::AgentEvent::TextDelta(text)) if sub.text_delta => {
+                out.push(StreamEvent::TextDelta(text));
+            }
+            Ok(tau_core::AgentEvent::AudioDelta { bytes, media_type }) if sub.audio_delta => {
+                out.push(StreamEvent::AudioDelta(AudioSegment {
+                    bytes: bytes as u64,
+                    media_type,
+                }));
+            }
+            Ok(_) => {} // off-topic: advance the ring, drop the event
+            Err(TryRecvError::Lagged(n)) => out.push(StreamEvent::Lagged(n)),
+            Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
+        }
+    }
+    Ok(out)
+}
+
+/// host.unsubscribe shared path.
+pub(crate) fn unsubscribe_subscription(
+    subscriptions: &mut HashMap<u64, StreamSubscription>,
+    subscription: u64,
+) -> Result<(), String> {
+    subscriptions
+        .remove(&subscription)
+        .map(|_| ())
+        .ok_or_else(|| format!("host.unsubscribe: unknown subscription {subscription}"))
 }
 
 /// The types interface is type-only; bindgen still generates the marker
 /// trait for it.
 impl bindings::tau::extension::types::Host for ComponentState {}
 
+/// The extension world's host-channel impl: one-line delegations to the
+/// shared ops above (the bridge world's impl converts its own bindgen
+/// types into these shapes and calls the same functions).
 impl bindings::tau::extension::host::Host for ComponentState {
-    /// User-visible notice → the agent's bus as an ExtensionNotice. A
-    /// fact for the UI, never model history.
     fn notify(&mut self, level: String, content: Vec<wit::Content>) -> Result<(), String> {
-        let content = convert::contents_to_core(content).map_err(|e| e.to_string())?;
-        let bus = self.channel.bus()?;
-        // No subscribers is fine; a full channel is the subscriber's problem.
-        let _ = bus.send(tau_core::AgentEvent::ExtensionNotice { level, content });
-        Ok(())
+        channel_notify(&self.channel, level, content)
     }
 
-    /// Extension-defined fact → the bus as an ExtensionFact. The schema
-    /// is external to tau (JSON leaf) but must be well-formed JSON.
     fn emit(&mut self, event_json: String) -> Result<(), String> {
-        let fact: serde_json::Value = serde_json::from_str(&event_json)
-            .map_err(|e| format!("host.emit: event-json is not valid JSON: {e}"))?;
-        let bus = self.channel.bus()?;
-        let _ = bus.send(tau_core::AgentEvent::ExtensionFact(fact));
-        Ok(())
+        channel_emit(&self.channel, event_json)
     }
 
     fn steer(&mut self, message: wit::Message) -> Result<(), String> {
-        self.inject_message(message, true)
+        inject_message(&self.channel, self.inject, message, true)
     }
 
     fn follow_up(&mut self, message: wit::Message) -> Result<(), String> {
-        self.inject_message(message, false)
+        inject_message(&self.channel, self.inject, message, false)
     }
 
-    /// host.subscribe (docs/stream-subscribe.md): hang a bounded ring on
-    /// the bus; the guest drains it with poll inside its own
-    /// invocations. Fail-loud on unknown topics — a silent empty
-    /// subscription looks identical to "no events".
     fn subscribe(&mut self, topics: Vec<String>) -> Result<u64, String> {
-        let mut sub = StreamSubscription {
-            text_delta: false,
-            audio_delta: false,
-            rx: self.channel.bus()?.subscribe(),
-        };
-        if topics.is_empty() {
-            return Err("host.subscribe: no topics (catalog: text-delta, audio-delta)".into());
-        }
-        for topic in &topics {
-            match topic.as_str() {
-                "text-delta" => sub.text_delta = true,
-                "audio-delta" => sub.audio_delta = true,
-                other => {
-                    return Err(format!(
-                        "host.subscribe: unknown topic {other:?} (catalog: text-delta, audio-delta)"
-                    ));
-                }
-            }
-        }
-        let id = self.next_subscription;
-        self.next_subscription += 1;
-        self.subscriptions.insert(id, sub);
-        Ok(id)
+        subscribe_topics(
+            &self.channel,
+            &mut self.subscriptions,
+            &mut self.next_subscription,
+            &topics,
+        )
     }
 
-    /// host.poll: non-blocking drain (try_recv — a synchronous host
-    /// function must never block_on on the runtime thread). Off-topic
-    /// events are dropped on the floor; an overrun surfaces as one
-    /// lagged(n) marker at the head of the batch.
     fn poll(
         &mut self,
         subscription: u64,
     ) -> Result<Vec<bindings::tau::extension::host::StreamEvent>, String> {
-        use bindings::tau::extension::host::{AudioSegment, StreamEvent};
-        use tokio::sync::broadcast::error::TryRecvError;
-        let sub = self.subscriptions.get_mut(&subscription).ok_or_else(|| {
-            format!(
-                "host.poll: unknown subscription {subscription}                  (handles do not survive a trap rebuild)"
-            )
-        })?;
-        let mut out = Vec::new();
-        loop {
-            match sub.rx.try_recv() {
-                Ok(tau_core::AgentEvent::TextDelta(text)) if sub.text_delta => {
-                    out.push(StreamEvent::TextDelta(text));
-                }
-                Ok(tau_core::AgentEvent::AudioDelta { bytes, media_type })
-                    if sub.audio_delta =>
-                {
-                    out.push(StreamEvent::AudioDelta(AudioSegment {
-                        bytes: bytes as u64,
-                        media_type,
-                    }));
-                }
-                Ok(_) => {} // off-topic: advance the ring, drop the event
-                Err(TryRecvError::Lagged(n)) => out.push(StreamEvent::Lagged(n)),
-                Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
-            }
-        }
-        Ok(out)
+        poll_subscription(&mut self.subscriptions, subscription)
     }
 
     fn unsubscribe(&mut self, subscription: u64) -> Result<(), String> {
-        self.subscriptions
-            .remove(&subscription)
-            .map(|_| ())
-            .ok_or_else(|| format!("host.unsubscribe: unknown subscription {subscription}"))
+        unsubscribe_subscription(&mut self.subscriptions, subscription)
     }
 }
 
@@ -408,6 +455,20 @@ pub struct LoadedExtension {
 }
 
 impl LoadedExtension {
+    /// Bridge loading builds the same contribution shape (docs/
+    /// im-channels.md: bridges export probes too since 0.3.0).
+    pub(crate) fn new(
+        name: String,
+        tools: Vec<Box<dyn Tool>>,
+        probes: Vec<Box<dyn ProbeHandler>>,
+    ) -> Self {
+        Self {
+            name,
+            tools,
+            probes,
+        }
+    }
+
     /// Consume into the tools and probes the component contributed.
     pub fn into_parts(self) -> LoadedParts {
         (self.tools, self.probes)
@@ -499,7 +560,9 @@ pub struct ExtensionHost {
     engine: Engine,
     policy: sign::TrustPolicy,
     wasi: WasiPolicy,
-    channel: Arc<HostChannel>,
+    /// pub(crate): bridge loading wires the same channel into bridge
+    /// instances (docs/im-channels.md contract amendment).
+    pub(crate) channel: Arc<HostChannel>,
 }
 
 /// Engine with the module compile cache enabled when it initializes:

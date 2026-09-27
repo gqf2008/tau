@@ -90,7 +90,9 @@ async fn bridge_exposes_mcp_tools() {
                 ..BridgeConsent::default()
             },
         )
-        .expect("load bridge");
+        .expect("load bridge")
+        .into_parts()
+        .0;
     let names: Vec<String> = tools.iter().map(|t| t.def().name).collect();
     assert_eq!(names, ["echo", "fail"]);
 
@@ -180,7 +182,7 @@ async fn bridge_exposes_mcp_tools_over_http() {
         },
     );
     let tools = match tools {
-        Ok(tools) => tools,
+        Ok(loaded) => loaded.into_parts().0,
         Err(e) => {
             let _ = child.kill();
             let _ = child.wait();
@@ -272,7 +274,9 @@ async fn bridge_reconnects_after_server_death() {
                 ..BridgeConsent::default()
             },
         )
-        .expect("load bridge");
+        .expect("load bridge")
+        .into_parts()
+        .0;
     let echo = tools
         .iter()
         .find(|tool| tool.def().name == "echo")

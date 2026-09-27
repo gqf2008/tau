@@ -49,7 +49,7 @@ trap cleanup EXIT
 # --- pre-flight -------------------------------------------------------
 step "build release binary + wasm examples"
 cargo build --release -p tau-cli --quiet
-for ex in upper http-provider mcp-bridge guard echo-provider notifier media-tool streamer ws-echo-bridge; do
+for ex in upper http-provider mcp-bridge guard echo-provider notifier media-tool streamer ws-echo-bridge feishu-bridge; do
     cargo build --manifest-path "examples/${ex}/Cargo.toml" \
         --target wasm32-wasip2 --release --quiet
 done
@@ -62,6 +62,7 @@ NOTIFIER="$ROOT/examples/notifier/target/wasm32-wasip2/release/notifier.wasm"
 MEDIA_TOOL="$ROOT/examples/media-tool/target/wasm32-wasip2/release/media_tool.wasm"
 STREAMER="$ROOT/examples/streamer/target/wasm32-wasip2/release/streamer.wasm"
 WS_ECHO="$ROOT/examples/ws-echo-bridge/target/wasm32-wasip2/release/ws_echo_bridge.wasm"
+FEISHU="$ROOT/examples/feishu-bridge/target/wasm32-wasip2/release/feishu_bridge.wasm"
 [ -f "$UPPER" ] || fail "upper example missing"
 [ -f "$HTTP_PROVIDER" ] || fail "http-provider example missing"
 [ -f "$MCP_BRIDGE" ] || fail "mcp-bridge example missing"
@@ -71,6 +72,7 @@ WS_ECHO="$ROOT/examples/ws-echo-bridge/target/wasm32-wasip2/release/ws_echo_brid
 [ -f "$MEDIA_TOOL" ] || fail "media-tool example missing"
 [ -f "$STREAMER" ] || fail "streamer example missing"
 [ -f "$WS_ECHO" ] || fail "ws-echo-bridge example missing"
+[ -f "$FEISHU" ] || fail "feishu-bridge example missing"
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
@@ -474,6 +476,42 @@ kill "$WS_MOCK_PID" 2> /dev/null || true
 # trip (echo: prefix = frame came back) and the payload's survival.
 echo "$OUT" | grep -qE "tool ← ws_echo: echo: .*frame-pipe-ok" || fail "ws echo did not close the loop: $OUT"
 echo "ok — frame crossed guest→host→ws→echo→back (consent-gated origin)"
+
+# --- step 5c: IM loopback (feishu-shaped adapter, docs/im-channels.md) -
+step "5c/11 IM loopback (ws inbound steer + after_response reply POST)"
+python "$ROOT/scripts/im_mock.py" > im_mock.log 2>&1 &
+IM_MOCK_PID=$!
+for _ in $(seq 1 20); do
+    grep -q "im mock ready" im_mock.log 2> /dev/null && break
+    sleep 0.5
+done
+IM_PORT=$(sed -n 's/^im mock ready //p' im_mock.log)
+[ -n "$IM_PORT" ] || fail "im mock did not start: $(cat im_mock.log)"
+# Consented: ws origin covers the connect AND the reply POST (same
+# origin), --allow-inject consents the steer. Semantic anchors only —
+# the faux model owns the reply wording.
+OUT="$("$TAU" --allow-unsigned --mcp-bridge "$FEISHU"     --mcp-url "ws://127.0.0.1:$IM_PORT/im" --allow-inject --demo -p "hi" 2>&1)" || fail "im run: $OUT"
+echo "$OUT" | grep -q "steer: .IM chat loopback-c1"     || fail "IM message was not steered into the session: $OUT"
+echo "$OUT" | grep -q "feishu: reply posted to loopback-c1"     || fail "reply was not posted back: $OUT"
+grep -q "IM REPLY: " im_mock.log     || fail "mock never received the reply POST: $(cat im_mock.log)"
+grep -q "loopback-c1" im_mock.log     || fail "reply lost the chat mapping: $(cat im_mock.log)"
+kill "$IM_MOCK_PID" 2> /dev/null || true
+# Refusal path: without --allow-inject the steer must fail loud and no
+# reply may leave. Fresh mock + fresh log (truncating a live mock's log
+# file fights its open fd).
+python "$ROOT/scripts/im_mock.py" > im_mock2.log 2>&1 &
+IM_MOCK_PID=$!
+for _ in $(seq 1 20); do
+    grep -q "im mock ready" im_mock2.log 2> /dev/null && break
+    sleep 0.5
+done
+IM_PORT=$(sed -n 's/^im mock ready //p' im_mock2.log)
+[ -n "$IM_PORT" ] || fail "im mock (refusal leg) did not start: $(cat im_mock2.log)"
+OUT="$("$TAU" --allow-unsigned --mcp-bridge "$FEISHU"     --mcp-url "ws://127.0.0.1:$IM_PORT/im" --demo -p "hi" 2>&1)" || fail "im refusal run: $OUT"
+kill "$IM_MOCK_PID" 2> /dev/null || true
+echo "$OUT" | grep -q "feishu: steer refused: session injection not consented"     || fail "unconsented steer was not refused: $OUT"
+grep -q "IM REPLY: " im_mock2.log     && fail "reply left without inject consent: $(cat im_mock2.log)"
+echo "ok — IM loop closed (ws inbound → steer → turn → reply POST); unconsented steer refused"
 
 # --- step 6: remembered consent lifecycle ------------------------------
 step "6/11 remembered consent (--remember / --list / --revoke)"

@@ -221,11 +221,22 @@ connection; the host pings every 30s and closes with a named reason
 after 60s of inbound silence), `close(handle)`. Handles are
 generation-fenced like `process`. Demo: `examples/ws-echo-bridge`.
 
+Also since 0.3.0 (the docs/im-channels.md contract amendment): bridges
+import the **host channel** and export **probes** — the IM adapter
+three-leg set. `host.steer`/`follow-up` inject inbound messages into the
+session behind the same `inject` consent as extensions (`--allow-inject`
+or a remembered grant); `host.notify`/`emit`/`subscribe`/`poll`/
+`unsubscribe` behave exactly as for extensions. Probe points are opt-in
+via `points()` (empty = observe nothing); `after_response` is the IM
+outbound leg. Demo: `examples/feishu-bridge` (ws long connection in,
+reply POST out; loopback mock `scripts/im_mock.py`, validate.sh 5c).
+
 Bridges translate an external tool protocol into tau tools — the host
 stays protocol-agnostic and only grants capabilities: `process`
-(spawn-with-pipes) and `http` (origin allowlist). Both are always
-linked, granted empty, checked at call time; the user's consent UX
-shows the exact argv / origin.
+(spawn-with-pipes), `http`/`ws` (origin allowlist) and `host`
+(session injection, consent-gated). All are always linked, granted
+empty, checked at call time; the user's consent UX shows the exact
+argv / origin / grant.
 
 Reference: `examples/mcp-bridge` (MCP stdio + streamable HTTP, with
 protocol-version negotiation). `docs/bridges.md` has the capability

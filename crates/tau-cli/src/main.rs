@@ -120,10 +120,11 @@ struct Cli {
     #[arg(long)]
     allow_unsigned: bool,
 
-    /// Consent to session injection for every extension loaded this run:
-    /// the component may push user messages into the session from inside
-    /// tool/probe calls (host.steer / host.follow-up). With --remember the
-    /// grant persists per signing fingerprint (lift it with
+    /// Consent to session injection for every extension and bridge loaded
+    /// this run: the component may push user messages into the session
+    /// from inside tool/probe calls (host.steer / host.follow-up) — the
+    /// IM inbound leg (docs/im-channels.md). With --remember the grant
+    /// persists per signing fingerprint (lift it with
     /// `tau consent --revoke`). Notifications (host.notify/emit) are facts
     /// and never need this grant.
     #[arg(long)]
@@ -659,13 +660,26 @@ async fn main() -> Result<()> {
             )
         );
         let wasi = effective_wasi(cli.deny_wasi, &remembered);
-        let bridge_tools = host
+        // Session injection (the IM inbound leg): same gate as
+        // extensions — explicit flag wins, remembered grant sticks.
+        let mut consent = consent;
+        consent.inject = cli.allow_inject || remembered.inject;
+        let bridge = host
             .with_wasi_policy(wasi)
             .load_bridge(path, consent.clone())
             .with_context(|| format!("loading mcp bridge {}", path.display()))?;
+        if consent.inject {
+            eprintln!("[tau]   consent: may inject messages into the session");
+        }
+        let (bridge_tools, bridge_probes) = bridge.into_parts();
         for tool in bridge_tools {
             eprintln!("[tau]   mcp tool: {}", tool.def().name);
             tools.register(tool);
+        }
+        // The IM outbound leg: bridge probes (after_response) register
+        // alongside extension probes.
+        for probe in bridge_probes {
+            probes.register(probe);
         }
 
         maybe_remember(

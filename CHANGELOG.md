@@ -46,6 +46,27 @@
   `before_run_end`, notifies the observed delta count; validate.sh
   step 1c asserts the notice end to end.
 
+### Breaking/Added — bridge world gains the host channel + probes (docs/im-channels.md, 0.3.0)
+
+- The bridge world now **imports `host`** (steer/follow-up/notify/emit/
+  subscribe/poll/unsubscribe — the IM inbound leg) and **exports
+  `probes`** (the outbound leg: `after_response` observes the assembled
+  assistant message). Bridges loaded before this change must be rebuilt
+  against the 0.3.0 bridge world (a bridge with nothing to observe
+  returns an empty `points()` list; the two existing bridge examples
+  gained exactly that). Session injection from a bridge rides the same
+  consent gate as extensions: `--allow-inject` or a remembered `inject`
+  grant (now carried through `BridgeConsent` ↔ remembered-consent
+  conversion, sticky-on merge).
+- New example `feishu-bridge`: a feishu-shaped IM adapter — ws long
+  connection opened at `session_start`, inbound frames drained at probe
+  call points (the synchronous guest model: components only run when
+  called; the host's ws actor keeps the connection alive between calls),
+  IM messages steered into the session, and the answer posted back to
+  the platform's reply API from `after_response`. Loopback-verified
+  against `scripts/im_mock.py` (stdlib threaded mock platform) in
+  validate.sh step 5c, including the unconsented-steer refusal path.
+
 ### Added — `ws` capability for bridges (docs/im-channels.md, 0.3.0)
 
 - The bridge world imports `ws`: `connect` / `send` / `recv` / `close`

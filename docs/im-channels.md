@@ -1,8 +1,20 @@
 # IM 通道：微信 / 飞书 / 钉钉 / WhatsApp 接入设计
 
-> **状态：设计草案，未落地。** 代码不得先行于本文。
-> 契约前置：`docs/host-channel.md`（入站注入）+ 本文新增的 `ws` /
+> **状态：设计中，部分落地（ws 能力 + bridge world 三条腿 +
+> 飞书回环示例，均 0.3.0）。** 代码不得先行于本文。
+> 契约前置：`docs/host-channel.md`（入站注入）+ 本文的 `ws` /
 > `ingress` 能力。
+>
+> **契约修正案（2026-09-28，jev 裁决 extend_bridge @ 0.990）**：
+> bridge world 追加 `import host` + `export probes`——IM 适配器需要
+> 三条腿同在（ws/http 网络 + host.steer 入站注入 + after_response
+> 出站观测），原 bridge world 只有网络一条腿。裁决理由：host 链接与
+> probe 调度代码路径既有，复用即可；world 文档新增 import 对已编译
+> 旧组件零影响；probes 缺席即 no-op 是既有语义。否决项：独立
+> im-bridge world（与 bridge 定位同物、契约面 +1）、本轮只加入站腿
+> （出站降级为模型显式调 send 工具，偏离本文既定的 after_response
+> 自动回话）。export probes 成为 bridge world 必需导出 ⇒ 既有
+> bridge 示例须补空 probes 实现（0.3.0 本就是 breaking 列车）。
 
 ## 架构对位：不为 IM 发明新概念
 
@@ -64,6 +76,24 @@ IM 平台                    tau
    端口监听，宿主按路由把请求体喂给对应组件（UX 明示
    「该组件要监听 :8080/im/whatsapp」）。宿主依然不懂任何 IM 协议。
 
+## 同步 guest 模型下的入站泵（实施时补录的现实约束）
+
+组件只在自己的调用点同步执行（与 stream-subscribe.md 材料事实 1
+同源）：宿主不能异步推进 guest ⇒ **组件内的 ws 帧只在组件被调用时
+才能 drain**。IM 入站泵因此落在既有调用点上：`session_start` probe
+建立 ws 长连接，此后每次 probe/tool 调用顺带 `ws::recv`（短超时）
+drain 积存并 `host::steer` 注入。
+
+- **保活不依赖 guest 调用频率**：宿主 ws actor 线程 30s ping /
+  60s 无入站即判死（F9），空闲期连接照样活着，帧在宿主侧积存。
+- **空闲期不泵是如实局限**：agent 完全静止时没有 probe 调用，入站
+  消息要等下一个调用点才注入。生产级 IM 适配器需要一个 cadence
+  driver（宿主定时调用点）——那是未来契约项，本轮不发明。
+- loopback 验收（validate.sh IM 案例）因此设计为：turn 1 的
+  `after_response` drain 到 mock 推来的消息并 steer ⇒ steer 落在
+  当前回合后触发 turn 2 ⇒ turn 2 的 `after_response` 把回复 POST
+  回 mock——全链路只用既有调用点，零新驱动机制。
+
 ## 已知运维坑（来自实机 lesson，直接进适配器设计）
 
 - 飞书长连接断线窗口期会丢消息 ⇒ 入站注入必须补「重连后拉取遗漏」
@@ -90,9 +120,30 @@ media 工具能力，或交给 provider 侧（realtime API 多直接吃 PCM）�
    24h 会话窗口。
 5. **个人微信：不做。** 无官方通道，灰色协议风险不可控。
 
+## 飞书回环协议（loopback mock，validate.sh IM 案例）
+
+无真实飞书租户时的验收形态：mock 平台说**飞书形**协议（语义对齐
+飞书长连接 + reply API，传输用 JSON 帧替代私有二进制帧格式——帧
+编解码差异如实记录，协议翻译层结构不变）。
+
+```
+组件 →(ws connect, TAU_MCP_URL)→ mock：长连接建立
+mock →(text 帧)→ 组件：{"type":"message","chat_id":"c1","user":"u1",
+                        "text":"..."}        # 入站消息事件
+组件 →host::steer(Message{Text})→ 会话       # 入站注入（会话注入 consent）
+agent loop 跑出新回合
+组件 after_response probe：从 assistant 消息抽文本
+组件 →(http POST /reply, origin consent)→ mock：
+       {"chat_id":"c1","text":"..."}         # 出站回复
+```
+
+会话映射：示例内内存映射 `chat_id → 当前会话`（loopback 单 chat）；
+配置文件格式是清单独立项，不在示例里发明。媒体入 blob：示例不覆盖
+（组件无 blob 能力，如实留白）。
+
 ## 落地清单
 
-- [ ] host-channel 落地（见 docs/host-channel.md 清单）
+- [x] host-channel 落地（见 docs/host-channel.md 清单，0.2.0 已落地）
 - [x] `ws` 能力（0.3.0 落地）：bridge world `import ws`——
       connect/send/recv/close + text|binary 帧；宿主 actor 线程只做
       帧管道；consent 与 http 共享 origin 白名单（ws:→http:,
@@ -100,7 +151,20 @@ media 工具能力，或交给 provider 侧（realtime API 多直接吃 PCM）�
       （ping 30s / 60s 无入站即 close 报因 / recv 必须带显式超时）。
       示例 `examples/ws-echo-bridge` + `scripts/ws_echo_mock.py`
       回环验收（validate.sh 步骤 5b）
-- [ ] 飞书 bridge 组件（新示例，不动既有示例）
+- [x] bridge world 追加 `import host` + `export probes`（契约修正案，
+      见文首；2026-09-28 落地）：宿主侧复用既有 host 链接与 probe
+      调度（共享 free fn + BridgeProbes over SharedBridge），bridge
+      steer 与 extension 同门（`--allow-inject` / remembered inject，
+      BridgeConsent↔RememberedConsent 双向携带、merge sticky-on）；
+      既有 bridge 示例（mcp-bridge / ws-echo-bridge）补空 probes 导出
+- [x] 飞书 bridge 组件（`examples/feishu-bridge`，2026-09-28 落地）：
+      session_start 建连、after_response 先回帖后泵入站、steer 注入、
+      chat_id 内存映射；真机教训入码——serde 内部标签 Content 线格式
+      字段在标签前（`{"text":…,"type":"text"}`），抽取勿假设键序；
+      mock 平台必须 threaded（ws 长连 handler 终身阻塞，回帖 POST 要
+      并发服务）
 - [ ] 会话/身份映射配置文件格式
 - [ ] `ingress` 能力（排到企微/WhatsApp 之前）
-- [ ] validate.sh 加一条 IM 回环案例（loopback mock 平台）
+- [x] validate.sh IM 回环案例（步骤 5c，`scripts/im_mock.py`）：
+      注入→steer→turn 2→回帖 POST 全链断言 + 无 --allow-inject 时
+      steer 拒、零回帖的拒绝路径

@@ -66,7 +66,7 @@ impl From<BridgeConsent> for RememberedConsent {
             origins: consent.origins,
             auth_delivery: false,
             wasi_deny: false,
-            inject: false,
+            inject: consent.inject,
         }
     }
 }
@@ -77,6 +77,7 @@ impl From<RememberedConsent> for BridgeConsent {
             command: remembered.command,
             mcp_url: remembered.mcp_url,
             origins: remembered.origins,
+            inject: remembered.inject,
         }
     }
 }
@@ -195,6 +196,9 @@ pub fn merge(explicit: BridgeConsent, remembered: RememberedConsent) -> BridgeCo
         command: explicit.command.or(remembered.command),
         mcp_url: explicit.mcp_url.or(remembered.mcp_url),
         origins,
+        // Sticky-on like remember_into: a remembered grant is never
+        // lifted by omitting the flag (that is what --revoke is for).
+        inject: explicit.inject || remembered.inject,
     }
 }
 
@@ -331,6 +335,7 @@ mod tests {
             command: Some(vec!["explicit".into()]),
             mcp_url: None,
             origins: ["https://b.example".into()].into_iter().collect(),
+            inject: false,
         };
         let remembered = RememberedConsent {
             command: Some(vec!["remembered".into()]),
@@ -345,5 +350,39 @@ mod tests {
         assert_eq!(merged.mcp_url, Some("https://a.example/mcp".into()));
         assert!(merged.origins.contains("https://a.example"));
         assert!(merged.origins.contains("https://b.example"));
+    }
+
+    #[test]
+    fn merge_inject_is_sticky_on() {
+        // The remembered grant survives a run without the flag (lifting
+        // it is --revoke's job); the explicit flag grants over nothing.
+        let remembered = RememberedConsent {
+            inject: true,
+            ..Default::default()
+        };
+        assert!(merge(BridgeConsent::default(), remembered).inject);
+        assert!(
+            merge(
+                BridgeConsent {
+                    inject: true,
+                    ..Default::default()
+                },
+                RememberedConsent::default()
+            )
+            .inject
+        );
+        assert!(!merge(BridgeConsent::default(), RememberedConsent::default()).inject);
+    }
+
+    #[test]
+    fn bridge_consent_round_trips_inject_through_remembered() {
+        let consent = BridgeConsent {
+            inject: true,
+            ..Default::default()
+        };
+        let remembered = RememberedConsent::from(consent);
+        assert!(remembered.inject);
+        assert!(!remembered.is_empty());
+        assert!(BridgeConsent::from(remembered).inject);
     }
 }

@@ -20,7 +20,7 @@ if [ "${SKIP_TESTS:-0}" != "1" ]; then
 fi
 
 echo "== wasm examples (wasm32-wasip2, release)"
-for ex in upper echo-provider mcp-bridge http-provider guard notifier media-tool streamer ws-echo-bridge; do
+for ex in upper echo-provider mcp-bridge http-provider guard notifier media-tool streamer ws-echo-bridge feishu-bridge; do
     cargo build --manifest-path "examples/${ex}/Cargo.toml" \
         --target wasm32-wasip2 --release --quiet
 done
@@ -37,7 +37,7 @@ EXE=target/release/tau
 cp "${EXE}" "${DIST}/"
 cp README.md CHANGELOG.md LICENSE "${DIST}/"
 cp docs/*.md "${DIST}/docs/"
-for ex in upper echo_provider mcp_bridge http_provider guard notifier media_tool streamer ws_echo_bridge; do
+for ex in upper echo_provider mcp_bridge http_provider guard notifier media_tool streamer ws_echo_bridge feishu_bridge; do
     wasm="examples/${ex//_/-}/target/wasm32-wasip2/release/${ex}.wasm"
     cp "${wasm}" "${DIST}/examples/"
 done

@@ -1,10 +1,14 @@
-//! Bridge components (world "bridge"): external tool protocols (MCP) behind
-//! WIT. The host grants exactly two scoped capabilities, and only on
+//! Bridge components (world "bridge"): external tool protocols (MCP, IM
+//! platforms) behind WIT. The host grants scoped capabilities, and only on
 //! explicit consent: spawn-with-pipes (the caller passes the allowed
-//! command argv) and origin-allowlisted HTTP (the caller passes the
-//! allowed origins). The host knows nothing about MCP; the bridge
-//! component speaks whatever protocol it likes over the pipes. (Ambient
-//! WASI follows the host's WasiPolicy — allow-all by default.)
+//! command argv), origin-allowlisted HTTP and WebSocket frames (the caller
+//! passes the allowed origins), and session injection via the host channel
+//! (`inject` consent, same gate as extensions). Bridges also export
+//! probes — an IM adapter observes `after_response` to post replies
+//! (docs/im-channels.md); a bridge with nothing to observe returns an
+//! empty points() list. The host knows nothing about MCP or IM protocols;
+//! the bridge component speaks whatever protocol it likes over the pipes.
+//! (Ambient WASI follows the host's WasiPolicy — allow-all by default.)
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
@@ -13,13 +17,17 @@ use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
+use tau_core::probe::{ProbeHandler, ProbePoint, Verdict};
 use tau_core::tool::{Tool, ToolDef, ToolOutput};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::http::HttpRegistry;
-use crate::{ExtError, ExtensionHost, WasiPolicy, bridge_bindings};
+use crate::{
+    ExtError, ExtensionHost, HostChannel, LoadedExtension, StreamSubscription, WasiPolicy,
+    bridge_bindings,
+};
 
 impl bridge_bindings::tau::extension::types::Host for BridgeState {}
 
@@ -29,6 +37,14 @@ struct BridgeState {
     processes: ProcessRegistry,
     http: HttpRegistry,
     ws: crate::ws::WsRegistry,
+    /// Host channel sinks (late-bound via wire_host_channel, same as
+    /// extensions) + this bridge's session-injection consent.
+    channel: Arc<HostChannel>,
+    inject: bool,
+    /// host.subscribe handles, per-instance like the extension world's
+    /// (a trap rebuild drops them with the old state).
+    subscriptions: HashMap<u64, StreamSubscription>,
+    next_subscription: u64,
 }
 
 impl WasiView for BridgeState {
@@ -148,6 +164,10 @@ pub struct BridgeConsent {
     pub mcp_url: Option<String>,
     /// `scheme://host[:port]` prefixes HTTP requests may target.
     pub origins: HashSet<String>,
+    /// Session injection: the bridge may push messages into the session
+    /// (host.steer / follow-up) — the IM inbound leg. Same gate and same
+    /// remembered grant as extensions.
+    pub inject: bool,
 }
 
 /// Extract the consent origin ("scheme://host[:port]") from an http(s) URL.
@@ -219,6 +239,74 @@ impl bridge_bindings::tau::extension::ws::Host for BridgeState {
     }
 }
 
+/// The bridge world's host channel (docs/im-channels.md contract
+/// amendment): the same ops as the extension world's, with the bridge
+/// bindgen's own copies of the types converted field-by-field into the
+/// host bindings' shapes (identical by construction, like
+/// bridge_block_to_host below).
+impl bridge_bindings::tau::extension::host::Host for BridgeState {
+    fn notify(
+        &mut self,
+        level: String,
+        content: Vec<bridge_bindings::tau::extension::types::Content>,
+    ) -> Result<(), String> {
+        crate::channel_notify(
+            &self.channel,
+            level,
+            content.into_iter().map(bridge_content_to_host).collect(),
+        )
+    }
+
+    fn emit(&mut self, event_json: String) -> Result<(), String> {
+        crate::channel_emit(&self.channel, event_json)
+    }
+
+    fn steer(
+        &mut self,
+        message: bridge_bindings::tau::extension::types::Message,
+    ) -> Result<(), String> {
+        crate::inject_message(
+            &self.channel,
+            self.inject,
+            bridge_message_to_host(message),
+            true,
+        )
+    }
+
+    fn follow_up(
+        &mut self,
+        message: bridge_bindings::tau::extension::types::Message,
+    ) -> Result<(), String> {
+        crate::inject_message(
+            &self.channel,
+            self.inject,
+            bridge_message_to_host(message),
+            false,
+        )
+    }
+
+    fn subscribe(&mut self, topics: Vec<String>) -> Result<u64, String> {
+        crate::subscribe_topics(
+            &self.channel,
+            &mut self.subscriptions,
+            &mut self.next_subscription,
+            &topics,
+        )
+    }
+
+    fn poll(
+        &mut self,
+        subscription: u64,
+    ) -> Result<Vec<bridge_bindings::tau::extension::host::StreamEvent>, String> {
+        crate::poll_subscription(&mut self.subscriptions, subscription)
+            .map(|events| events.into_iter().map(host_event_to_bridge).collect())
+    }
+
+    fn unsubscribe(&mut self, subscription: u64) -> Result<(), String> {
+        crate::unsubscribe_subscription(&mut self.subscriptions, subscription)
+    }
+}
+
 impl bridge_bindings::tau::extension::process::Host for BridgeState {
     fn spawn(&mut self, argv: Vec<String>) -> Result<u64, String> {
         self.processes.spawn(&argv)
@@ -282,6 +370,11 @@ struct BridgeFactory {
     linker: Linker<BridgeState>,
     wasi: WasiPolicy,
     consent: BridgeConsent,
+    /// Shared with every other component loaded from the same host —
+    /// late-bound sinks, see [`HostChannel`].
+    channel: Arc<HostChannel>,
+    /// Session-injection consent for this bridge (steer/follow-up).
+    inject: bool,
     /// Bumped per instantiation; baked into process handles (see
     /// [`ProcessRegistry`]). Guarded by the SharedBridgeInstance mutex.
     generation: std::cell::Cell<u32>,
@@ -305,6 +398,10 @@ impl BridgeFactory {
             processes: ProcessRegistry::new(generation),
             http: HttpRegistry::new(self.consent.origins.clone()),
             ws: crate::ws::WsRegistry::new(generation, self.consent.origins.clone()),
+            channel: self.channel.clone(),
+            inject: self.inject,
+            subscriptions: HashMap::new(),
+            next_subscription: 0,
         };
         let mut store = Store::new(&self.engine, state);
         let bindings =
@@ -333,15 +430,20 @@ type SharedBridge = Arc<Mutex<SharedBridgeInstance>>;
 
 impl ExtensionHost {
     /// Load a bridge component. `consent` carries everything the bridge is
-    /// allowed to touch: the spawn argv (delivered via TAU_MCP_COMMAND) and
-    /// the HTTP origins it may reach (its endpoint via TAU_MCP_URL).
-    /// Passing the consent IS the consent; with both empty the bridge loads
-    /// but every capability call fails permission-denied.
+    /// allowed to touch: the spawn argv (delivered via TAU_MCP_COMMAND),
+    /// the HTTP/WS origins it may reach (its endpoint via TAU_MCP_URL) and
+    /// session injection (`inject` — the IM inbound leg). Passing the
+    /// consent IS the consent; with everything empty the bridge loads but
+    /// every capability call fails permission-denied.
+    ///
+    /// Returns the tools AND the probes the bridge contributed (the IM
+    /// outbound leg observes `after_response`; a bridge with nothing to
+    /// observe declares an empty points() list and contributes none).
     pub fn load_bridge(
         &self,
         path: impl AsRef<Path>,
         consent: BridgeConsent,
-    ) -> Result<Vec<Box<dyn Tool>>, ExtError> {
+    ) -> Result<LoadedExtension, ExtError> {
         let path = path.as_ref().to_path_buf();
         Self::off_runtime(move || self.load_bridge_inner(&path, consent))
     }
@@ -350,7 +452,7 @@ impl ExtensionHost {
         &self,
         path: &Path,
         consent: BridgeConsent,
-    ) -> Result<Vec<Box<dyn Tool>>, ExtError> {
+    ) -> Result<LoadedExtension, ExtError> {
         let bytes = self.read_verified(path)?;
         let component =
             Component::from_binary(&self.engine, &bytes).map_err(|e| ExtError::Load {
@@ -365,13 +467,15 @@ impl ExtensionHost {
             component,
             linker,
             wasi: self.wasi,
+            channel: self.channel.clone(),
+            inject: consent.inject,
             consent,
             generation: std::cell::Cell::new(0),
         };
         let mut instance = factory.instantiate().map_err(|e| ExtError::Load {
             path: path.display().to_string(),
             reason: format!(
-                "bridge instantiation failed: {}",
+                "bridge instantiation failed (the bridge world since 0.3.0 also imports the                  host channel and exports probes — rebuild against wit/tau.wit 0.3.0; a bridge                  with nothing to observe returns an empty points() list): {}",
                 crate::compact_wasm_error(&e)
             ),
         })?;
@@ -387,6 +491,18 @@ impl ExtensionHost {
                 reason: format!("bridge handshake failed: {}", crate::compact_wasm_error(&e)),
             })?;
 
+        // The IM outbound leg (docs/im-channels.md): which probe points
+        // this bridge observes. Empty = none, same opt-in semantics as
+        // extensions.
+        let points = instance
+            .bindings
+            .tau_extension_probes()
+            .call_points(&mut instance.store)
+            .map_err(|e| ExtError::Load {
+                path: path.display().to_string(),
+                reason: format!("bridge points() trapped: {}", crate::compact_wasm_error(&e)),
+            })?;
+
         let shared: SharedBridge = Arc::new(Mutex::new(SharedBridgeInstance { instance, factory }));
         let mut tools: Vec<Box<dyn Tool>> = Vec::with_capacity(definitions.len());
         for def in definitions {
@@ -400,7 +516,25 @@ impl ExtensionHost {
                 shared: shared.clone(),
             }) as Box<dyn Tool>);
         }
-        Ok(tools)
+
+        let points: Vec<ProbePoint> = points
+            .iter()
+            .filter_map(|name| ProbePoint::from_name(name))
+            .collect();
+        let probes: Vec<Box<dyn ProbeHandler>> = if points.is_empty() {
+            Vec::new()
+        } else {
+            vec![Box::new(BridgeProbes {
+                points,
+                shared: shared.clone(),
+            })]
+        };
+
+        let name = path
+            .file_stem()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_else(|| "bridge".into());
+        Ok(LoadedExtension::new(name, tools, probes))
     }
 }
 
@@ -421,6 +555,86 @@ fn bridge_block_to_host(
                 bt::MediaSource::Blob(hash) => ht::MediaSource::Blob(hash),
             },
             name: media.name,
+        }),
+    }
+}
+
+/// Bridge-world media → host-bindings media.
+fn bridge_media_to_host(
+    media: bridge_bindings::tau::extension::types::Media,
+) -> crate::bindings::tau::extension::types::Media {
+    use bridge_bindings::tau::extension::types as bt;
+    use crate::bindings::tau::extension::types as ht;
+    ht::Media {
+        media_type: media.media_type,
+        source: match media.source {
+            bt::MediaSource::Bytes(bytes) => ht::MediaSource::Bytes(bytes),
+            bt::MediaSource::Url(url) => ht::MediaSource::Url(url),
+            bt::MediaSource::Blob(hash) => ht::MediaSource::Blob(hash),
+        },
+        name: media.name,
+    }
+}
+
+/// Bridge-world message content block → host-bindings content block.
+fn bridge_content_to_host(
+    content: bridge_bindings::tau::extension::types::Content,
+) -> crate::bindings::tau::extension::types::Content {
+    use bridge_bindings::tau::extension::types as bt;
+    use crate::bindings::tau::extension::types as ht;
+    match content {
+        bt::Content::Text(text) => ht::Content::Text(text),
+        bt::Content::Media(media) => ht::Content::Media(bridge_media_to_host(media)),
+        bt::Content::ToolCall(call) => ht::Content::ToolCall(ht::ToolCall {
+            id: call.id,
+            name: call.name,
+            arguments_json: call.arguments_json,
+        }),
+        bt::Content::ToolResult(result) => ht::Content::ToolResult(ht::ToolResult {
+            call_id: result.call_id,
+            content: result
+                .content
+                .into_iter()
+                .map(bridge_block_to_host)
+                .collect(),
+            is_error: result.is_error,
+        }),
+    }
+}
+
+/// Bridge-world message → host-bindings message (for steer/follow-up).
+fn bridge_message_to_host(
+    message: bridge_bindings::tau::extension::types::Message,
+) -> crate::bindings::tau::extension::types::Message {
+    use bridge_bindings::tau::extension::types as bt;
+    use crate::bindings::tau::extension::types as ht;
+    ht::Message {
+        role: match message.role {
+            bt::Role::User => ht::Role::User,
+            bt::Role::Assistant => ht::Role::Assistant,
+            bt::Role::Tool => ht::Role::Tool,
+        },
+        content: message
+            .content
+            .into_iter()
+            .map(bridge_content_to_host)
+            .collect(),
+    }
+}
+
+/// Host-bindings stream event → bridge-world stream event (poll's
+/// return crosses the other way).
+fn host_event_to_bridge(
+    event: crate::bindings::tau::extension::host::StreamEvent,
+) -> bridge_bindings::tau::extension::host::StreamEvent {
+    use bridge_bindings::tau::extension::host as bh;
+    use crate::bindings::tau::extension::host as hh;
+    match event {
+        hh::StreamEvent::Lagged(n) => bh::StreamEvent::Lagged(n),
+        hh::StreamEvent::TextDelta(text) => bh::StreamEvent::TextDelta(text),
+        hh::StreamEvent::AudioDelta(segment) => bh::StreamEvent::AudioDelta(bh::AudioSegment {
+            bytes: segment.bytes,
+            media_type: segment.media_type,
         }),
     }
 }
@@ -474,6 +688,60 @@ impl Tool for BridgeTool {
                 ToolOutput::err(format!("bridge trap: {}", crate::compact_wasm_error(&e)))
             }
             Err(e) => ToolOutput::err(format!("bridge task failed: {e}")),
+        }
+    }
+}
+
+/// A bridge's probes (the IM outbound leg, docs/im-channels.md): same
+/// dispatch as extension probes — synchronous call, trap revives the
+/// instance, a broken bridge degrades to Continue and never wedges the
+/// run.
+struct BridgeProbes {
+    points: Vec<ProbePoint>,
+    shared: SharedBridge,
+}
+
+#[async_trait]
+impl ProbeHandler for BridgeProbes {
+    fn points(&self) -> &[ProbePoint] {
+        &self.points
+    }
+
+    async fn probe(&self, point: ProbePoint, payload: serde_json::Value) -> Verdict {
+        let shared = self.shared.clone();
+        let point_name = point.name().to_string();
+        let result = tokio::task::spawn_blocking(move || {
+            let mut guard = shared
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            let BridgeInstance { store, bindings } = &mut guard.instance;
+            let result =
+                bindings
+                    .tau_extension_probes()
+                    .call_probe(store, &point_name, &payload.to_string());
+            if result.is_err() {
+                // The trap poisoned the guest; rebuild so the next probe
+                // still decides instead of degrading forever.
+                guard.revive();
+            }
+            result
+        })
+        .await;
+        use bridge_bindings::exports::tau::extension::probes::Action;
+        match result {
+            Ok(Ok(verdict)) => match verdict.action {
+                Action::Continue => Verdict::Continue,
+                Action::Replace => verdict
+                    .payload_json
+                    .and_then(|p| serde_json::from_str(&p).ok())
+                    .map(Verdict::Replace)
+                    .unwrap_or(Verdict::Continue),
+                Action::Block => Verdict::Block {
+                    reason: verdict.reason.unwrap_or_else(|| "blocked".into()),
+                },
+            },
+            // A broken bridge degrades to Continue, never wedges the run.
+            Ok(Err(_)) | Err(_) => Verdict::Continue,
         }
     }
 }
