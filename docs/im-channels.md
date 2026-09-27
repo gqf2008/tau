@@ -68,6 +68,13 @@ IM 平台                    tau
      error 而不是永远阻塞——「永远阻塞」会让断线窗口静默扩大
      （飞书断线窗口丢消息的 lesson）。重连与补拉是组件职责，
      宿主不代劳。
+     - `ws::send` 的 Ok 语义（钉钉 ack 逼出来的修正案）：**Ok =
+       已写进 socket**（actor 落盘后回执），不是「已入队」。诊断
+       实录：异步入队语义下，print 模式会话在 actor 的 250ms 读
+       滴答内退出，钉钉 ack 永远上不了线（mock 侧零帧 + 退出时
+       RST）——与 webhook 侧的 honest-ack 红线同族，Ok 必须意味
+       着事真的成了。代价是每次 send 最多等一个读滴答（≤250ms），
+       IM 回执速率下无感。
    - `http`：每个 `read-body` 增量读带 idle 超时（无字节即超时 error），
      连接级 keepalive 由宿主 HTTP 栈负责；组件可用「提前关」主动
      断流。SSE 长连接同样适用 idle 超时——静默挂起的 SSE 与断线
@@ -274,6 +281,45 @@ agent loop 跑出新回合
 回复要求 ingress-handler 同步等回合结束，与 push 模型的「请求在实例
 锁下排队」语义冲突，如实不实现。
 
+## 钉钉回环协议（loopback mock，validate.sh 5f）
+
+> 优先级：企微之后补钉钉（jev @ 0.670，置信 0.560——0.3.0 发布是
+> owner 拍板项，钉钉是路线图内可自主闭环的最后一格）。机制是
+> 飞书的复制（ws 长连入站 + http 回帖），钉钉形的**真实增量**有两
+> 个，示例就演示这两个：
+
+1. **帧内回执（ack）**：钉钉 stream 模式要求客户端在**同一条 ws
+   连接**上回 ack 帧（`{"code":200,"headers":{...},"message":"OK",
+   "data":...}`），不回执平台会重投。飞书 loopback 只收不发，钉钉
+   是 `ws::send` 的第一个真实用例。
+2. **双层 JSON**：stream 帧是
+   `{"specVersion","type":"CALLBACK","headers":{...,"topic":...},
+   "data":"<转义后的 JSON 字符串>"}`——`data` 是**字符串装的
+   JSON**，要解两层（外层帧 → data 字符串反转义 → 内层消息体
+   `{"msgtype":"text","text":{"content":...},"senderStaffId":...}`）。
+
+回环形态（`scripts/dt_mock.py` + `examples/dingtalk-bridge`）：
+
+```
+组件 →(ws connect, TAU_MCP_URL)→ mock：长连接建立
+mock →(text 帧)→ 组件：钉钉形 CALLBACK 帧（data 为转义 JSON）
+组件 →(ws send)→ mock：ack 帧 {"code":200,...}   # mock 打印 DT ACK
+组件 →host::steer→ 会话（pump 语义同飞书：调用点 drain）
+组件 after_response →(http POST /reply)→ mock：机器人回帖 API 形
+```
+
+- 真实 gateway 握手（POST /v1.0/gateway/connections 换 wss
+  endpoint+ticket）不模拟——那是**获取连接地址**的步骤，回环里
+  TAU_MCP_URL 直连即等价；差异如实记录。
+- 会话/身份映射配置文件仍是飞书的演示，钉钉示例保持最小（单
+  chat 内存映射）；卡片/富文本映射（文档说的真差异）超出文本
+  回环范围，如实留白。
+- 验收（print 模式即可——ws 泵语义与飞书相同，不需要 pty；
+  前提是上面的 `ws::send` 同步修正案，否则 ack 会在进程退出前
+  丢失）：mock 日志断言 `DT ACK:`（回执帧真的回了）+
+  `DT REPLY:`（回帖到达），tau 输出断言 `steer: [IM dingtalk`
+  （双层解码出的文本进入了会话）。
+
 ## 落地清单
 
 - [x] host-channel 落地（见 docs/host-channel.md 清单，0.2.0 已落地）
@@ -316,6 +362,12 @@ agent loop 跑出新回合
       raw_string @ 1.000）；validate.sh 5e 三腿全绿：坏签名 403
       负对照 / echostr 验签解密回环 / 加密消息 steer→idle 唤醒→
       send API 回帖；mock 内嵌纯 Python AES 启动即 NIST 向量自证
+- [x] 钉钉 bridge 组件（`examples/dingtalk-bridge`，2026-09-28 落地）：
+      同连接 ack 回执帧（ws::send 首个真实用例）+ data 双层 JSON
+      反转义；验收逼出契约修正案——ws::send 的 Ok 改为「已写进
+      socket」（actor 回执确认，jev sync_send @ 0.540/0.45 弱分歧，
+      按 honest-ack 红线族裁定同步）；validate.sh 5f 全绿（print
+      模式：CALLBACK → ack → steer → 回帖 POST）
 - [x] validate.sh IM 回环案例（步骤 5c，`scripts/im_mock.py`）：
       注入→steer→turn 2→回帖 POST 全链断言 + 无 --allow-inject 时
       steer 拒、零回帖的拒绝路径

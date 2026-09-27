@@ -1,0 +1,13 @@
+[package]
+name = "dingtalk-bridge"
+version = "0.1.0"
+edition = "2024"
+description = "Example tau bridge: dingtalk-shaped IM adapter — ws stream inbound with in-band ack frames + double-encoded JSON, http reply outbound (docs/im-channels.md)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.46"
+
+[workspace]

@@ -49,7 +49,7 @@ trap cleanup EXIT
 # --- pre-flight -------------------------------------------------------
 step "build release binary + wasm examples"
 cargo build --release -p tau-cli --quiet
-for ex in upper http-provider mcp-bridge guard echo-provider notifier media-tool streamer ws-echo-bridge feishu-bridge whatsapp-bridge wecom-bridge; do
+for ex in upper http-provider mcp-bridge guard echo-provider notifier media-tool streamer ws-echo-bridge feishu-bridge whatsapp-bridge wecom-bridge dingtalk-bridge; do
     cargo build --manifest-path "examples/${ex}/Cargo.toml" \
         --target wasm32-wasip2 --release --quiet
 done
@@ -65,6 +65,7 @@ WS_ECHO="$ROOT/examples/ws-echo-bridge/target/wasm32-wasip2/release/ws_echo_brid
 FEISHU="$ROOT/examples/feishu-bridge/target/wasm32-wasip2/release/feishu_bridge.wasm"
 WHATSAPP="$ROOT/examples/whatsapp-bridge/target/wasm32-wasip2/release/whatsapp_bridge.wasm"
 WECOM="$ROOT/examples/wecom-bridge/target/wasm32-wasip2/release/wecom_bridge.wasm"
+DINGTALK="$ROOT/examples/dingtalk-bridge/target/wasm32-wasip2/release/dingtalk_bridge.wasm"
 [ -f "$UPPER" ] || fail "upper example missing"
 [ -f "$HTTP_PROVIDER" ] || fail "http-provider example missing"
 [ -f "$MCP_BRIDGE" ] || fail "mcp-bridge example missing"
@@ -77,6 +78,7 @@ WECOM="$ROOT/examples/wecom-bridge/target/wasm32-wasip2/release/wecom_bridge.was
 [ -f "$FEISHU" ] || fail "feishu-bridge example missing"
 [ -f "$WHATSAPP" ] || fail "whatsapp-bridge example missing"
 [ -f "$WECOM" ] || fail "wecom-bridge example missing"
+[ -f "$DINGTALK" ] || fail "dingtalk-bridge example missing"
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
@@ -571,6 +573,29 @@ if python -c "import winpty" 2> /dev/null; then
 else
     echo "skip — pywinpty not installed; wecom ingress e2e not run"
 fi
+
+# --- step 5f: dingtalk stream loopback (docs/im-channels.md) ----------
+# The ws family's second adapter: mechanism copied from 5c (feishu),
+# dingtalk-shaped increments asserted: the in-band ack frame on the
+# same connection (ws::send — synchronous since the send-semantics
+# amendment, so print mode cannot outrun the write) and the
+# double-encoded data JSON.
+step "5f/11 dingtalk stream (CALLBACK double-decode → in-band ack → steer → reply)"
+python "$ROOT/scripts/dt_mock.py" > dt_mock.log 2>&1 &
+DT_MOCK_PID=$!
+for _ in $(seq 1 20); do
+    grep -q "dt mock ready" dt_mock.log 2> /dev/null && break
+    sleep 0.5
+done
+DT_PORT=$(sed -n 's/^dt mock ready //p' dt_mock.log)
+[ -n "$DT_PORT" ] || fail "dt mock did not start: $(cat dt_mock.log)"
+OUT="$("$TAU" --allow-unsigned --mcp-bridge "$DINGTALK"     --mcp-url "ws://127.0.0.1:$DT_PORT/dt" --allow-inject --demo -p "hi" 2>&1)" || fail "dingtalk run: $OUT"
+kill "$DT_MOCK_PID" 2> /dev/null || true
+echo "$OUT" | grep -q "steer: .IM dingtalk"     || fail "dingtalk message was not steered into the session: $OUT"
+echo "$OUT" | grep -q "dingtalk: reply posted to loopback-user"     || fail "reply was not posted back: $OUT"
+grep -q "DT ACK: " dt_mock.log     || fail "the ack frame never reached the platform: $(cat dt_mock.log)"
+grep -q "DT REPLY: " dt_mock.log     || fail "mock never received the reply POST: $(cat dt_mock.log)"
+echo "ok — dingtalk loop closed (CALLBACK → double-decode → in-band ack → steer → reply POST)"
 
 # --- step 6: remembered consent lifecycle ------------------------------
 step "6/11 remembered consent (--remember / --list / --revoke)"

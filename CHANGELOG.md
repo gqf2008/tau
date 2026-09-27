@@ -37,6 +37,23 @@
   (host-channel control is interposed through the REPL; mid-run
   forwarding is unchanged, print mode forwards straight through).
 
+### Added — dingtalk bridge + ws::send honesty amendment (docs/im-channels.md)
+
+- New example `dingtalk-bridge` + `scripts/dt_mock.py`: the ws family's
+  second adapter (stream mode, mechanism shared with feishu-bridge)
+  demonstrating the two dingtalk-shaped increments — the in-band ack
+  frame on the same connection (the first real `ws::send` user) and
+  the double-encoded `data` JSON. validate.sh step 5f (print mode):
+  CALLBACK → double-decode → in-band ack → steer → reply POST.
+- Contract amendment (ws, 0.3.0 unreleased): **`ws::send`'s Ok now
+  means the frame was WRITTEN to the socket** — the connection actor
+  confirms after writing and the call blocks until then (bounded by
+  the actor's 250ms read tick). The queued-only semantics provably
+  lost acks: in print mode the session exits within one tick and the
+  ack never reaches the platform (instrumented: zero frames at the
+  mock, connection reset at exit). Same doctrine family as the
+  webhook honest-ack red line: Ok must mean it happened.
+
 ### Breaking — contract `tau:extension@0.3.0` (tool media results, wit-review F4)
 
 - Tool results are **multi-block**: `tool-result.content` is now
