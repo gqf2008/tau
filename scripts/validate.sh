@@ -436,6 +436,28 @@ if grep -q "sekrit-789" auth_capture.log; then
 fi
 echo "ok — env token refused without the grant"
 
+# A corrupt consent file reads as absent: the remembered origin is
+# gone with it and the gate closes (never an error, never lenient).
+OUT="$("$TAU" --provider-wasm prov.wasm --model http-echo \
+    --provider-origin http://127.0.0.1:8402 --remember \
+    -p "http://127.0.0.1:8402/" 2>&1)" || fail "re-remember run: $OUT"
+echo "{ not json" > "$CONSENT_FILE"
+if "$TAU" --provider-wasm prov.wasm --model http-echo \
+    -p "http://127.0.0.1:8402/" 2>&1 | grep -q "STATUS 200"; then
+    fail "corrupt consent file still granted the origin"
+fi
+rm -f "$CONSENT_FILE"
+echo "ok — corrupt consent file reads as absent, the gate closes"
+
+# A caller-supplied "fingerprint" must never become a path out of the
+# store: consent --revoke rejects anything not 16 lowercase hex.
+if "$TAU" consent --revoke "../escape" > revoke.out 2>&1; then
+    fail "path-shaped fingerprint accepted by consent --revoke"
+fi
+grep -q "not a signing fingerprint" revoke.out \
+    || fail "unexpected revoke rejection: $(cat revoke.out)"
+echo "ok — consent --revoke rejects non-fingerprint input"
+
 # --- step 7: OCI distribution ------------------------------------------
 step "7/10 OCI distribution (push / pull / trust onboarding)"
 # ext.wasm from step 2 is signed with the throwaway key: signature and

@@ -90,6 +90,25 @@ pub fn remember_into(existing: RememberedConsent, grant: RememberedConsent) -> R
     }
 }
 
+/// Fingerprints are 16 lowercase hex chars (see
+/// [`sign::fingerprint`]). Every store method checks the shape: the
+/// filename is built from the fingerprint, and a caller-supplied value
+/// (`tau consent --revoke <arg>`) must never become a path —
+/// `../x` would escape the store directory.
+fn fingerprint_shaped(fingerprint: &str) -> bool {
+    fingerprint.len() == 16
+        && fingerprint
+            .bytes()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+}
+
+fn bad_fingerprint(fingerprint: &str) -> std::io::Error {
+    std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("{fingerprint:?} is not a signing fingerprint (16 lowercase hex chars)"),
+    )
+}
+
 /// Filesystem-backed store of [`RememberedConsent`] records, one
 /// `<fingerprint>.json` per file.
 pub struct ConsentStore {
@@ -105,12 +124,18 @@ impl ConsentStore {
     /// The remembered grants for `fingerprint`, if any (a corrupt
     /// file reads as absent, never as an error).
     pub fn load(&self, fingerprint: &str) -> Option<RememberedConsent> {
+        if !fingerprint_shaped(fingerprint) {
+            return None;
+        }
         let bytes = std::fs::read(self.dir.join(format!("{fingerprint}.json"))).ok()?;
         serde_json::from_slice(&bytes).ok()
     }
 
     /// Persist `consent` for `fingerprint` (overwrites).
     pub fn save(&self, fingerprint: &str, consent: &RememberedConsent) -> std::io::Result<()> {
+        if !fingerprint_shaped(fingerprint) {
+            return Err(bad_fingerprint(fingerprint));
+        }
         std::fs::create_dir_all(&self.dir)?;
         std::fs::write(
             self.dir.join(format!("{fingerprint}.json")),
@@ -120,6 +145,9 @@ impl ConsentStore {
 
     /// Delete the record for `fingerprint`; `false` when none existed.
     pub fn revoke(&self, fingerprint: &str) -> std::io::Result<bool> {
+        if !fingerprint_shaped(fingerprint) {
+            return Err(bad_fingerprint(fingerprint));
+        }
         match std::fs::remove_file(self.dir.join(format!("{fingerprint}.json"))) {
             Ok(()) => Ok(true),
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
@@ -196,12 +224,12 @@ mod tests {
             auth_delivery: true,
             wasi_deny: false,
         };
-        store.save("abc123", &consent).unwrap();
-        assert_eq!(store.load("abc123"), Some(consent));
-        assert_eq!(store.list(), vec!["abc123".to_string()]);
-        assert!(store.revoke("abc123").unwrap());
-        assert!(!store.revoke("abc123").unwrap());
-        assert_eq!(store.load("abc123"), None);
+        store.save("abc123abc123abc1", &consent).unwrap();
+        assert_eq!(store.load("abc123abc123abc1"), Some(consent));
+        assert_eq!(store.list(), vec!["abc123abc123abc1".to_string()]);
+        assert!(store.revoke("abc123abc123abc1").unwrap());
+        assert!(!store.revoke("abc123abc123abc1").unwrap());
+        assert_eq!(store.load("abc123abc123abc1"), None);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
@@ -212,14 +240,55 @@ mod tests {
         let (dir, store) = store();
         std::fs::create_dir_all(&dir).unwrap();
         std::fs::write(
-            dir.join("old.json"),
+            dir.join("0dd0dd0dd0dd0dd0.json"),
             r#"{"command":["python","server.py"],"origins":["https://a.example"]}"#,
         )
         .unwrap();
-        let loaded = store.load("old").unwrap();
+        let loaded = store.load("0dd0dd0dd0dd0dd0").unwrap();
         assert!(!loaded.auth_delivery);
         assert!(!loaded.wasi_deny);
         assert!(loaded.command.is_some());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn corrupt_files_read_as_absent_and_weird_keys_never_escape_the_dir() {
+        let (dir, store) = store();
+        std::fs::create_dir_all(&dir).unwrap();
+        // Corrupt JSON: absent, never an error (fail-closed).
+        std::fs::write(dir.join("aaaaaaaaaaaaaaaa.json"), b"{ not json").unwrap();
+        assert_eq!(store.load("aaaaaaaaaaaaaaaa"), None);
+        // An empty object loads as a grant-nothing record.
+        std::fs::write(dir.join("bbbbbbbbbbbbbbbb.json"), b"{}").unwrap();
+        assert_eq!(
+            store.load("bbbbbbbbbbbbbbbb"),
+            Some(RememberedConsent::default())
+        );
+        // A caller-supplied "fingerprint" must never become a path:
+        // create a sibling file the traversal would delete if it worked.
+        let sibling = dir
+            .parent()
+            .unwrap()
+            .join(format!("escape-{}.json", std::process::id()));
+        std::fs::write(&sibling, b"x").unwrap();
+        let traversal = "../escape";
+        assert_eq!(store.load(traversal), None);
+        assert!(
+            store
+                .save(traversal, &RememberedConsent::default())
+                .is_err()
+        );
+        assert!(store.revoke(traversal).is_err());
+        // Uppercase hex is not a fingerprint either (the store is
+        // canonical lowercase — accepting both would split identity).
+        assert!(
+            store
+                .save("AAAAAAAAAAAAAAAA", &RememberedConsent::default())
+                .is_err()
+        );
+        // Nothing outside the store dir was touched.
+        assert!(sibling.exists());
+        let _ = std::fs::remove_file(&sibling);
         let _ = std::fs::remove_dir_all(&dir);
     }
 

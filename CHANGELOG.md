@@ -33,7 +33,10 @@ the extension unit instead of in-process scripts.
   never persisted. `tau trust --from-component` onboards keys from
   verified bytes. `--allow-unsigned` excuses only *absent* signatures —
   a signature section that does not verify is refused under every
-  policy, so the escape hatch cannot launder tampered bytes. Origin
+  policy, so the escape hatch cannot launder tampered bytes. Consent
+  files validate their key: a corrupt file reads as absent (the gate
+  closes), and a caller-supplied "fingerprint" is accepted only as
+  16 lowercase hex — never as a path out of the store. Origin
   checks parse the way the HTTP client does (authority ends at
   `/ ? # \`), so userinfo hidden in a query, fragment, or backslash
   cannot smuggle a request past a consented origin.
@@ -86,7 +89,7 @@ the compacted branch), torn-tail recovery, concurrent access, and
 probe verdicts (block, continue, and a trapped probe degrading without
 going dead), and the WASI sandbox boundary (ambient env visible by
 default, empty under --deny-wasi) — restoring
-the environment exactly afterwards. 115 tests, clippy-clean across all
+the environment exactly afterwards. 116 tests, clippy-clean across all
 workspaces.
 
 Performance baseline (docs/perf.md): extension load 202ms cold → 9ms
