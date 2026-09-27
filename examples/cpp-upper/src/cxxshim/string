@@ -1,0 +1,11 @@
+#pragma once
+#include <stddef.h>
+namespace std {
+class string {
+    const char* d; size_t n;
+  public:
+    string(const char* p, size_t l) : d(p), n(l) {}
+    const char* data() const { return d; }
+    size_t size() const { return n; }
+};
+}

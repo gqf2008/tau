@@ -1,0 +1,12 @@
+#pragma once
+#include <stddef.h>
+namespace std {
+class string_view {
+    const char* d; size_t n;
+  public:
+    string_view(const char* p, size_t l) : d(p), n(l) {}
+    string_view(const char* p) : d(p), n(0) { while (p[n]) n++; }
+    size_t size() const { return n; }
+    const char* data() const { return d; }
+};
+}

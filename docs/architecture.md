@@ -22,7 +22,8 @@ tau 是一个最小 agent harness，设计沿袭 pi（MIT, earendil-works/pi）�
 
 - **故障隔离**：扩展 trap 只杀死它自己的那一次调用，宿主重建实例后续
   跑；进程内脚本的一个 panic 就是整个 harness 的 panic。
-- **语言中立**：任何能编到 wasm32-wasip2 的语言都能写扩展。
+- **语言中立**：任何能编到 wasm32-wasip2 的语言都能写扩展
+  （C/C++/Python/JS/TS/Go 实测矩阵见 `docs/wasm-languages.md`）。
 - **单一可分发生产物**：一个 `.wasm` 文件，可内嵌签名、可推 OCI
   registry——「扔一个 .wasm 进去就能扩展」。
 - **能力边界**：组件能做什么由它 import 什么 + 宿主授予什么决定，

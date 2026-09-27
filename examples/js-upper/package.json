@@ -1,0 +1,9 @@
+{
+    "name": "tau-js-upper",
+    "private": true,
+    "version": "0.1.0",
+    "description": "Minimal tau extension in JavaScript (jco componentize)",
+    "devDependencies": {
+        "@bytecodealliance/jco": "^1"
+    }
+}

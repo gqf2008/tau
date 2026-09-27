@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Added
+
+- Minimal wasm extension examples in six more languages — C, C++, Python,
+  JavaScript, TypeScript, Go (`examples/<lang>-upper/`) — each implementing
+  the same `upper` tool contract as `examples/upper` and passing the
+  real-load acceptance (`tool -> upper` / `tool <- upper` in the demo
+  transcript). `docs/wasm-languages.md` records the build matrix, exact
+  tool versions, and per-language pitfalls (componentize-py class-name
+  discovery, jco `--disable http fetch-event`, TinyGo reactor buildmode
+  plus four replayed vendored patches). Java is documented honestly as
+  no-path-today with authoritative evidence (`examples/java-upper/`).
+
 ## [0.1.0] — 2026-09-27
 
 First public release. tau is a minimal agent harness in Rust, designed

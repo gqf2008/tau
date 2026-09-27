@@ -12,6 +12,11 @@ Prerequisites: a Rust toolchain with the component target —
 rustup target add wasm32-wasip2
 ```
 
+Rust is the reference toolchain; minimal examples in C, C++,
+Python, JavaScript, TypeScript, and Go — each load-tested against this
+exact contract — live in `examples/<lang>-upper/`, with the build
+matrix and per-language pitfalls in `docs/wasm-languages.md`.
+
 ## 1. Scaffold
 
 A component is a `cdylib` crate in its own workspace (components build

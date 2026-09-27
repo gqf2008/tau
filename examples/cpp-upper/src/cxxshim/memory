@@ -1,0 +1,2 @@
+#pragma once
+namespace std { template <class T, class D> class unique_ptr {}; }

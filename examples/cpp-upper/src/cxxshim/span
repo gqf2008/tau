@@ -1,0 +1,12 @@
+#pragma once
+#include <stddef.h>
+namespace std {
+template <class T> class span {
+    T* d; size_t n;
+  public:
+    span(T* p, size_t l) : d(p), n(l) {}
+    size_t size() const { return n; }
+    T& operator[](size_t i) { return d[i]; }
+    const T& operator[](size_t i) const { return d[i]; }
+};
+}
