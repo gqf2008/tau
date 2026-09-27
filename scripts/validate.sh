@@ -49,7 +49,7 @@ trap cleanup EXIT
 # --- pre-flight -------------------------------------------------------
 step "build release binary + wasm examples"
 cargo build --release -p tau-cli --quiet
-for ex in upper http-provider mcp-bridge guard echo-provider; do
+for ex in upper http-provider mcp-bridge guard echo-provider notifier; do
     cargo build --manifest-path "examples/${ex}/Cargo.toml" \
         --target wasm32-wasip2 --release --quiet
 done
@@ -58,11 +58,13 @@ HTTP_PROVIDER="$ROOT/examples/http-provider/target/wasm32-wasip2/release/http_pr
 MCP_BRIDGE="$ROOT/examples/mcp-bridge/target/wasm32-wasip2/release/mcp_bridge.wasm"
 GUARD="$ROOT/examples/guard/target/wasm32-wasip2/release/guard.wasm"
 ECHO_PROVIDER="$ROOT/examples/echo-provider/target/wasm32-wasip2/release/echo_provider.wasm"
+NOTIFIER="$ROOT/examples/notifier/target/wasm32-wasip2/release/notifier.wasm"
 [ -f "$UPPER" ] || fail "upper example missing"
 [ -f "$HTTP_PROVIDER" ] || fail "http-provider example missing"
 [ -f "$MCP_BRIDGE" ] || fail "mcp-bridge example missing"
 [ -f "$GUARD" ] || fail "guard example missing"
 [ -f "$ECHO_PROVIDER" ] || fail "echo-provider example missing"
+[ -f "$NOTIFIER" ] || fail "notifier example missing"
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
@@ -790,6 +792,46 @@ OUT="$(TAU_AMBIENT=hunter2 "$TAU" --allow-unsigned --deny-wasi -e "$UPPER" -e "$
 echo "$OUT" | grep -q "tool ← upper: SHOUT WASICHECK" \
     || fail "--deny-wasi did not hide the ambient env from the guest: $OUT"
 echo "ok — --deny-wasi: the guest env is empty, the sandbox holds"
+
+# --- step 10b: host channel (facts flow; injection consent-gated) ------
+step "10b/11 host channel (notify/emit facts; steer consent gate)"
+
+# Without --allow-inject: notify/emit reach the renderer and the bus;
+# steer fails closed with a named refusal inside the tool result.
+OUT="$("$TAU" --allow-unsigned -e "$NOTIFIER" --demo -p "hello host" 2>&1)" \
+    || fail "notifier run: $OUT"
+echo "$OUT" | grep -q "ext info: poke: hello host" \
+    || fail "host.notify did not reach the renderer: $OUT"
+echo "$OUT" | grep -q 'ext fact: {"poke":"hello host"}' \
+    || fail "host.emit did not reach the event bus: $OUT"
+echo "$OUT" | grep -q "steer refused: session injection not consented" \
+    || fail "steer without consent was not refused: $OUT"
+echo "$OUT" | grep -q "\[tau\] steer:" && fail "refused steer still landed: $OUT"
+echo "ok — facts flow; injection fails closed without consent"
+
+# With --allow-inject: the steer queues, applies at the turn checkpoint,
+# and shows on the decision trail.
+OUT="$("$TAU" --allow-unsigned --allow-inject -e "$NOTIFIER" --demo -p "hello host" 2>&1)" \
+    || fail "notifier inject run: $OUT"
+echo "$OUT" | grep -q "consent: may inject messages into the session" \
+    || fail "consent UX line missing: $OUT"
+echo "$OUT" | grep -q "steer queued" \
+    || fail "consented steer was not accepted: $OUT"
+echo "$OUT" | grep -q "\[tau\] steer: hello host" \
+    || fail "consented steer did not land at the checkpoint: $OUT"
+echo "ok — consent granted: steer queues and lands on the trail"
+
+# A 0.1.0-contract component is refused with the version mismatch named.
+OLD_UPPER="$ROOT/dist/tau-0.2.0-x86_64-pc-windows-gnu/examples/c_upper.wasm"
+if [ -f "$OLD_UPPER" ]; then
+    OUT="$("$TAU" --allow-unsigned -e "$OLD_UPPER" --demo -p "hi" 2>&1)" && \
+        fail "0.1.0 component loaded against the 0.2.0 host: $OUT"
+    echo "$OUT" | grep -q "targets tau:extension@0.1.0" \
+        || fail "version mismatch not named in the load error: $OUT"
+    echo "ok — 0.1.0 component refused, version mismatch named"
+else
+    echo "skip — dist copy of a 0.1.0-contract component not found"
+fi
 
 # --- step 11: interactive REPL over a real pty -------------------------
 step "11/11 interactive REPL (pty: banner, turn, /help, Ctrl-C, /quit, history)"

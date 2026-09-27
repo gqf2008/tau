@@ -2,7 +2,7 @@
 examples/upper (Rust). Build: ./build.sh (componentize-py).
 
 The runtime discovers exported-interface implementations by module
-attribute name: `Tools` for tau:extension/tools, `Hooks` for hooks."""
+attribute name: `Tools` for tau:extension/tools, `Probes` for probes."""
 
 import json
 
@@ -31,11 +31,11 @@ class Tools(_exports.Tools):
         return _exports.tools.ToolResult(content=text.upper(), is_error=False)
 
 
-class Hooks(_exports.Hooks):
+class Probes(_exports.Probes):
     def points(self):
         return []
 
     def probe(self, point, payload_json):
-        return _exports.hooks.Verdict(
-            action=_exports.hooks.Action.CONTINUE, payload_json=None, reason=None
+        return _exports.probes.Verdict(
+            action=_exports.probes.Action.CONTINUE, payload_json=None, reason=None
         )

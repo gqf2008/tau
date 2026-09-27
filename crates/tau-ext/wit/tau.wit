@@ -1,4 +1,89 @@
-package tau:extension@0.1.0;
+package tau:extension@0.2.0;
+
+/// ---- Message trunk: tau owns this schema, so it is typed, not JSON ----
+///
+/// Content blocks and messages shared by the host channel (see
+/// docs/host-channel.md). Convention (docs/extensions.md): payloads whose
+/// schema tau owns are WIT types; JSON survives only at leaves tau does
+/// not own the schema for (tool arguments, JSON Schema, probe payloads,
+/// extension-defined facts).
+interface types {
+    /// Who produced a message. Mirrors tau_core::types::Role.
+    enum role {
+        /// The human (or the harness on their behalf).
+        user,
+        /// The model.
+        assistant,
+        /// A tool result message.
+        tool,
+    }
+
+    /// A media payload: image, audio, video, or an arbitrary file. The
+    /// MIME major type carries the semantics (image/*, audio/*, video/*;
+    /// anything else is a file). Raw bytes cross the ABI — never base64.
+    record media {
+        /// MIME type, e.g. "image/png", "audio/pcm;rate=24000".
+        media-type: string,
+        /// Where the bytes live.
+        source: media-source,
+        /// Original filename — file semantics only. The host rejects a
+        /// name on image/audio/video media.
+        name: option<string>,
+    }
+
+    /// Where a media's bytes live. Mirrors tau_core::types::MediaSource.
+    variant media-source {
+        /// Raw bytes.
+        bytes(list<u8>),
+        /// Remote reference; providers that accept URLs use it directly.
+        url(string),
+        /// Content-addressed blob store reference: "sha256:<hex>".
+        blob(string),
+    }
+
+    /// A tool invocation requested by the assistant.
+    record tool-call {
+        /// Provider-assigned call id (echoed back by tool-result).
+        id: string,
+        /// Registered tool name.
+        name: string,
+        /// The one JSON leaf: model-produced arbitrary JSON arguments.
+        arguments-json: string,
+    }
+
+    /// The outcome of one tool call, as conversation content. Text only;
+    /// media tool results are a 0.3.0 evaluation item (wit-review F4).
+    record tool-result {
+        /// The call this answers.
+        call-id: string,
+        /// Textual result content.
+        content: string,
+        /// True when the tool reported failure.
+        is-error: bool,
+    }
+
+    /// One block of a message's content. Mirrors tau_core::types::Content
+    /// with image/audio/video/file collapsed into media (MIME major is
+    /// the semantics).
+    variant content {
+        /// A plain text block.
+        text(string),
+        /// A media block (image, audio, video, file).
+        media(media),
+        /// A tool invocation requested by the assistant.
+        tool-call(tool-call),
+        /// The outcome of one tool call.
+        tool-result(tool-result),
+    }
+
+    /// One message in the conversation: a role plus ordered blocks.
+    record message {
+        /// Who produced it.
+        role: role,
+        /// Ordered blocks: text, media, tool calls/results.
+        content: list<content>,
+    }
+}
 
 /// Tools an extension contributes to the agent.
 interface tools {
@@ -6,7 +91,8 @@ interface tools {
     record definition {
         name: string,
         description: string,
-        /// JSON Schema for the tool's arguments, serialized.
+        /// JSON Schema for the tool's arguments, serialized. JSON because
+        /// JSON Schema is itself a schema language tau does not own.
         parameters-json: string,
     }
 
@@ -26,7 +112,9 @@ interface tools {
 
 /// Probes: lifecycle points where an extension can observe and influence a
 /// run. See docs/probes.md for the point list and payload shapes.
-interface hooks {
+/// (Named `hooks` in 0.1.0; renamed to match the code, the docs, and the
+/// `tau probes` CLI — wit-review F7.)
+interface probes {
     enum action {
         /// No opinion; run proceeds unchanged.
         continue,
@@ -54,22 +142,70 @@ interface hooks {
 }
 
 /// Push channel from a provider component back to the host. Not a
-/// capability: the host always provides it.
+/// capability: the host always provides it. Typed in 0.2.0 — the
+/// model-event schema is tau-owned, and typing kills the base64 hot path
+/// audio-delta had on the 0.1.0 JSON envelope. `emit` returns a result so
+/// a host-side rejection reaches the guest instead of vanishing
+/// (wit-review F2/F6: the 0.1.0 silent-skip path is gone).
 interface events {
-    /// One model event, JSON-serialized using tau's model-event wire shape:
-    /// {"kind":"text-delta","text":"..."}
-    /// {"kind":"audio-delta","data":"<base64>","media_type":"audio/pcm;rate=24000"}
-    ///   (realtime-style audio; chunks of one segment share a media type and
-    ///    concatenate in order — the host assembles them into the assistant
-    ///    message as an audio content block)
-    /// {"kind":"tool-call-delta","index":0,"id":"...","name":"...","arguments_delta":"..."}
-    /// {"kind":"done","stop":"stop|tool-use|length|error|aborted"}
-    /// {"kind":"error","message":"..."}
-    emit: func(event-json: string);
+    /// Why a response ended. Mirrors tau_core::model::StopReason.
+    enum stop-reason {
+        /// The model finished its turn.
+        stop,
+        /// The model wants tool calls executed.
+        tool-use,
+        /// Hit the output limit.
+        length,
+        /// Ended by a failure (a prior `error` event says what).
+        error,
+        /// Cancelled from outside (e.g. a steering interrupt).
+        aborted,
+    }
+
+    /// Incremental assistant audio (realtime-style providers). Chunks of
+    /// one contiguous segment share a media type; concatenating them in
+    /// order must yield valid content of that type. Raw bytes, not base64.
+    record audio-delta {
+        /// The audio bytes of this chunk.
+        data: list<u8>,
+        /// MIME type shared by the contiguous segment this chunk belongs to.
+        media-type: string,
+    }
+
+    /// Incremental tool-call data. Deltas for one call share `index`;
+    /// `id`/`name` arrive (typically once) before its argument fragments.
+    record tool-call-delta {
+        /// Groups the deltas of one call (calls may interleave).
+        index: u32,
+        /// The call's id, on its first delta.
+        id: option<string>,
+        /// The tool's name, on its first delta.
+        name: option<string>,
+        /// A fragment of the JSON arguments text.
+        arguments-delta: string,
+    }
+
+    /// One incremental model output. Mirrors tau_core::model::ModelEvent.
+    variant model-event {
+        /// Incremental assistant text.
+        text-delta(string),
+        /// Incremental tool-call data.
+        tool-call-delta(tool-call-delta),
+        /// Incremental assistant audio.
+        audio-delta(audio-delta),
+        /// Terminal: the response ended successfully for the given reason.
+        done(stop-reason),
+        /// Terminal failure — always followed by `done(error)`.
+        error(string),
+    }
+
+    /// Push one model event. The result reports host-side rejection;
+    /// guests should treat an error as terminal for this stream.
+    emit: func(event: model-event) -> result<_, string>;
 }
 
 /// A model provider. Streaming is push-mode: the component calls
-/// `events.emit` per chunk and returns from `stream` when the response is
+/// `events.emit` per chunk and returns from `run` when the response is
 /// complete. Provider components typically need scoped network access
 /// (declared in metadata, granted by user consent); when the user hands
 /// the host a bearer token (`--provider-auth` / TAU_PROVIDER_AUTH), it
@@ -92,18 +228,54 @@ interface models {
     /// request-json: {"model": string, "system": string|null,
     ///   "messages": [...], "tools": [...],
     ///   "auth"?: {"bearer": string}} using tau's message wire shape.
+    /// Stays JSON: the provider's job is translating to a vendor wire
+    /// format, which is JSON — it re-serializes regardless, and there is
+    /// no hot path here (unlike emit's audio-delta).
     /// Contract (same as the native Model trait): never trap for
     /// request/transport failures; report via an error event followed by
     /// done{stop:"error"}.
     run: func(request-json: string);
 }
 
-/// General extension: tools and/or probes. Ambient WASI (fs/env/stdio/
-/// args/network) is granted by default — pass --deny-wasi to the host CLI
-/// to run components with no ambient capabilities.
+/// Guest→host channel: an extension's active return path. Facts
+/// (notify/emit) are always available; decisions (steer/follow-up) are
+/// consent-gated (per-fingerprint remembered grant; the consent UX says
+/// "this component may inject messages into the session"). Every call
+/// enqueues — none re-enters the agent loop synchronously; delivery
+/// follows the control channel's existing checkpoint rules (steer lands
+/// after the in-flight tool results of the current turn, follow-up when
+/// the run finishes). See docs/host-channel.md 语义红线.
+interface host {
+    use types.{message, content};
+
+    /// User-visible notification; the renderer draws text blocks and a
+    /// placeholder for media blocks. Not added to model history.
+    /// level: "info" | "warn" | "error".
+    notify: func(level: string, content: list<content>) -> result<_, string>;
+
+    /// Publish an extension-defined fact to the event bus (observe-only).
+    /// The fact's schema is external to tau, so this stays a JSON leaf;
+    /// it must still be well-formed JSON, or the result says so.
+    emit: func(event-json: string) -> result<_, string>;
+
+    /// Steer the current run: the message is queued into the control
+    /// channel and lands at the next checkpoint. Consent-gated; the host
+    /// validates role==user and size limits and reports violations.
+    steer: func(message: message) -> result<_, string>;
+
+    /// Queue a message to run after the agent finishes. Same consent and
+    /// validation as steer.
+    follow-up: func(message: message) -> result<_, string>;
+}
+
+/// General extension: tools and/or probes, plus the host channel.
+/// Ambient WASI (fs/env/stdio/args/network) is granted by default —
+/// pass --deny-wasi to the host CLI to run components with no ambient
+/// capabilities.
 world extension {
+    import host;
     export tools;
-    export hooks;
+    export probes;
 }
 
 /// Model provider extension. `events.emit` is the push channel. Network
@@ -133,8 +305,11 @@ interface process {
     /// least one byte is available or the stream closes (eof = true).
     read-stdout: func(handle: u64, max: u32) -> result<tuple<list<u8>, bool>, string>;
 
-    /// Terminate the child and close the handle.
-    kill: func(handle: u64);
+    /// Terminate the child and close the handle. Returns a result since
+    /// 0.2.0 — a kill failure is reported, not swallowed (wit-review F8).
+    /// Handles carry a host-side generation: a stale handle after close
+    /// errors instead of aliasing a newer child.
+    kill: func(handle: u64) -> result<_, string>;
 }
 
 /// HTTP requests: a scoped network capability for bridge components. The

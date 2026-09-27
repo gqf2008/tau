@@ -62,16 +62,16 @@ void exports_tau_extension_tools_execute(extension_string_t *name,
     set_result(ret, text, 0);
 }
 
-void exports_tau_extension_hooks_points(extension_list_string_t *ret) {
+void exports_tau_extension_probes_points(extension_list_string_t *ret) {
     ret->ptr = 0;
     ret->len = 0;
 }
 
-void exports_tau_extension_hooks_probe(extension_string_t *point,
+void exports_tau_extension_probes_probe(extension_string_t *point,
                                        extension_string_t *payload_json,
-                                       exports_tau_extension_hooks_verdict_t *ret) {
+                                       exports_tau_extension_probes_verdict_t *ret) {
     (void)point; (void)payload_json;
-    ret->action = EXPORTS_TAU_EXTENSION_HOOKS_ACTION_CONTINUE;
+    ret->action = EXPORTS_TAU_EXTENSION_PROBES_ACTION_CONTINUE;
     ret->payload_json.is_some = 0;
     ret->reason.is_some = 0;
 }

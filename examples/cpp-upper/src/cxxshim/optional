@@ -7,6 +7,7 @@ template <class T> class optional {
     bool has = false;
     alignas(T) unsigned char buf[sizeof(T)];
     T* p() { return reinterpret_cast<T*>(buf); }
+    const T* p() const { return reinterpret_cast<const T*>(buf); }
   public:
     optional() = default;
     optional(nullopt_t) {}
@@ -20,9 +21,18 @@ template <class T> class optional {
         return *this;
     }
     ~optional() { if (has) p()->~T(); }
+    template <class... Args> T& emplace(Args&&... args) {
+        if (has) p()->~T();
+        new (buf) T(static_cast<Args&&>(args)...);
+        has = true;
+        return *p();
+    }
+    T& operator*() & { return *p(); }
+    T&& operator*() && { return move(*p()); }
     bool has_value() const { return has; }
     explicit operator bool() const { return has; }
     T& value() & { return *p(); }
+    const T& value() const& { return *p(); }
     T&& value() && { return move(*p()); }
 };
 }

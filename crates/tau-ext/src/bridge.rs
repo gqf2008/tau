@@ -47,13 +47,25 @@ struct ChildProcess {
     eof: bool,
 }
 
-#[derive(Default)]
+/// Handles pack a generation in the high 32 bits: the factory bumps the
+/// generation on every (re)instantiation, so a handle a guest holds from
+/// before a trap-rebuild can never alias a child of the fresh instance
+/// (wit-review F8).
 struct ProcessRegistry {
-    next: u64,
+    generation: u32,
+    next: u32,
     children: HashMap<u64, ChildProcess>,
 }
 
 impl ProcessRegistry {
+    fn new(generation: u32) -> Self {
+        Self {
+            generation,
+            next: 0,
+            children: HashMap::new(),
+        }
+    }
+
     fn spawn(&mut self, argv: &[String]) -> Result<u64, String> {
         let (program, args) = argv.split_first().ok_or("spawn: empty argv")?;
         let mut child = Command::new(program)
@@ -85,7 +97,7 @@ impl ProcessRegistry {
                 }
             }
         });
-        let handle = self.next;
+        let handle = ((self.generation as u64) << 32) | (self.next as u64);
         self.next += 1;
         self.children.insert(
             handle,
@@ -101,6 +113,11 @@ impl ProcessRegistry {
     }
 
     fn get(&mut self, handle: u64) -> Result<&mut ChildProcess, String> {
+        if (handle >> 32) as u32 != self.generation {
+            return Err(format!(
+                "stale process handle {handle} (the instance was rebuilt; respawn the child)"
+            ));
+        }
         self.children
             .get_mut(&handle)
             .ok_or_else(|| format!("unknown process handle {handle}"))
@@ -196,11 +213,18 @@ impl bridge_bindings::tau::extension::process::Host for BridgeState {
         Ok((bytes, child.eof && child.pending.is_empty()))
     }
 
-    fn kill(&mut self, handle: u64) {
-        if let Some(mut child) = self.processes.children.remove(&handle) {
-            let _ = child.child.kill();
-            let _ = child.child.wait();
-        }
+    fn kill(&mut self, handle: u64) -> Result<(), String> {
+        // Validates generation and existence (0.2.0: kill failures are
+        // reported, not swallowed — wit-review F8).
+        self.processes.get(handle)?;
+        let mut child = self
+            .processes
+            .children
+            .remove(&handle)
+            .expect("checked above");
+        child.child.kill().map_err(|e| format!("kill: {e}"))?;
+        child.child.wait().map_err(|e| format!("kill: wait: {e}"))?;
+        Ok(())
     }
 }
 
@@ -220,6 +244,9 @@ struct BridgeFactory {
     linker: Linker<BridgeState>,
     wasi: WasiPolicy,
     consent: BridgeConsent,
+    /// Bumped per instantiation; baked into process handles (see
+    /// [`ProcessRegistry`]). Guarded by the SharedBridgeInstance mutex.
+    generation: std::cell::Cell<u32>,
 }
 
 impl BridgeFactory {
@@ -232,10 +259,12 @@ impl BridgeFactory {
         if let Some(url) = &self.consent.mcp_url {
             ctx.env("TAU_MCP_URL", url);
         }
+        let generation = self.generation.get().wrapping_add(1);
+        self.generation.set(generation);
         let state = BridgeState {
             ctx: ctx.build(),
             table: ResourceTable::new(),
-            processes: ProcessRegistry::default(),
+            processes: ProcessRegistry::new(generation),
             http: HttpRegistry::new(self.consent.origins.clone()),
         };
         let mut store = Store::new(&self.engine, state);
@@ -298,6 +327,7 @@ impl ExtensionHost {
             linker,
             wasi: self.wasi,
             consent,
+            generation: std::cell::Cell::new(0),
         };
         let mut instance = factory.instantiate().map_err(|e| ExtError::Load {
             path: path.display().to_string(),

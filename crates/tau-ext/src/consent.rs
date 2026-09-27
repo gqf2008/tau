@@ -40,6 +40,10 @@ pub struct RememberedConsent {
     /// the only way back is `tau consent --revoke`.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub wasi_deny: bool,
+    /// Session injection: this component may push messages into the
+    /// session (`host.steer` / `host.follow-up`). Sticky like wasi_deny.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub inject: bool,
 }
 
 impl RememberedConsent {
@@ -50,6 +54,7 @@ impl RememberedConsent {
             && self.origins.is_empty()
             && !self.auth_delivery
             && !self.wasi_deny
+            && !self.inject
     }
 }
 
@@ -61,6 +66,7 @@ impl From<BridgeConsent> for RememberedConsent {
             origins: consent.origins,
             auth_delivery: false,
             wasi_deny: false,
+            inject: false,
         }
     }
 }
@@ -87,6 +93,7 @@ pub fn remember_into(existing: RememberedConsent, grant: RememberedConsent) -> R
         origins,
         auth_delivery: existing.auth_delivery || grant.auth_delivery,
         wasi_deny: existing.wasi_deny || grant.wasi_deny,
+        inject: existing.inject || grant.inject,
     }
 }
 
@@ -216,6 +223,7 @@ mod tests {
             origins: ["https://api.example.com".into()].into_iter().collect(),
             auth_delivery: true,
             wasi_deny: false,
+            inject: true,
         };
         store.save("abc123abc123abc1", &consent).unwrap();
         assert_eq!(store.load("abc123abc123abc1"), Some(consent));
@@ -293,6 +301,7 @@ mod tests {
             origins: ["https://a.example".into()].into_iter().collect(),
             auth_delivery: true,
             wasi_deny: false,
+            inject: false,
         };
         let grant = RememberedConsent {
             command: None,
@@ -300,6 +309,7 @@ mod tests {
             origins: ["https://b.example".into()].into_iter().collect(),
             auth_delivery: false,
             wasi_deny: true,
+            inject: true,
         };
         let merged = remember_into(existing, grant);
         assert_eq!(merged.command, Some(vec!["old".into()]));
@@ -310,6 +320,9 @@ mod tests {
         // erases it, a run with it never loses what was stored.
         assert!(merged.auth_delivery);
         assert!(merged.wasi_deny);
+        // Sticky-on: the grant's inject survives even though the existing
+        // record lacks it.
+        assert!(merged.inject);
     }
 
     #[test]
@@ -325,6 +338,7 @@ mod tests {
             origins: ["https://a.example".into()].into_iter().collect(),
             auth_delivery: false,
             wasi_deny: false,
+            inject: false,
         };
         let merged = merge(explicit, remembered);
         assert_eq!(merged.command, Some(vec!["explicit".into()]));

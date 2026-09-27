@@ -16,6 +16,7 @@ wit_bindgen::generate!({
 });
 
 use exports::tau::extension::models::{Guest, Info};
+use tau::extension::events::{self, AudioDelta, ModelEvent, StopReason};
 
 struct Echo;
 
@@ -55,15 +56,12 @@ impl Guest for Echo {
             // (multi-MiB media inflates the JSON far past the usual few
             // KiB) shows up as a mismatch.
             Some(text) if text == "probe" => {
-                emit(&serde_json::json!({
-                    "kind": "text-delta",
-                    "text": format!(
-                        "probe bytes={} fnv1a={:016x}",
-                        request_json.len(),
-                        fnv1a(request_json.as_bytes()),
-                    ),
-                }));
-                emit(&serde_json::json!({ "kind": "done", "stop": "stop" }));
+                emit(ModelEvent::TextDelta(format!(
+                    "probe bytes={} fnv1a={:016x}",
+                    request_json.len(),
+                    fnv1a(request_json.as_bytes()),
+                )));
+                emit(ModelEvent::Done(StopReason::Stop));
             }
             // "env NAME" reports whether the ambient env var is visible —
             // demos the host's WASI policy (allow-all inherits, deny-all
@@ -71,50 +69,45 @@ impl Guest for Echo {
             Some(text) if text.starts_with("env ") => {
                 let name = text.trim_start_matches("env ").trim();
                 let value = std::env::var(name).unwrap_or_default();
-                emit(&serde_json::json!({
-                    "kind": "text-delta",
-                    "text": format!("{name}={value}"),
-                }));
-                emit(&serde_json::json!({ "kind": "done", "stop": "stop" }));
+                emit(ModelEvent::TextDelta(format!("{name}={value}")));
+                emit(ModelEvent::Done(StopReason::Stop));
             }
             // "audio …" demos the realtime-style channel: two audio
             // chunks then a text note.
             Some(text) if text.starts_with("audio") => {
-                for data in ["AQID", "BAU="] {
-                    emit(&serde_json::json!({
-                        "kind": "audio-delta",
-                        "data": data,
-                        "media_type": "audio/pcm;rate=24000",
+                // Typed in 0.2.0: raw bytes cross the ABI, no base64.
+                for data in [vec![1u8, 2, 3], vec![4u8, 5]] {
+                    emit(ModelEvent::AudioDelta(AudioDelta {
+                        data,
+                        media_type: "audio/pcm;rate=24000".into(),
                     }));
                 }
-                emit(&serde_json::json!({
-                    "kind": "text-delta",
-                    "text": "(two audio chunks emitted)",
-                }));
-                emit(&serde_json::json!({ "kind": "done", "stop": "stop" }));
+                emit(ModelEvent::TextDelta("(two audio chunks emitted)".into()));
+                emit(ModelEvent::Done(StopReason::Stop));
             }
             Some(text) => {
                 for word in text.split_inclusive(' ') {
-                    emit(&serde_json::json!({
-                        "kind": "text-delta",
-                        "text": word,
-                    }));
+                    emit(ModelEvent::TextDelta(word.to_string()));
                 }
-                emit(&serde_json::json!({ "kind": "done", "stop": "stop" }));
+                emit(ModelEvent::Done(StopReason::Stop));
             }
             None => {
-                emit(&serde_json::json!({
-                    "kind": "error",
-                    "message": "no user message found in request",
-                }));
-                emit(&serde_json::json!({ "kind": "done", "stop": "error" }));
+                emit(ModelEvent::Error(
+                    "no user message found in request".into(),
+                ));
+                emit(ModelEvent::Done(StopReason::Error));
             }
         }
     }
 }
 
-fn emit(event: &serde_json::Value) {
-    tau::extension::events::emit(&event.to_string());
+/// Push one event. `emit` returns a result in 0.2.0: a host-side
+/// rejection is loud on the guest's inherited stderr instead of
+/// vanishing into a silent skip.
+fn emit(event: ModelEvent) {
+    if let Err(e) = events::emit(&event) {
+        eprintln!("echo-provider: host rejected event: {e}");
+    }
 }
 
 /// FNV-1a 64-bit — dependency-free checksum for the "probe" keyword.

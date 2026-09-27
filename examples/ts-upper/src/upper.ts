@@ -51,7 +51,7 @@ export const tools = {
     },
 };
 
-export const hooks = {
+export const probes = {
     points(): string[] {
         return [];
     },

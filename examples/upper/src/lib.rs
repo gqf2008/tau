@@ -11,7 +11,7 @@ wit_bindgen::generate!({
     world: "extension",
 });
 
-use exports::tau::extension::hooks::{Action, Guest as Hooks, Verdict};
+use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
 
 struct Upper;
@@ -51,7 +51,7 @@ impl Tools for Upper {
     }
 }
 
-impl Hooks for Upper {
+impl Probes for Upper {
     fn points() -> Vec<String> {
         // This extension only provides a tool; it probes nothing.
         Vec::new()

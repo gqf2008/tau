@@ -24,7 +24,7 @@ wit_bindgen::generate!({
     world: "extension",
 });
 
-use exports::tau::extension::hooks::{Action, Guest as Hooks, Verdict};
+use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
 
 struct Guard;
@@ -43,7 +43,7 @@ impl Tools for Guard {
     }
 }
 
-impl Hooks for Guard {
+impl Probes for Guard {
     fn points() -> Vec<String> {
         vec!["before_tool".into()]
     }

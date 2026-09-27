@@ -17,6 +17,7 @@ wit_bindgen::generate!({
 });
 
 use exports::tau::extension::models::{Guest, Info};
+use tau::extension::events::{self, ModelEvent, StopReason};
 use tau::extension::http;
 
 struct HttpProvider;
@@ -40,12 +41,12 @@ impl Guest for HttpProvider {
         }
         match fetch(&request_json) {
             Ok(text) => {
-                emit(&serde_json::json!({ "kind": "text-delta", "text": text }));
-                emit(&serde_json::json!({ "kind": "done", "stop": "stop" }));
+                emit(ModelEvent::TextDelta(text));
+                emit(ModelEvent::Done(StopReason::Stop));
             }
             Err(message) => {
-                emit(&serde_json::json!({ "kind": "error", "message": message }));
-                emit(&serde_json::json!({ "kind": "done", "stop": "error" }));
+                emit(ModelEvent::Error(message));
+                emit(ModelEvent::Done(StopReason::Error));
             }
         }
     }
@@ -90,8 +91,11 @@ fn fetch(request_json: &str) -> Result<String, String> {
     Ok(format!("STATUS {status}{marker}: {}", body.trim()))
 }
 
-fn emit(event: &serde_json::Value) {
-    tau::extension::events::emit(&event.to_string());
+/// Push one event; host-side rejections are loud on inherited stderr.
+fn emit(event: ModelEvent) {
+    if let Err(e) = events::emit(&event) {
+        eprintln!("http-provider: host rejected event: {e}");
+    }
 }
 
 export!(HttpProvider);

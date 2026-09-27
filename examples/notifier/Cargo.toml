@@ -1,0 +1,14 @@
+[package]
+name = "notifier"
+version = "0.1.0"
+edition = "2024"
+description = "Example tau extension exercising the host channel (notify/emit/steer)"
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+wit-bindgen = "0.46"
+serde_json = "1"
+
+[workspace]

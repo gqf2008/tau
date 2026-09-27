@@ -1,0 +1,149 @@
+#pragma once
+// Minimal std::variant for the freestanding wasm32 build (this toolchain
+// ships no libc++). Covers what wit-bindgen cpp generates for WIT
+// variants (0.2.0 types interface): a `variants` member read via
+// .index() and std::get<Tag>(v).value, with the value semantics
+// Message/Content need as by-value parameters. Alternatives are
+// constructed by placement through assignment in generated code; the
+// upper example itself never builds one.
+#include <stddef.h>
+#include <utility>
+
+namespace std {
+
+namespace detail {
+
+template <class A, class B>
+struct is_same {
+    static constexpr bool value = false;
+};
+template <class A>
+struct is_same<A, A> {
+    static constexpr bool value = true;
+};
+
+template <class T, class... Ts>
+struct type_index;
+template <class T, class U, class... Ts>
+struct type_index<T, U, Ts...> {
+    static constexpr size_t value =
+        is_same<T, U>::value ? 0 : 1 + type_index<T, Ts...>::value;
+};
+template <class T, class U>
+struct type_index<T, U> {
+    static_assert(is_same<T, U>::value, "get<T>: T is not a variant alternative");
+    static constexpr size_t value = 0;
+};
+
+template <class T, class... Ts>
+struct max_size {
+    static constexpr size_t rest = max_size<Ts...>::value;
+    static constexpr size_t value = sizeof(T) < rest ? rest : sizeof(T);
+};
+template <class T>
+struct max_size<T> {
+    static constexpr size_t value = sizeof(T);
+};
+
+template <class T, class... Ts>
+struct max_align {
+    static constexpr size_t rest = max_align<Ts...>::value;
+    static constexpr size_t value = alignof(T) < rest ? rest : alignof(T);
+};
+template <class T>
+struct max_align<T> {
+    static constexpr size_t value = alignof(T);
+};
+
+template <class T, class... Ts>
+struct first {
+    using type = T;
+};
+
+} // namespace detail
+
+template <class... Ts>
+class variant {
+    static constexpr size_t storage_size = detail::max_size<Ts...>::value;
+    static constexpr size_t storage_align = detail::max_align<Ts...>::value;
+
+    size_t tag;
+    alignas(storage_align) unsigned char buf[storage_size];
+
+    template <size_t I, class T, class... Us>
+    static void destroy_at(size_t i, unsigned char* p) {
+        if (i == I) {
+            reinterpret_cast<T*>(p)->~T();
+        } else if constexpr (sizeof...(Us) > 0) {
+            destroy_at<I + 1, Us...>(i, p);
+        }
+    }
+    template <size_t I, class T, class... Us>
+    static void copy_at(size_t i, unsigned char* dst, const unsigned char* src) {
+        if (i == I) {
+            new (dst) T(*reinterpret_cast<const T*>(src));
+        } else if constexpr (sizeof...(Us) > 0) {
+            copy_at<I + 1, Us...>(i, dst, src);
+        }
+    }
+    template <size_t I, class T, class... Us>
+    static void move_at(size_t i, unsigned char* dst, unsigned char* src) {
+        if (i == I) {
+            new (dst) T(move(*reinterpret_cast<T*>(src)));
+        } else if constexpr (sizeof...(Us) > 0) {
+            move_at<I + 1, Us...>(i, dst, src);
+        }
+    }
+
+  public:
+    variant() : tag(0) { new (buf) typename detail::first<Ts...>::type(); }
+    variant(const variant& o) : tag(o.tag) { copy_at<0, Ts...>(tag, buf, o.buf); }
+    variant(variant&& o) : tag(o.tag) { move_at<0, Ts...>(tag, buf, o.buf); }
+    variant& operator=(const variant& o) {
+        if (this != &o) {
+            destroy_at<0, Ts...>(tag, buf);
+            tag = o.tag;
+            copy_at<0, Ts...>(tag, buf, o.buf);
+        }
+        return *this;
+    }
+    variant& operator=(variant&& o) {
+        if (this != &o) {
+            destroy_at<0, Ts...>(tag, buf);
+            tag = o.tag;
+            move_at<0, Ts...>(tag, buf, o.buf);
+        }
+        return *this;
+    }
+    ~variant() { destroy_at<0, Ts...>(tag, buf); }
+
+    size_t index() const { return tag; }
+
+    template <class T>
+    T& get_ref() & {
+        return *reinterpret_cast<T*>(buf);
+    }
+    template <class T>
+    const T& get_ref() const& {
+        return *reinterpret_cast<const T*>(buf);
+    }
+    template <class T>
+    T&& get_ref() && {
+        return move(*reinterpret_cast<T*>(buf));
+    }
+};
+
+template <class T, class... Ts>
+T& get(variant<Ts...>& v) {
+    return v.template get_ref<T>();
+}
+template <class T, class... Ts>
+const T& get(const variant<Ts...>& v) {
+    return v.template get_ref<T>();
+}
+template <class T, class... Ts>
+T&& get(variant<Ts...>&& v) {
+    return move(v).template get_ref<T>();
+}
+
+} // namespace std

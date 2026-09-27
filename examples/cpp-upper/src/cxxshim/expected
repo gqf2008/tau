@@ -1,0 +1,60 @@
+#pragma once
+// Minimal std::expected<void, E> for the freestanding wasm32 build (this
+// toolchain ships no libc++). Covers exactly what wit-bindgen cpp emits
+// for `result<_, string>` host-import returns (0.2.0 host channel):
+// default (success) construction, unexpected(error) construction, moves.
+#include <utility>
+
+namespace std {
+
+template <class E>
+class unexpected {
+  public:
+    E err;
+    unexpected(const E& e) : err(e) {}
+    unexpected(E&& e) : err(move(e)) {}
+};
+template <class E>
+unexpected(E) -> unexpected<E>;
+
+template <class T, class E>
+class expected; // primary form unused by the generated code
+
+template <class E>
+class expected<void, E> {
+    bool ok;
+    alignas(E) unsigned char buf[sizeof(E)];
+    E* e() { return reinterpret_cast<E*>(buf); }
+
+  public:
+    expected() : ok(true) {}
+    template <class G>
+    expected(const unexpected<G>& u) : ok(false) {
+        new (buf) E(u.err);
+    }
+    template <class G>
+    expected(unexpected<G>&& u) : ok(false) {
+        new (buf) E(move(u.err));
+    }
+    expected(expected&& o) : ok(o.ok) {
+        if (!ok)
+            new (buf) E(move(*o.e()));
+    }
+    expected& operator=(expected&& o) {
+        if (!ok)
+            e()->~E();
+        ok = o.ok;
+        if (!ok)
+            new (buf) E(move(*o.e()));
+        return *this;
+    }
+    ~expected() {
+        if (!ok)
+            e()->~E();
+    }
+    bool has_value() const { return ok; }
+    explicit operator bool() const { return ok; }
+    E& error() & { return *e(); }
+};
+
+} // namespace std

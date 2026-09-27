@@ -119,6 +119,15 @@ struct Cli {
     #[arg(long)]
     allow_unsigned: bool,
 
+    /// Consent to session injection for every extension loaded this run:
+    /// the component may push user messages into the session from inside
+    /// tool/probe calls (host.steer / host.follow-up). With --remember the
+    /// grant persists per signing fingerprint (lift it with
+    /// `tau consent --revoke`). Notifications (host.notify/emit) are facts
+    /// and never need this grant.
+    #[arg(long)]
+    allow_inject: bool,
+
     /// Persist this run's capability grants — bridge command/url/origins,
     /// provider credential delivery, WASI deny — under each loaded
     /// component's signing fingerprint; later runs recall them without
@@ -220,6 +229,9 @@ async fn run_sub(sub: Sub) -> Result<()> {
                         }
                         if consent.auth_delivery {
                             println!("  auth_delivery: true");
+                        }
+                        if consent.inject {
+                            println!("  inject: session injection (steer/follow-up)");
                         }
                         if consent.wasi_deny {
                             println!("  wasi_deny: true");
@@ -575,11 +587,15 @@ async fn main() -> Result<()> {
         let (_, fingerprint, remembered) =
             recall_consent(&bytes, tau_ext::bridge::BridgeConsent::default());
         let wasi = effective_wasi(cli.deny_wasi, &remembered);
+        let inject = cli.allow_inject || remembered.inject;
         let extension = host
             .with_wasi_policy(wasi)
-            .load(path)
+            .load_with_inject(path, inject)
             .with_context(|| format!("loading {}", path.display()))?;
         eprintln!("[tau] loaded extension: {}", extension.name);
+        if inject {
+            eprintln!("[tau]   consent: may inject messages into the session");
+        }
         let (ext_tools, ext_probes) = extension.into_parts();
         for tool in ext_tools {
             eprintln!("[tau]   tool: {}", tool.def().name);
@@ -593,6 +609,7 @@ async fn main() -> Result<()> {
             &fingerprint,
             tau_ext::consent::RememberedConsent {
                 wasi_deny: wasi == tau_ext::WasiPolicy::DenyAll,
+                inject: cli.allow_inject,
                 ..Default::default()
             },
         )?;
@@ -737,6 +754,12 @@ async fn main() -> Result<()> {
     let mut agent = Agent::new(model, tools)
         .probes(probes)
         .blobs(tau_core::BlobStore::new(tau_core::BlobStore::default_dir()));
+
+    // The host channel exists before the agent (extensions load first):
+    // wire its sinks now so host.notify/emit reach this bus and
+    // host.steer/follow-up reach this control channel. Every loaded
+    // extension shares the wiring, including trap-rebuilt instances.
+    host.wire_host_channel(agent.bus(), agent.control());
     if let Some(system) = cli.system {
         agent = agent.system(system);
     }
@@ -821,6 +844,40 @@ async fn main() -> Result<()> {
                 }
                 Ok(AgentEvent::Steer(message)) => {
                     eprintln!("[tau] steer: {}", message.text())
+                }
+                Ok(AgentEvent::ExtensionNotice { level, content }) => {
+                    // Text blocks render; everything else is a placeholder
+                    // (host-channel semantics: notices are user-visible
+                    // facts, never model history).
+                    let mut line = String::new();
+                    for block in &content {
+                        match block {
+                            tau_core::Content::Text { text } => line.push_str(text),
+                            tau_core::Content::Image { media } => {
+                                line.push_str(&format!("[image: {}]", media.media_type))
+                            }
+                            tau_core::Content::Audio { media } => {
+                                line.push_str(&format!("[audio: {}]", media.media_type))
+                            }
+                            tau_core::Content::Video { media } => {
+                                line.push_str(&format!("[video: {}]", media.media_type))
+                            }
+                            tau_core::Content::File { media, name } => line.push_str(&format!(
+                                "[file: {}]",
+                                name.as_deref().unwrap_or(&media.media_type)
+                            )),
+                            tau_core::Content::ToolCall { name, .. } => {
+                                line.push_str(&format!("[tool-call: {name}]"))
+                            }
+                            tau_core::Content::ToolResult { call_id, .. } => {
+                                line.push_str(&format!("[tool-result: {call_id}]"))
+                            }
+                        }
+                    }
+                    eprintln!("[tau] ext {level}: {line}");
+                }
+                Ok(AgentEvent::ExtensionFact(fact)) => {
+                    eprintln!("[tau] ext fact: {}", repl::compact_preview(&fact.to_string()))
                 }
                 Ok(AgentEvent::FollowUp(message)) => {
                     eprintln!("[tau] follow-up: {}", message.text())

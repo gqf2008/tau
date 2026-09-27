@@ -3,6 +3,5 @@ vendor/
 go.mod
 go.sum
 pinner_shim.go
-tau_extension_hooks/
-tau_extension_tools/
+tau_extension_*/
 wit_exports.go

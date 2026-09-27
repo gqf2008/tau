@@ -59,12 +59,12 @@ tools::ToolResult tools::Execute(wit::string name, wit::string arguments_json) {
     return {std::move(content), is_error};
 }
 
-wit::vector<wit::string> hooks::Points() {
+wit::vector<wit::string> probes::Points() {
     return wit::vector<wit::string>();
 }
 
-hooks::Verdict hooks::Probe(wit::string, wit::string) {
-    return {hooks::Action::kContinue, std::nullopt, std::nullopt};
+probes::Verdict probes::Probe(wit::string, wit::string) {
+    return {probes::Action::kContinue, std::nullopt, std::nullopt};
 }
 
 } // namespace exports::tau::extension

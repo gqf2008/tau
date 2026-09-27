@@ -6,7 +6,8 @@ cd "$(dirname "$0")"
 mkdir -p gen target
 wit-bindgen cpp --world extension --out-dir gen ../../wit/tau.wit
 CFLAGS="--target=wasm32-unknown-unknown -nostdlib -fno-builtin -O2"
-CXXFLAGS="$CFLAGS -fno-exceptions -fno-rtti -std=c++17"
+# -std=c++23: host-channel result<> returns map to std::expected (0.2.0)
+CXXFLAGS="$CFLAGS -fno-exceptions -fno-rtti -std=c++23"
 INCLUDES="-I src/cxxshim -I ../c-upper/src/shim -I gen"
 clang -c $CFLAGS -I ../c-upper/src/shim -o target/shim.o ../c-upper/src/shim.c
 clang++ -c $CXXFLAGS $INCLUDES -o target/upper.o src/upper.cpp

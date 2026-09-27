@@ -2,17 +2,55 @@
 
 ## [Unreleased]
 
+### Breaking — contract `tau:extension@0.2.0` (docs/wit-review.md batch)
+
+- **Host channel** (`docs/host-channel.md`, landed): the extension
+  world imports `host` — `notify(level, content)` (user-visible notice,
+  rendered, never model history), `emit(event-json)` (extension fact on
+  the bus), `steer/follow-up(message)` (enqueue into the control
+  channel, applied at the loop's existing checkpoints; consent-gated by
+  `--allow-inject`, remembered per fingerprint as the `inject` grant).
+  Message payloads use the new typed trunk (`types` interface:
+  message/content/media/tool-call/tool-result); media crosses the ABI
+  as raw bytes, never base64. A typed↔serde conversion layer in tau-ext
+  is pinned by round-trip tests.
+- `hooks` interface renamed `probes`, matching the code, docs, and CLI.
+- `events.emit` is typed (`model-event` variant — the audio-delta
+  base64 hot path is gone) and returns `result<_, string>`; the 0.1.0
+  malformed-frame silent-skip path is gone with the envelope.
+- `process.kill` returns `result<_, string>`; bridge process handles
+  carry a generation, so a stale handle after a trap-rebuild errors
+  instead of aliasing a new child.
+- Load errors name contract-version mismatches ("component targets
+  tau:extension@0.1.0; this host requires @0.2.0 — rebuild…").
+- Components built against 0.1.0 must be rebuilt; no dual-version
+  linking (0.x semantics; docs/host-channel.md 兼容性).
+
+### Added
+
+- `AgentEvent::ExtensionNotice` / `AgentEvent::ExtensionFact` on the
+  bus; `Agent::bus()` exposes the sending half for composition layers.
+- `examples/notifier`: host-channel demo — one `poke` tool exercises
+  notify + emit + steer, with the consent refusal visible in the tool
+  result. Acceptance: `tau --demo -e notifier.wasm -p "hello"` shows
+  "steer refused: session injection not consented"; with
+  `--allow-inject` the steer lands (`[tau] steer: hello`).
+- CLI `--allow-inject`; `tau consent --list` shows the inject grant.
+- The six language examples (C/C++/Python/JS/TS/Go) are rebuilt against
+  0.2.0; C++ gained `expected`/`variant` shims (now `-std=c++23`).
+
 ### Docs
 
-- Design documents (status: unimplemented, code must not precede them):
-  `docs/host-channel.md` (guest->host channel for the extension world),
-  `docs/im-channels.md` (WeChat/Feishu/DingTalk/WhatsApp bridges),
-  `docs/realtime-av.md` (bidirectional realtime audio/video, phased).
+- `docs/wit-review.md` — full contract review (F1–F10) with the 0.2.0
+  action list; F2 feedback leg / F6 / F7 / F8 landed in this batch.
+- `docs/im-channels.md`, `docs/realtime-av.md` remain design documents
+  (unimplemented; code must not precede them).
 
 ### Changed
 
 - `repository`/`homepage` metadata now point at the public repo,
-  https://github.com/gqf2008/tau (rides the next crates.io publish).
+  https://github.com/gqf2008/tau, and member crates actually inherit it
+  (rides the next crates.io publish).
 
 ## [0.2.0] — 2026-09-27
 

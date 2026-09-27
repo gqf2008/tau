@@ -71,6 +71,7 @@ mod bridge_bindings {
 
 pub mod bridge;
 pub mod consent;
+pub mod convert;
 mod http;
 pub mod oci;
 pub mod sign;
@@ -115,13 +116,66 @@ fn compact_error_display(display: &str, root: &str) -> String {
     }
 }
 
-/// Host state handed to every component. The WasiCtx follows the host's
-/// [`WasiPolicy`]: allow-all inherits the process's capabilities;
-/// deny-all links the WASI interfaces but fails every capability call
-/// permission-denied.
+/// The guest→host channel sinks, late-bound by the composition layer.
+/// Extensions load before the agent exists; the CLI wires the agent's
+/// bus and control channel afterwards ([`ExtensionHost::wire_host_channel`]),
+/// and every instance of every extension loaded from that host — including
+/// instances rebuilt after a trap — shares the same wiring. Unwired
+/// (library use without an agent): notify/emit/steer/follow-up all fail
+/// with "host channel not wired" — deliverable-or-error, never a silent
+/// drop.
+#[derive(Default)]
+pub struct HostChannel {
+    inner: Mutex<HostChannelInner>,
+}
+
+#[derive(Default)]
+struct HostChannelInner {
+    bus: Option<tau_core::EventBus>,
+    control: Option<tau_core::ControlTx>,
+}
+
+impl HostChannel {
+    /// Point the channel at an agent's bus and control sender.
+    pub fn wire(&self, bus: tau_core::EventBus, control: tau_core::ControlTx) {
+        let mut inner = self
+            .inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inner.bus = Some(bus);
+        inner.control = Some(control);
+    }
+
+    fn bus(&self) -> Result<tau_core::EventBus, String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .bus
+            .clone()
+            .ok_or_else(|| "host channel not wired (no agent bus attached)".to_string())
+    }
+
+    fn control(&self) -> Result<tau_core::ControlTx, String> {
+        self.inner
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .control
+            .clone()
+            .ok_or_else(|| "host channel not wired (no agent control channel attached)".to_string())
+    }
+}
+
+/// Host state handed to every extension component. The WasiCtx follows
+/// the host's [`WasiPolicy`]: allow-all inherits the process's
+/// capabilities; deny-all links the WASI interfaces but fails every
+/// capability call permission-denied. `inject` is this component's
+/// session-injection consent (steer/follow-up); notify/emit are facts
+/// and never gated.
 struct ComponentState {
     ctx: WasiCtx,
     table: ResourceTable,
+    channel: Arc<HostChannel>,
+    inject: bool,
 }
 
 impl WasiView for ComponentState {
@@ -130,6 +184,69 @@ impl WasiView for ComponentState {
             ctx: &mut self.ctx,
             table: &mut self.table,
         }
+    }
+}
+
+use bindings::tau::extension::types as wit;
+
+impl ComponentState {
+    /// steer/follow-up shared path: consent gate, role validation,
+    /// conversion (size cap included), then enqueue into the control
+    /// channel. Enqueue-only — the agent loop applies the message at its
+    /// own checkpoints (docs/host-channel.md 语义红线 1).
+    fn inject_message(&mut self, message: wit::Message, steer: bool) -> Result<(), String> {
+        if !self.inject {
+            return Err(
+                "session injection not consented for this component (host CLI: --allow-inject)"
+                    .into(),
+            );
+        }
+        if !matches!(message.role, wit::Role::User) {
+            return Err("host.steer/follow-up: message role must be user".into());
+        }
+        let message = convert::message_to_core(message).map_err(|e| e.to_string())?;
+        let control = self.channel.control()?;
+        control
+            .send(if steer {
+                tau_core::Control::Steer(message)
+            } else {
+                tau_core::Control::FollowUp(message)
+            })
+            .map_err(|_| "agent control channel closed (run over?)".to_string())
+    }
+}
+
+/// The types interface is type-only; bindgen still generates the marker
+/// trait for it.
+impl bindings::tau::extension::types::Host for ComponentState {}
+
+impl bindings::tau::extension::host::Host for ComponentState {
+    /// User-visible notice → the agent's bus as an ExtensionNotice. A
+    /// fact for the UI, never model history.
+    fn notify(&mut self, level: String, content: Vec<wit::Content>) -> Result<(), String> {
+        let content = convert::contents_to_core(content).map_err(|e| e.to_string())?;
+        let bus = self.channel.bus()?;
+        // No subscribers is fine; a full channel is the subscriber's problem.
+        let _ = bus.send(tau_core::AgentEvent::ExtensionNotice { level, content });
+        Ok(())
+    }
+
+    /// Extension-defined fact → the bus as an ExtensionFact. The schema
+    /// is external to tau (JSON leaf) but must be well-formed JSON.
+    fn emit(&mut self, event_json: String) -> Result<(), String> {
+        let fact: serde_json::Value = serde_json::from_str(&event_json)
+            .map_err(|e| format!("host.emit: event-json is not valid JSON: {e}"))?;
+        let bus = self.channel.bus()?;
+        let _ = bus.send(tau_core::AgentEvent::ExtensionFact(fact));
+        Ok(())
+    }
+
+    fn steer(&mut self, message: wit::Message) -> Result<(), String> {
+        self.inject_message(message, true)
+    }
+
+    fn follow_up(&mut self, message: wit::Message) -> Result<(), String> {
+        self.inject_message(message, false)
     }
 }
 
@@ -147,6 +264,8 @@ struct InstanceFactory {
     component: Component,
     linker: Linker<ComponentState>,
     wasi: WasiPolicy,
+    channel: Arc<HostChannel>,
+    inject: bool,
 }
 
 impl InstanceFactory {
@@ -154,6 +273,8 @@ impl InstanceFactory {
         let state = ComponentState {
             ctx: self.wasi.ctx_builder().build(),
             table: ResourceTable::new(),
+            channel: self.channel.clone(),
+            inject: self.inject,
         };
         let mut store = Store::new(&self.engine, state);
         let bindings = bindings::Extension::instantiate(&mut store, &self.component, &self.linker)?;
@@ -232,6 +353,32 @@ impl WasiPolicy {
     }
 }
 
+/// If the component exports `tau:extension` interfaces of another
+/// contract version, say so — "missing export tau:extension/tools@0.2.0"
+/// alone leaves the user guessing what the component was built against
+/// (docs/host-channel.md 兼容性: load errors name the version mismatch).
+fn version_hint(component: &Component) -> String {
+    let ty = component.component_type();
+    let mut found: Vec<String> = Vec::new();
+    for (name, _) in ty.exports(component.engine()) {
+        if let Some(rest) = name.strip_prefix("tau:extension/")
+            && let Some((_, version)) = rest.split_once('@')
+        {
+            found.push(version.to_string());
+        }
+    }
+    found.sort();
+    found.dedup();
+    if found.is_empty() || found.iter().any(|v| v == "0.2.0") {
+        String::new()
+    } else {
+        format!(
+            " [component targets tau:extension@{}; this host requires @0.2.0 — rebuild it with the 0.2.0 bindings, see docs/host-channel.md]",
+            found.join(", ")
+        )
+    }
+}
+
 /// Preopen the whole host filesystem read-write: `/` on unix, every
 /// existing drive letter as `/<letter>` on Windows.
 fn preopen_host_fs(ctx: &mut WasiCtxBuilder) {
@@ -256,6 +403,7 @@ pub struct ExtensionHost {
     engine: Engine,
     policy: sign::TrustPolicy,
     wasi: WasiPolicy,
+    channel: Arc<HostChannel>,
 }
 
 /// Engine with the module compile cache enabled when it initializes:
@@ -302,7 +450,15 @@ impl ExtensionHost {
             engine: engine(),
             policy,
             wasi: WasiPolicy::default(),
+            channel: Arc::new(HostChannel::default()),
         }
+    }
+
+    /// Wire the host channel (`host.notify/emit/steer/follow-up`) to an
+    /// agent's event bus and control channel. Call once the agent exists;
+    /// every extension this host loaded (or later loads) sees it.
+    pub fn wire_host_channel(&self, bus: tau_core::EventBus, control: tau_core::ControlTx) {
+        self.channel.wire(bus, control);
     }
 
     /// Set the ambient WASI policy (default allow-all).
@@ -321,6 +477,7 @@ impl ExtensionHost {
             engine: self.engine.clone(),
             policy: self.policy.clone(),
             wasi: policy,
+            channel: self.channel.clone(),
         }
     }
 
@@ -366,12 +523,27 @@ impl ExtensionHost {
 
     /// Load one component file. Ambient WASI access follows the host's
     /// [`WasiPolicy`] (allow-all by default; `--deny-wasi` to sandbox).
+    /// Session injection (`host.steer`/`follow-up`) is NOT consented;
+    /// use [`load_with_inject`](Self::load_with_inject) to grant it.
     pub fn load(&self, path: impl AsRef<Path>) -> Result<LoadedExtension, ExtError> {
-        let path = path.as_ref().to_path_buf();
-        Self::off_runtime(move || self.load_inner(&path))
+        self.load_with_inject(path, false)
     }
 
-    fn load_inner(&self, path: &Path) -> Result<LoadedExtension, ExtError> {
+    /// Load one component file, with `inject` as the session-injection
+    /// consent: passing `true` IS the consent (the CLI derives it from
+    /// `--allow-inject` or a per-fingerprint remembered grant). Without
+    /// it, steer/follow-up fail at call time with a named error;
+    /// notify/emit (facts) always work.
+    pub fn load_with_inject(
+        &self,
+        path: impl AsRef<Path>,
+        inject: bool,
+    ) -> Result<LoadedExtension, ExtError> {
+        let path = path.as_ref().to_path_buf();
+        Self::off_runtime(move || self.load_inner(&path, inject))
+    }
+
+    fn load_inner(&self, path: &Path, inject: bool) -> Result<LoadedExtension, ExtError> {
         let bytes = self.read_verified(path)?;
         let component =
             Component::from_binary(&self.engine, &bytes).map_err(|e| ExtError::Load {
@@ -382,17 +554,24 @@ impl ExtensionHost {
         // what they may actually do follows the host's WasiPolicy.
         let mut linker: Linker<ComponentState> = Linker::new(&self.engine);
         wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+        // The extension world's own import: the host channel. Its sinks
+        // are late-bound (wire_host_channel); the functions are always
+        // linked so components instantiate before the agent exists.
+        bindings::Extension::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
         let factory = InstanceFactory {
             engine: self.engine.clone(),
-            component,
+            component: component.clone(),
             linker,
             wasi: self.wasi,
+            channel: self.channel.clone(),
+            inject,
         };
         let mut instance = factory.instantiate().map_err(|e| ExtError::Load {
             path: path.display().to_string(),
             reason: format!(
-                "instantiation failed (does it import capabilities the host does not grant?): {}",
-                compact_wasm_error(&e)
+                "instantiation failed (does it import capabilities the host does not grant?): {}{}",
+                compact_wasm_error(&e),
+                version_hint(&component),
             ),
         })?;
 
@@ -406,7 +585,7 @@ impl ExtensionHost {
             })?;
         let points = instance
             .bindings
-            .tau_extension_hooks()
+            .tau_extension_probes()
             .call_points(&mut instance.store)
             .map_err(|e| ExtError::Load {
                 path: path.display().to_string(),
@@ -518,7 +697,7 @@ impl ProbeHandler for WasmProbes {
             let ComponentInstance { store, bindings } = &mut guard.instance;
             let result =
                 bindings
-                    .tau_extension_hooks()
+                    .tau_extension_probes()
                     .call_probe(store, &point_name, &payload.to_string());
             if result.is_err() {
                 // The trap poisoned the guest; rebuild so the next probe
@@ -530,13 +709,13 @@ impl ProbeHandler for WasmProbes {
         .await;
         match result {
             Ok(Ok(verdict)) => match verdict.action {
-                bindings::exports::tau::extension::hooks::Action::Continue => Verdict::Continue,
-                bindings::exports::tau::extension::hooks::Action::Replace => verdict
+                bindings::exports::tau::extension::probes::Action::Continue => Verdict::Continue,
+                bindings::exports::tau::extension::probes::Action::Replace => verdict
                     .payload_json
                     .and_then(|p| serde_json::from_str(&p).ok())
                     .map(Verdict::Replace)
                     .unwrap_or(Verdict::Continue),
-                bindings::exports::tau::extension::hooks::Action::Block => Verdict::Block {
+                bindings::exports::tau::extension::probes::Action::Block => Verdict::Block {
                     reason: verdict.reason.unwrap_or_else(|| "blocked".into()),
                 },
             },
@@ -555,7 +734,7 @@ impl ProbeHandler for WasmProbes {
 struct ProviderState {
     ctx: WasiCtx,
     table: ResourceTable,
-    event_tx: Option<tokio::sync::mpsc::UnboundedSender<String>>,
+    event_tx: Option<tokio::sync::mpsc::UnboundedSender<tau_core::ModelEvent>>,
     /// Origin-allowlisted HTTP egress, granted by per-fingerprint consent.
     http: http::HttpRegistry,
 }
@@ -569,11 +748,49 @@ impl WasiView for ProviderState {
     }
 }
 
-impl provider_bindings::tau::extension::events::Host for ProviderState {
-    fn emit(&mut self, event_json: String) {
+use provider_bindings::tau::extension::events as provider_events;
+
+impl provider_events::Host for ProviderState {
+    /// Typed in 0.2.0: malformed frames are impossible by construction
+    /// (the 0.1.0 JSON envelope's silent-skip path is gone); the result
+    /// reports the remaining semantic violations to the guest.
+    fn emit(&mut self, event: provider_events::ModelEvent) -> Result<(), String> {
+        let event = match event {
+            provider_events::ModelEvent::TextDelta(text) => tau_core::ModelEvent::TextDelta { text },
+            provider_events::ModelEvent::ToolCallDelta(d) => {
+                tau_core::ModelEvent::ToolCallDelta {
+                    index: d.index,
+                    id: d.id,
+                    name: d.name,
+                    arguments_delta: d.arguments_delta,
+                }
+            }
+            provider_events::ModelEvent::AudioDelta(a) => {
+                if a.media_type.is_empty() {
+                    return Err("emit audio-delta: media-type must not be empty".into());
+                }
+                tau_core::ModelEvent::AudioDelta {
+                    data: a.data,
+                    media_type: a.media_type,
+                }
+            }
+            provider_events::ModelEvent::Done(stop) => tau_core::ModelEvent::Done {
+                stop: match stop {
+                    provider_events::StopReason::Stop => tau_core::StopReason::Stop,
+                    provider_events::StopReason::ToolUse => tau_core::StopReason::ToolUse,
+                    provider_events::StopReason::Length => tau_core::StopReason::Length,
+                    provider_events::StopReason::Error => tau_core::StopReason::Error,
+                    provider_events::StopReason::Aborted => tau_core::StopReason::Aborted,
+                },
+            },
+            provider_events::ModelEvent::Error(message) => {
+                tau_core::ModelEvent::Error { message }
+            }
+        };
         if let Some(tx) = &self.event_tx {
-            let _ = tx.send(event_json);
+            let _ = tx.send(event);
         }
+        Ok(())
     }
 }
 
@@ -776,7 +993,7 @@ impl tau_core::Model for WasmModel {
 
         let request_json = request_json(&self.model, req, self.auth.as_deref());
 
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ModelEvent>();
         let shared = self.shared.clone();
         let call = tokio::task::spawn_blocking(move || {
             let mut guard = shared
@@ -802,11 +1019,10 @@ impl tau_core::Model for WasmModel {
             // Drain events until the component hangs up (event_tx dropped
             // when stream() returns), then surface any trap as an error
             // event — the Model contract forbids propagating failures.
-            while let Some(json) = rx.recv().await {
-                match serde_json::from_str::<ModelEvent>(&json) {
-                    Ok(event) => yield event,
-                    Err(_) => continue, // malformed frame: skip, never kill the turn
-                }
+            // Events arrive already typed (0.2.0 contract): there is no
+            // malformed-frame path to skip.
+            while let Some(event) = rx.recv().await {
+                yield event;
             }
             match call.await {
                 Ok(Ok(())) => {}

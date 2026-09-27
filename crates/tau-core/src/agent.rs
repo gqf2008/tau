@@ -79,6 +79,19 @@ pub enum AgentEvent {
         /// What failed.
         message: String,
     },
+    /// A wasm extension pushed a user-visible notice through the host
+    /// channel (`host.notify`). A fact for the UI, never model history.
+    ExtensionNotice {
+        /// "info" | "warn" | "error" (guest-chosen, free-form).
+        level: String,
+        /// The notice content; renderers draw text and media
+        /// placeholders.
+        content: Vec<Content>,
+    },
+    /// A wasm extension published an extension-defined fact through the
+    /// host channel (`host.emit`). Observe-only: its schema is external
+    /// to tau, so it travels as JSON.
+    ExtensionFact(serde_json::Value),
 }
 
 /// Failures of the agent loop and its session operations.
@@ -144,6 +157,14 @@ impl Agent {
     /// Subscribe to this agent's [`AgentEvent`] stream.
     pub fn events(&self) -> crate::bus::EventStream {
         self.bus.subscribe()
+    }
+
+    /// The bus itself (sending half). For composition layers wiring an
+    /// external publisher — tau-ext's host channel publishes
+    /// [`AgentEvent::ExtensionNotice`]/[`AgentEvent::ExtensionFact`] here
+    /// so extension output joins the same observable trail.
+    pub fn bus(&self) -> EventBus {
+        self.bus.clone()
     }
 
     /// The control channel into the loop: steer, follow-up, abort.
