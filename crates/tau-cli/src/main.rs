@@ -13,6 +13,7 @@ use tau_core::session::{EntryKind, JsonlStore, SessionEntry, new_id};
 use tau_core::{Agent, Message, Model, ProbeRegistry, ToolRegistry};
 
 mod audio;
+mod live;
 mod repl;
 
 #[derive(Parser)]

@@ -93,6 +93,41 @@
   unit tests for chunk-split WAV decode, clear-on-abort, segment
   switch, and the pcm rate default.
 
+### Added — realtime-av Phase 2a: full-duplex core (docs/realtime-av.md)
+
+- `RealtimeSession` — the persistent bidirectional session abstraction
+  (the OpenAI Realtime / Gemini Live shape) as an OPTIONAL capability
+  of `Model`: `push_audio` / `push_image` / `interrupt` / `close` +
+  `events()`. `Model::realtime(config)` defaults to `None`, so
+  capability discovery IS the call and request/response providers
+  carry zero burden. `Agent::realtime` forwards it untouched.
+- New event kinds, mirrored on `ModelEvent` and `AgentEvent`:
+  `InputAudioChunk` (uplink fact; count-only on the agent bus — the
+  bytes are already local), `SpeechStarted`/`SpeechStopped` (server
+  VAD), `Interrupted` (barge-in: the loop freezes the current audio
+  segment — the next same-media_type delta opens a NEW block — and
+  playback sinks clear their buffers).
+- `FauxRealtime` (demo variant only — discovery keeps a negative
+  case): deterministic VAD on the first chunk of a burst, every
+  uplink byte echoed down as an `AudioDelta` of the same media type,
+  `Interrupted` answered to `interrupt()`, VAD-off + `Done` at close.
+- CLI `/live <sec> [sine]`: paced 50ms `audio/pcm;rate=16000` chunks
+  (synthesized sine for the gate, real mic via `audio::stream_mic`),
+  Ctrl-C = barge-in (the REPL survives), /quit and EOF close the
+  session orderly and record both blocks into the session tree. The
+  live span is wrapped in a synthetic `RunStart`/`RunEnd` on the bus
+  so the Phase 1 sink arms (announce, per-sample summary, clear) are
+  reused verbatim — timing is not invented (red line 3).
+- The WIT contract is untouched (Phase 2b seals the verified shape:
+  world `realtime`, microphone/camera consent categories, wasm
+  realtime provider example).
+- Acceptance: validate.sh step 11c (pty, two legs) — happy path with
+  byte-exact duplex accounting (32000 samples == 2s @ 16kHz echoed
+  whole; uplink 64000 bytes recorded) and the barge-in leg; unit
+  tests pin the deterministic script, door-refusal after close, the
+  Interrupted assembly split, and uplink facts never entering
+  assistant content.
+
 ### Breaking — contract `tau:extension@0.3.0` (tool media results, wit-review F4)
 
 - Tool results are **multi-block**: `tool-result.content` is now

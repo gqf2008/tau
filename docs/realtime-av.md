@@ -9,9 +9,9 @@
 
 | 方向 | 状态 | 证据 |
 |---|---|---|
-| 下行音频流 | ✅ 骨架已通 | `ModelEvent::AudioDelta{bytes, media_type}` → loop 广播 `AgentEvent::AudioDelta` 并把同 media_type 连续块组装成 `Content::Audio`（`agent.rs:598`）；wasm provider 有 `events.emit({"kind":"audio-delta",...})`；faux 测试覆盖组装与 wire |
-| 下行播放 | ❌ 只打印 | CLI 对 AudioDelta 只 `eprintln!("[tau] audio Δ N bytes")`（`main.rs:803`、`repl.rs:152`），无播放 sink |
-| 上行（用户→模型） | ❌ 零 | 控制通道可送完整 `Message`（可含 Audio 块），但无采集、无流式上行、无打断语义 |
+| 下行音频流 | ✅ 骨架已通 | `ModelEvent::AudioDelta{data, media_type}` → loop 广播 `AgentEvent::AudioDelta`（**字节随车**，Phase 1 起）并把同 media_type 连续块组装成 `Content::Audio`；wasm provider 有 `events.emit`；faux 测试覆盖组装与 wire |
+| 下行播放 | ✅ Phase 1 | `audio::PlaybackSink` 挂两个渲染器，AudioDelta 即收即播（WAV 增量解析 / pcm rate= 参数，4s 环形缓冲，打断清缓冲，无设备降级 null sink 照常计数） |
+| 上行（用户→模型） | ✅ Phase 0/2a | Phase 0：`/mic` 整段 `Content::Audio` 上行；Phase 2a：`/live` 全双工——`RealtimeSession.push_audio` 流式上行 + VAD/打断事件 + faux 替身 |
 | 视频 | 数据模型有块 | `Content::Video/Image` 在；无 delta 事件、无采集 |
 | 流 ABI | 冻结 | wasip3 streams 冻结到 Rust 1.100（`docs/wasip3-streams.md`）；现 base64-JSON 通道已验证够用 |
 
@@ -109,6 +109,59 @@ server VAD 与 barge-in → 关会话）。Phase 2 的本质就是补这个抽�
 - 视频上行 = 定时（~1fps）或场景触发 JPEG 帧走 `push_image`；下行
   视频 delta 等供应商真有了再加 kind，**不提前设计**。
 
+### Phase 2a 实施定稿（2026-09-28，宿主核心 + faux 替身 + CLI 全双工环）
+
+Phase 2 按 Phase 0/1 的既定姿势再拆两刀：**2a 宿主先行**（trait +
+事件 kind + faux 替身 + CLI 闭环，WIT 一字不动），**2b 契约殿后**
+（WIT world `realtime` + consent 门类 microphone/camera + wasm 示例）。
+理由与 Phase 0/1 相同：先把语义在宿主侧跑真，契约只封印已验证的
+形状。
+
+- **`RealtimeSession`（`Model` 的可选能力，tau-core）**：
+  `push_audio(Vec<u8>) / push_image(Vec<u8>) / interrupt() /
+  close()` 四个 `&mut self` 异步方法（`Result<_, String>`——关闭
+  中的会话要能当场拒收）+ `events() -> BoxStream<ModelEvent>`
+  （内部 broadcast，打开即取一次）。`Model::realtime(config)`
+  默认 `None`——能力发现即此：request/response provider 零负担。
+  `RealtimeConfig { input_media_type, output_media_type: Option,
+  instructions: Option }`——上行裸流 `audio/pcm;rate=16000`
+  （realtime 无容器，容器是持久会话的反面）。
+- **新事件 kind（ModelEvent + AgentEvent 镜像）**：
+  `InputAudioChunk`（上行事实，wire 上 base64 与 AudioDelta 同姿势；
+  AgentEvent 侧只带计数——上行字节本来就在宿主本地，没有消费者
+  需要它们二次上车，这是 Phase 1 教训的正面应用而不是重蹈）、
+  `SpeechStarted/Stopped`（server VAD）、`Interrupted`（barge-in：
+  loop 截断当前 assistant 音频组装——已组装的留下（用户就听到
+  那儿），后续块开新段；播放 sink 清缓冲，走渲染器既有的
+  clear 臂）。
+- **时序零发明（红线 3）**：live 会话在总线上以合成
+  `RunStart`/`RunEnd` 包裹——sink 计数、渲染、总结全部复用
+  Phase 1 既有臂，不为 live 发明第二套渲染路径。
+- **faux 替身（仅 `demo` 变体实现，`echo` 返回 None——能力发现
+  有负例可断）**：确定性剧本——首块 `push_audio` 发
+  `SpeechStarted`；每块回 `InputAudioChunk` 事实 + 同字节
+  `AudioDelta` 回声（media_type 与上行相同——顺带把 Phase 1
+  sink 的 pcm 裸流路径打进 e2e）；`interrupt()` → `Interrupted`
+  + 截断回声段；`close()` → 若语音未止补 `SpeechStopped`，终
+  `Done(Stop)`。
+- **CLI `/live <秒> [sine]`**：开 live 会话（demo），采集任务按
+  真实节奏推 50ms 块（sine 用 tokio interval 定速——"实时"不许
+  是一股脑灌）；Ctrl-C = `interrupt()`（barge-in，REPL 不死，
+  语义与既有 Ctrl-C=中断当前响应一致）；时长到或二次 Ctrl-C →
+  close。落账：close 后把累计上行写成一条 user 消息
+  （`Content::Audio`），assistant 组装（音频段 + 文本）写一条
+  assistant 消息——与 run 后写账同形状。
+- **consent**：2a 不需要新门类——宿主 CLI 按显式命令动作，与
+  /mic 同权；microphone/camera 门类管的是 wasm provider 驱动宿主
+  采集的场景，随 2b 落地。
+- **验收**（validate.sh 11c，pty，两腿）：①`/live 2 sine` →
+  断言 speech-started 行、sink announce 行（`audio/pcm;rate=
+  16000 @ 16kHz`——pcm 路径）、close 后逐样本账目
+  （32000 == 2s @ 16kHz 全回声）、会话 JSONL 双块在树；②
+  `/live 30 sine` + 中途 Ctrl-C → 断言 interrupted 行出现且
+  REPL 存活（再发 /quit 正常退出）。截断语义由单元测试精确
+  覆盖（interrupt 后旧段冻结、新块开新段）。
+
 ### Phase 3 — wasip3 换 ABI
 
 base64-JSON 块调用换 `stream<u8>`，按 `docs/wasip3-streams.md` 的
@@ -135,7 +188,14 @@ base64-JSON 块调用换 `stream<u8>`，按 `docs/wasip3-streams.md` 的
       打断/换段清缓冲；`AgentEvent::AudioDelta` 为此携带字节
       （WIT 契约不变）；validate.sh 11b 断言逐样本账目
       （32000 == 2s @ 16kHz）
-- [ ] Phase 2：`RealtimeSession` trait + 新事件 kind + WIT world
-      `realtime` + consent 门类（microphone/camera）+ faux provider
-      测试替身
+- [~] Phase 2：**2a 已落地**（2026-09-28）：`RealtimeSession` trait
+      （`Model::realtime` 能力发现，默认 None）+ 新事件 kind
+      （`InputAudioChunk`/`SpeechStarted`/`SpeechStopped`/`Interrupted`，
+      ModelEvent + AgentEvent 镜像，Interrupted 截断组装段并清 sink）
+      + faux demo 替身（确定性 VAD + 全回声剧本）+ CLI `/live <sec>
+      [sine]` 全双工环（合成 RunStart/RunEnd 复用 Phase 1 全部
+      sink 臂，Ctrl-C = barge-in，close 后双块落账）；validate.sh
+      11c 两腿 pty 门禁（账目 32000 逐样本精确 + barge-in 存活）。
+      **待 2b**：WIT world `realtime` + consent 门类
+      （microphone/camera）+ wasm realtime provider 示例
 - [ ] Phase 3：按 wasip3-streams.md 执行

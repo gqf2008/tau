@@ -187,6 +187,86 @@ pub fn play_wav(wav: &[u8]) -> Result<u64> {
     Ok(total)
 }
 
+/// Stream the default input device as 50ms chunks of 16-bit mono PCM
+/// at 16kHz (1600 bytes per chunk — the realtime uplink convention),
+/// for `seconds`. Used by the `/live` full-duplex loop; the sine path
+/// of that loop needs no device at all.
+pub fn stream_mic(seconds: u32) -> Result<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>> {
+    const RATE: usize = 16_000;
+    const CHUNK: usize = RATE / 20; // 50ms
+
+    let host = cpal::default_host();
+    let device = host
+        .default_input_device()
+        .context("no default input device (microphone)")?;
+    let supported = device
+        .default_input_config()
+        .context("input device has no default config")?;
+    let sample_format = supported.sample_format();
+    let config: cpal::StreamConfig = supported.into();
+    let channels = config.channels.max(1) as usize;
+    let in_rate = config.sample_rate;
+
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<Vec<u8>>();
+    let pending: Arc<Mutex<Vec<f32>>> = Arc::new(Mutex::new(Vec::new()));
+    let push = move |data: &[f32]| {
+        // Downmix to mono, then chunk at the OUTPUT rate (resample
+        // chunk-wise when the device rate differs — Phase 2a capture,
+        // not an audio engine).
+        let mono: Vec<f32> = data
+            .chunks(channels)
+            .map(|f| f.iter().sum::<f32>() / f.len() as f32)
+            .collect();
+        let mono = if in_rate != RATE as u32 {
+            resample_linear(&mono, in_rate, RATE as u32)
+        } else {
+            mono
+        };
+        let mut pending = pending.lock().unwrap_or_else(|p| p.into_inner());
+        pending.extend(mono);
+        while pending.len() >= CHUNK {
+            let chunk: Vec<f32> = pending.drain(..CHUNK).collect();
+            let mut bytes = Vec::with_capacity(CHUNK * 2);
+            for s in chunk {
+                let v = (s * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                bytes.extend_from_slice(&v.to_le_bytes());
+            }
+            if tx.send(bytes).is_err() {
+                return; // the session ended; stop forwarding
+            }
+        }
+    };
+
+    let err = |e| eprintln!("[tau] mic stream: {e}");
+    let stream = match sample_format {
+        cpal::SampleFormat::F32 => device.build_input_stream(
+            &config,
+            move |data: &[f32], _| push(data),
+            err,
+            None,
+        )?,
+        cpal::SampleFormat::I16 => device.build_input_stream(
+            &config,
+            move |data: &[i16], _| {
+                let f: Vec<f32> = data.iter().map(|&s| s as f32 / 32768.0).collect();
+                push(&f);
+            },
+            err,
+            None,
+        )?,
+        other => bail!("unsupported mic sample format: {other}"),
+    };
+    stream.play()?;
+
+    // Time-boxed: dropping the stream after `seconds` ends capture;
+    // the receiver closes once the forwarding callback's sender drops.
+    std::thread::spawn(move || {
+        std::thread::sleep(Duration::from_secs(u64::from(seconds)));
+        drop(stream);
+    });
+    Ok(rx)
+}
+
 // ---------- Phase 1: the live playback sink (docs/realtime-av.md) ----------
 
 /// How many seconds of audio the ring holds; beyond it the OLDEST

@@ -1052,4 +1052,15 @@ else
     echo "skip — pywinpty not installed; av phase0 e2e not run"
 fi
 
+# --- step 11c: realtime-av Phase 2a full duplex (docs/realtime-av.md) ---
+# The demo model's RealtimeSession double: paced sine uplink → server
+# VAD → per-chunk echo → live sink plays the pcm raw stream; then a
+# barge-in leg (Ctrl-C → Interrupted → buffer cleared, REPL alive).
+step "11c/11 full duplex (sine uplink → VAD → echo → live sink → tree; barge-in leg)"
+if python -c "import winpty" 2> /dev/null; then
+    python "$ROOT/scripts/av_live_e2e.py" "$TAU" "$WORK/av-live-e2e"         || fail "av live e2e failed"
+else
+    echo "skip — pywinpty not installed; av live e2e not run"
+fi
+
 step "ALL ELEVEN STEPS PASSED — the release candidate stands"

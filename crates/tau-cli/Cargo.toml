@@ -27,10 +27,11 @@ rustyline = "18.0.1"
 # (the architecture red line keeps audio I/O out of wasm guests).
 cpal = "0.17"
 hound = "3.5"
+# Phase 2a realtime-av: the live driver polls the session's BoxStream.
+futures.workspace = true
 
 [dev-dependencies]
 tau-core = { path = "../tau-core", version = "0.2.0" }
-futures.workspace = true
 async-stream = "0.3"
 async-trait.workspace = true
 tempfile = "3"

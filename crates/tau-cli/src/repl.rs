@@ -15,7 +15,7 @@ use anyhow::{Context, Result};
 use tau_core::probe::ProbePoint;
 use tau_core::types::{Content, Media, MediaSource};
 use tau_core::{Agent, AgentEvent, Control, JsonlStore, Message};
-use tokio::sync::mpsc::{UnboundedReceiver, unbounded_channel};
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
 /// One-line, length-capped preview of a tool output for `[tau] tool ←`
 /// lines: whitespace collapsed, char-safe truncation.
@@ -246,6 +246,17 @@ pub(crate) async fn drive(
                 Ok(AgentEvent::ExtensionFact(fact)) => {
                     format!("[tau] ext fact: {}", compact_preview(&fact.to_string()))
                 }
+                // Realtime kinds (live sessions; docs/realtime-av.md
+                // Phase 2a). Uplink facts are not rendered per chunk —
+                // 20/s would bury the conversation; VAD and barge-in
+                // are the user-visible beats.
+                Ok(AgentEvent::InputAudioChunk { .. }) => continue,
+                Ok(AgentEvent::SpeechStarted) => "[tau] 🎤 speech".to_string(),
+                Ok(AgentEvent::SpeechStopped) => "[tau] 🎤 speech stopped".to_string(),
+                Ok(AgentEvent::Interrupted) => {
+                    sink.clear();
+                    "[tau] ⚡ interrupted — buffer cleared".to_string()
+                }
                 Ok(AgentEvent::Abort) => {
                     sink.clear();
                     "[tau] aborted".to_string()
@@ -286,6 +297,11 @@ pub(crate) async fn drive(
     let (done_tx, mut done_rx) =
         unbounded_channel::<Result<Vec<Message>, tau_core::agent::AgentError>>();
     let mut running = false;
+    // A live (full-duplex) session: command sender while active,
+    // outcome receiver for its terminal recording (Phase 2a).
+    let (live_done_tx, mut live_done_rx) =
+        unbounded_channel::<crate::live::LiveOutcome>();
+    let mut live: Option<UnboundedSender<crate::live::LiveCmd>> = None;
     let mut parent = base.or_else(|| store.head().map(|h| h.id.clone()));
 
     print("tau interactive — /help for commands, /quit to exit");
@@ -317,9 +333,12 @@ pub(crate) async fn drive(
                         continue;
                     }
                     match text {
-                        "/quit" | "/exit" => break,
+                        "/quit" | "/exit" => {
+                            close_live(&mut live, &mut live_done_rx, &mut store, &mut history, &mut parent, &print).await;
+                            break;
+                        }
                         "/help" => {
-                            print("commands: /help /compact /fork [#index|id-prefix] /mic <sec> [sine] /quit /exit");
+                            print("commands: /help /compact /fork [#index|id-prefix] /mic <sec> [sine] /live <sec> [sine] /quit /exit");
                             print("  !<text> while running: steer; plain text while running: follow-up");
                             continue;
                         }
@@ -453,6 +472,51 @@ pub(crate) async fn drive(
                             }
                             continue;
                         }
+                        // Phase 2a full duplex (docs/realtime-av.md):
+                        // open a RealtimeSession, stream mic/sine
+                        // uplink, play downlink live via the bus.
+                        line if line.starts_with("/live") => {
+                            if running || live.is_some() {
+                                print("[tau] busy — /live waits for the run/session to finish");
+                                continue;
+                            }
+                            let mut parts = line.split_whitespace();
+                            let _ = parts.next();
+                            let seconds: u32 = parts
+                                .next()
+                                .and_then(|s| s.parse().ok())
+                                .unwrap_or(10)
+                                .clamp(1, 120);
+                            let sine = parts.next() == Some("sine");
+                            let config = tau_core::RealtimeConfig {
+                                input_media_type: "audio/pcm;rate=16000".into(),
+                                ..Default::default()
+                            };
+                            match agent.realtime(config) {
+                                Some(session) => {
+                                    print(&format!(
+                                        "[tau] 🎤 live {seconds}s{} — Ctrl-C = barge-in",
+                                        if sine { " (sine)" } else { "" }
+                                    ));
+                                    // The live span is run-shaped on
+                                    // the bus: RunStart/RunEnd reuse
+                                    // every Phase 1 sink arm.
+                                    let _ = agent.bus().send(AgentEvent::RunStart);
+                                    let (cmd_tx, cmd_rx) = unbounded_channel();
+                                    let bus = agent.bus();
+                                    let done = live_done_tx.clone();
+                                    let media_type = "audio/pcm;rate=16000".to_string();
+                                    tokio::spawn(crate::live::run(
+                                        session, seconds, sine, media_type, bus, cmd_rx, done,
+                                    ));
+                                    live = Some(cmd_tx);
+                                }
+                                None => print(
+                                    "[tau] this model has no realtime session                                      (Model::realtime → None — try --demo)",
+                                ),
+                            }
+                            continue;
+                        }
                         _ if text.starts_with('/') => {
                             print(&format!("unknown command {text} — /help"));
                             continue;
@@ -470,14 +534,27 @@ pub(crate) async fn drive(
                     running = true;
                 }
                 Some(LineEvent::Interrupt) => {
-                    if running {
+                    if let Some(cmd) = &live {
+                        // Barge-in: same user intent as Ctrl-C on a
+                        // running turn, realtime-shaped.
+                        let _ = cmd.send(crate::live::LiveCmd::Interrupt);
+                    } else if running {
                         let _ = agent.control().send(Control::Abort);
                     } else {
                         print("(Ctrl-C aborts a running turn; /quit exits)");
                     }
                 }
-                Some(LineEvent::Eof) | None => break,
+                Some(LineEvent::Eof) | None => {
+                    close_live(&mut live, &mut live_done_rx, &mut store, &mut history, &mut parent, &print).await;
+                    break;
+                }
             },
+            outcome = live_done_rx.recv() => {
+                live = None;
+                if let Some(outcome) = outcome {
+                    record_live(&outcome, &mut store, &mut history, &mut parent, &print);
+                }
+            }
             injected = inject.recv() => match injected {
                 // The host channel's injection leg (host.steer/follow-up
                 // from an extension or IM bridge). Mid-run it joins the
@@ -513,6 +590,7 @@ pub(crate) async fn drive(
             }
             result = done_rx.recv(), if running => {
                 running = false;
+                // (live outcomes arrive on their own arm below)
                 let produced = match result {
                     Some(Ok(produced)) => produced,
                     // A failed run (model error, vetoed run) produced
@@ -572,6 +650,79 @@ pub(crate) async fn drive(
     }
     renderer.abort();
     Ok(())
+}
+
+/// Orderly live shutdown (Eof and /quit share it): close the session,
+/// let the driver flush terminal events, record the outcome.
+async fn close_live(
+    live: &mut Option<UnboundedSender<crate::live::LiveCmd>>,
+    live_done_rx: &mut UnboundedReceiver<crate::live::LiveOutcome>,
+    store: &mut JsonlStore,
+    history: &mut Vec<Message>,
+    parent: &mut Option<String>,
+    print: &impl Fn(&str),
+) {
+    if let Some(cmd) = live.take() {
+        let _ = cmd.send(crate::live::LiveCmd::Close);
+        if let Some(outcome) = live_done_rx.recv().await {
+            record_live(&outcome, store, history, parent, print);
+        }
+    }
+}
+
+/// Write one live session's outcome into the tree: the accumulated
+/// uplink as one user message, the assembled downlink as one assistant
+/// message — same entry shape as post-run recording.
+fn record_live(
+    outcome: &crate::live::LiveOutcome,
+    store: &mut JsonlStore,
+    history: &mut Vec<Message>,
+    parent: &mut Option<String>,
+    print: &impl Fn(&str),
+) {
+    let mut messages = Vec::new();
+    if !outcome.uplink.is_empty() {
+        messages.push(Message {
+            role: tau_core::types::Role::User,
+            content: vec![
+                Content::Audio {
+                    media: Media {
+                        media_type: outcome.uplink_media_type.clone(),
+                        source: MediaSource::Bytes(outcome.uplink.clone()),
+                    },
+                },
+                Content::Text { text: "(live voice — uplink stream)".into() },
+            ],
+        });
+    }
+    if !outcome.assistant.is_empty() {
+        messages.push(Message {
+            role: tau_core::types::Role::Assistant,
+            content: outcome.assistant.clone(),
+        });
+    }
+    for message in messages {
+        let entry = tau_core::SessionEntry {
+            id: tau_core::session::new_id(),
+            parent: parent.clone(),
+            kind: tau_core::session::EntryKind::Message {
+                message: message.clone(),
+            },
+        };
+        *parent = Some(entry.id.clone());
+        if let Err(e) = store.append(entry) {
+            print(&format!("[tau] live recording failed: {e:#}"));
+            return;
+        }
+        history.push(message);
+    }
+    print(&format!(
+        "[tau] 🎤 live ended — uplink {} bytes, {} assistant blocks, {} interruption{}",
+        outcome.uplink.len(),
+        outcome.assistant.len(),
+        outcome.interruptions,
+        if outcome.interruptions == 1 { "" } else { "s" },
+    ));
 }
 
 #[cfg(test)]

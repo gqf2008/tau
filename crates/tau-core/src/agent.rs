@@ -35,6 +35,22 @@ pub enum AgentEvent {
         /// The media type of the segment they belong to.
         media_type: String,
     },
+    /// Uplink fact (realtime sessions): the host pushed an audio chunk
+    /// toward the provider. Count-only — the bytes are already local
+    /// (the host pushed them); no renderer needs them twice on the bus.
+    InputAudioChunk {
+        /// How many bytes were pushed.
+        bytes: usize,
+        /// The uplink media type.
+        media_type: String,
+    },
+    /// Server VAD observed the user start speaking (realtime).
+    SpeechStarted,
+    /// Server VAD observed the user stop speaking (realtime).
+    SpeechStopped,
+    /// Barge-in (realtime): the provider truncated the in-flight
+    /// assistant audio — playback sinks clear their buffers.
+    Interrupted,
     /// A tool call began executing.
     ToolCallStart {
         /// The call's id.
@@ -176,6 +192,15 @@ impl Agent {
     /// Clone freely; safe to use from any task (see `control` module docs).
     /// A handle for sending control commands (steer, follow-up, abort)
     /// into a running loop.
+    /// The model's realtime capability, if any (docs/realtime-av.md).
+    /// Discovery IS `Model::realtime`; the agent forwards it untouched.
+    pub fn realtime(
+        &self,
+        config: crate::model::RealtimeConfig,
+    ) -> Option<Box<dyn crate::model::RealtimeSession>> {
+        self.model.realtime(config)
+    }
+
     pub fn control(&self) -> ControlTx {
         self.control_tx.clone()
     }
@@ -624,6 +649,10 @@ impl Agent {
         // Contiguous audio segments: a new block starts when the media
         // type changes; chunks within a block concatenate.
         let mut audio: Vec<(String, Vec<u8>)> = Vec::new();
+        // Barge-in boundary: an Interrupted freezes the current
+        // segment (what played is what the user heard); the next
+        // delta opens a NEW segment even at the same media type.
+        let mut segment_frozen = false;
         let mut calls: HashMap<u32, (String, String, String)> = HashMap::new();
         let mut error = None;
         let mut stop = StopReason::Stop;
@@ -656,9 +685,28 @@ impl Agent {
                         media_type: media_type.clone(),
                     });
                     match audio.last_mut() {
-                        Some((ty, bytes)) if *ty == media_type => bytes.extend_from_slice(&data),
+                        Some((ty, bytes)) if *ty == media_type && !segment_frozen => {
+                            bytes.extend_from_slice(&data)
+                        }
                         _ => audio.push((media_type, data)),
                     }
+                    segment_frozen = false;
+                }
+                ModelEvent::InputAudioChunk { data, media_type } => {
+                    // Uplink fact: the loop does not assemble these into
+                    // assistant content — they record what the model
+                    // HEARD (the CLI's realtime driver writes the user
+                    // message; the bus carries the count for renderers).
+                    self.emit(AgentEvent::InputAudioChunk {
+                        bytes: data.len(),
+                        media_type,
+                    });
+                }
+                ModelEvent::SpeechStarted => self.emit(AgentEvent::SpeechStarted),
+                ModelEvent::SpeechStopped => self.emit(AgentEvent::SpeechStopped),
+                ModelEvent::Interrupted => {
+                    self.emit(AgentEvent::Interrupted);
+                    segment_frozen = true;
                 }
                 ModelEvent::ToolCallDelta {
                     index,

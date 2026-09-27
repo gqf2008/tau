@@ -2,12 +2,12 @@
 //! no real API, no keys, no tokens. Each `stream()` call pops the next round
 //! of events from the script.
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use futures::stream::{self, BoxStream};
 
-use crate::model::{Model, ModelEvent, Request};
+use crate::model::{Model, ModelEvent, RealtimeConfig, RealtimeSession, Request, StopReason};
 
 /// A scripted model for tests and demos: plays back pre-recorded
 /// event rounds, or synthesizes a one-tool-call-then-text demo flow.
@@ -55,8 +55,123 @@ impl FauxModel {
     }
 }
 
+/// The demo realtime double (realtime-av Phase 2a): a deterministic
+/// full-duplex script — VAD on the first chunk of a burst, every uplink
+/// chunk echoed back as an AudioDelta of the same media type (the echo
+/// IS the duplex proof), Interrupted answered to interrupt(), VAD-off
+/// and Done at close. Only the `demo` variant has the capability, so
+/// capability discovery has a negative case to assert.
+pub struct FauxRealtime {
+    config: RealtimeConfig,
+    tx: futures::channel::mpsc::UnboundedSender<ModelEvent>,
+    rx: Arc<Mutex<Option<futures::channel::mpsc::UnboundedReceiver<ModelEvent>>>>,
+    speech_active: bool,
+    noted: bool,
+    closed: bool,
+}
+
+impl FauxRealtime {
+    fn new(config: RealtimeConfig) -> Self {
+        let (tx, rx) = futures::channel::mpsc::unbounded();
+        Self {
+            config,
+            tx,
+            rx: Arc::new(Mutex::new(Some(rx))),
+            speech_active: false,
+            noted: false,
+            closed: false,
+        }
+    }
+
+    fn emit(&self, event: ModelEvent) {
+        // Unbounded send to our own channel cannot fail while the
+        // receiver lives; a dropped receiver means the CLI stopped
+        // listening, which is the caller's business, not a panic.
+        let _ = self.tx.unbounded_send(event);
+    }
+}
+
+#[async_trait]
+impl RealtimeSession for FauxRealtime {
+    async fn push_audio(&mut self, bytes: Vec<u8>) -> Result<(), String> {
+        if self.closed {
+            return Err("realtime session is closed".into());
+        }
+        if !self.speech_active {
+            self.speech_active = true;
+            self.emit(ModelEvent::SpeechStarted);
+        }
+        if !self.noted {
+            self.noted = true;
+            self.emit(ModelEvent::TextDelta {
+                text: "live echo active. ".into(),
+            });
+        }
+        self.emit(ModelEvent::InputAudioChunk {
+            data: bytes.clone(),
+            media_type: self.config.input_media_type.clone(),
+        });
+        // The echo: every uplink byte comes back down, same media
+        // type — duplex, VAD, assembly and the playback sink all
+        // exercised by one deterministic rule.
+        self.emit(ModelEvent::AudioDelta {
+            data: bytes,
+            media_type: self.config.input_media_type.clone(),
+        });
+        Ok(())
+    }
+
+    async fn push_image(&mut self, _jpeg: Vec<u8>) -> Result<(), String> {
+        if self.closed {
+            return Err("realtime session is closed".into());
+        }
+        Ok(()) // accepted, unanswered — the demo double has no eyes
+    }
+
+    async fn interrupt(&mut self) -> Result<(), String> {
+        if self.closed {
+            return Err("realtime session is closed".into());
+        }
+        self.emit(ModelEvent::Interrupted);
+        Ok(())
+    }
+
+    async fn close(&mut self) -> Result<(), String> {
+        if self.closed {
+            return Ok(()); // closing twice is a no-op, not an error
+        }
+        self.closed = true;
+        if self.speech_active {
+            self.speech_active = false;
+            self.emit(ModelEvent::SpeechStopped);
+        }
+        self.emit(ModelEvent::Done {
+            stop: StopReason::Stop,
+        });
+        self.tx.close_channel();
+        Ok(())
+    }
+
+    fn events(&self) -> BoxStream<'static, ModelEvent> {
+        // Taken once, at open; a second take is an empty stream (the
+        // trait documents this).
+        match self.rx.lock().unwrap().take() {
+            Some(rx) => Box::pin(rx),
+            None => Box::pin(stream::empty()),
+        }
+    }
+}
+
 #[async_trait]
 impl Model for FauxModel {
+    fn realtime(&self, config: RealtimeConfig) -> Option<Box<dyn RealtimeSession>> {
+        if self.demo.load(std::sync::atomic::Ordering::Relaxed) {
+            Some(Box::new(FauxRealtime::new(config)))
+        } else {
+            None
+        }
+    }
+
     async fn stream(&self, req: &Request) -> BoxStream<'static, ModelEvent> {
         // Demo rounds are synthesized from the request, not scripted.
         if self.demo.load(std::sync::atomic::Ordering::Relaxed) {
@@ -228,6 +343,133 @@ fn demo_tool_call(req: &Request) -> Option<(String, String, String)> {
 }
 
 use futures::StreamExt;
+
+#[cfg(test)]
+mod realtime_tests {
+    use super::*;
+    use futures::StreamExt;
+
+    fn config() -> RealtimeConfig {
+        RealtimeConfig {
+            input_media_type: "audio/pcm;rate=16000".into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn realtime_capability_is_demo_only() {
+        assert!(FauxModel::echo().realtime(config()).is_none());
+        assert!(FauxModel::demo().realtime(config()).is_some());
+    }
+
+    #[tokio::test]
+    async fn faux_realtime_vad_echo_and_close_script() {
+        let mut session = FauxModel::demo().realtime(config()).unwrap();
+        let mut events = session.events();
+        session.push_audio(vec![1, 2, 3, 4]).await.unwrap();
+        session.push_audio(vec![5, 6]).await.unwrap();
+        session.interrupt().await.unwrap();
+        session.close().await.unwrap();
+
+        let mut kinds = Vec::new();
+        while let Some(event) = events.next().await {
+            kinds.push(event);
+        }
+        assert_eq!(
+            kinds,
+            vec![
+                ModelEvent::SpeechStarted,
+                ModelEvent::TextDelta { text: "live echo active. ".into() },
+                ModelEvent::InputAudioChunk {
+                    data: vec![1, 2, 3, 4],
+                    media_type: "audio/pcm;rate=16000".into()
+                },
+                ModelEvent::AudioDelta {
+                    data: vec![1, 2, 3, 4],
+                    media_type: "audio/pcm;rate=16000".into()
+                },
+                ModelEvent::InputAudioChunk {
+                    data: vec![5, 6],
+                    media_type: "audio/pcm;rate=16000".into()
+                },
+                ModelEvent::AudioDelta {
+                    data: vec![5, 6],
+                    media_type: "audio/pcm;rate=16000".into()
+                },
+                ModelEvent::Interrupted,
+                ModelEvent::SpeechStopped,
+                ModelEvent::Done { stop: StopReason::Stop },
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn interrupted_freezes_the_segment_and_splits_assembly() {
+        use crate::types::Content;
+        // Barge-in mid-stream: the chunks before Interrupted stay as
+        // one frozen segment; the SAME-media_type chunk after it must
+        // open a new block (what played is what the user heard — no
+        // silent concatenation across the truncation).
+        let model = FauxModel::scripted(vec![vec![
+            ModelEvent::AudioDelta { data: vec![1, 2], media_type: "audio/pcm".into() },
+            ModelEvent::Interrupted,
+            ModelEvent::AudioDelta { data: vec![3], media_type: "audio/pcm".into() },
+            ModelEvent::AudioDelta { data: vec![4], media_type: "audio/pcm".into() },
+            ModelEvent::Done { stop: StopReason::Stop },
+        ]]);
+        let agent = crate::Agent::new(Box::new(model), crate::ToolRegistry::new());
+        let produced = agent.run(&[], crate::Message::user("talk")).await.unwrap();
+        let assistant = produced
+            .iter()
+            .find(|m| m.role == crate::types::Role::Assistant)
+            .expect("assistant message");
+        let blocks: Vec<&Vec<u8>> = assistant
+            .content
+            .iter()
+            .filter_map(|c| match c {
+                Content::Audio { media } => match &media.source {
+                    crate::types::MediaSource::Bytes(b) => Some(b),
+                    _ => None,
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(blocks, [&vec![1, 2], &vec![3, 4]]);
+    }
+
+    #[tokio::test]
+    async fn input_audio_chunks_are_facts_not_assistant_content() {
+        use crate::types::Content;
+        // Uplink kinds flowing through the loop (a realtime driver
+        // shape) must not pollute the assistant message.
+        let model = FauxModel::scripted(vec![vec![
+            ModelEvent::InputAudioChunk { data: vec![9; 8], media_type: "audio/pcm".into() },
+            ModelEvent::SpeechStarted,
+            ModelEvent::SpeechStopped,
+            ModelEvent::TextDelta { text: "heard you. ".into() },
+            ModelEvent::Done { stop: StopReason::Stop },
+        ]]);
+        let agent = crate::Agent::new(Box::new(model), crate::ToolRegistry::new());
+        let produced = agent.run(&[], crate::Message::user("talk")).await.unwrap();
+        let assistant = produced
+            .iter()
+            .find(|m| m.role == crate::types::Role::Assistant)
+            .expect("assistant message");
+        assert_eq!(
+            assistant.content,
+            vec![Content::Text { text: "heard you. ".into() }]
+        );
+    }
+
+    #[tokio::test]
+    async fn closed_session_refuses_chunks_at_the_door() {
+        let mut session = FauxModel::demo().realtime(config()).unwrap();
+        session.close().await.unwrap();
+        assert!(session.push_audio(vec![1]).await.is_err());
+        assert!(session.interrupt().await.is_err());
+        assert!(session.close().await.is_ok()); // twice is a no-op
+    }
+}
 
 #[cfg(test)]
 mod tests {

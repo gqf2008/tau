@@ -48,7 +48,7 @@ pub use agent::{Agent, AgentError, AgentEvent};
 pub use blobs::{BlobStore, INLINE_LIMIT};
 pub use bus::{EventBus, EventStream, new_bus};
 pub use control::{Control, ControlTx};
-pub use model::{Model, ModelEvent, Request, StopReason};
+pub use model::{Model, ModelEvent, RealtimeConfig, RealtimeSession, Request, StopReason};
 pub use probe::{ProbeHandler, ProbePoint, ProbeRegistry, Verdict};
 pub use session::{EntryKind, JsonlStore, SessionEntry, SessionError};
 pub use tool::{Tool, ToolDef, ToolOutput, ToolRegistry};

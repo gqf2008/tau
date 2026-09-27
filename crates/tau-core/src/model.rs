@@ -66,6 +66,29 @@ pub enum ModelEvent {
         /// MIME type shared by the contiguous segment this chunk belongs to.
         media_type: String,
     },
+    /// Uplink fact (realtime sessions): the host pushed an audio chunk
+    /// toward the provider. Recorded so the session tree can
+    /// reconstruct what the model heard. `data` is base64 on the JSON
+    /// wire, honest bytes in memory — same posture as AudioDelta.
+    InputAudioChunk {
+        /// The audio bytes pushed (base64 on the JSON wire).
+        #[serde(
+            serialize_with = "audio_data_serialize",
+            deserialize_with = "audio_data_deserialize"
+        )]
+        data: Vec<u8>,
+        /// The uplink media type (the session's input_media_type).
+        media_type: String,
+    },
+    /// Server VAD: the user started speaking (realtime sessions).
+    SpeechStarted,
+    /// Server VAD: the user stopped speaking (realtime sessions).
+    SpeechStopped,
+    /// Barge-in (realtime sessions): the provider truncated the
+    /// in-flight assistant audio. The loop freezes the current
+    /// assembly (what played is what the user heard) and playback
+    /// sinks clear their buffers; later chunks start a new segment.
+    Interrupted,
     /// Terminal: the response ended successfully for the given reason.
     Done {
         /// Why it ended.
@@ -103,6 +126,41 @@ pub struct Request {
     pub tools: Vec<ToolDef>,
 }
 
+/// Configuration for opening a [`RealtimeSession`].
+#[derive(Debug, Clone, Default)]
+pub struct RealtimeConfig {
+    /// Uplink format the host will push — a raw stream, e.g.
+    /// "audio/pcm;rate=16000" (realtime has no container; a container
+    /// is the opposite of a persistent session).
+    pub input_media_type: String,
+    /// Preferred downlink format; the provider may answer with another.
+    pub output_media_type: Option<String>,
+    /// Session-level instructions (the system-prompt equivalent).
+    pub instructions: Option<String>,
+}
+
+/// A persistent bidirectional session — the OPTIONAL realtime
+/// capability of a [`Model`] (the OpenAI Realtime / Gemini Live
+/// shape): open → push chunks → events flow → interrupt/close.
+/// Same module-level contract as `stream`: failures surface as
+/// [`ModelEvent::Error`], never panics; the `Result` on the push
+/// methods only rejects at the door (a closed session refuses a chunk
+/// synchronously).
+#[async_trait]
+pub trait RealtimeSession: Send {
+    /// Push one uplink audio chunk in the session's input_media_type.
+    async fn push_audio(&mut self, bytes: Vec<u8>) -> Result<(), String>;
+    /// Push one image frame (JPEG) — the video uplink, ~1fps or
+    /// scene-triggered.
+    async fn push_image(&mut self, jpeg: Vec<u8>) -> Result<(), String>;
+    /// Barge-in: truncate the in-flight assistant response.
+    async fn interrupt(&mut self) -> Result<(), String>;
+    /// End the session; terminal events may still flush first.
+    async fn close(&mut self) -> Result<(), String>;
+    /// The session's event stream. Take it once, at open.
+    fn events(&self) -> BoxStream<'static, ModelEvent>;
+}
+
 /// A streaming model. Implementations: the built-in OpenAI/Anthropic
 /// providers (tau-openai, tau-anthropic crates), wasm provider components
 /// (tau-ext), and [`crate::faux::FauxModel`] for tests and demos.
@@ -110,4 +168,11 @@ pub struct Request {
 pub trait Model: Send + Sync {
     /// Stream one assistant response. See the module-level contract.
     async fn stream(&self, req: &Request) -> BoxStream<'static, ModelEvent>;
+
+    /// The realtime capability (docs/realtime-av.md). `None` — the
+    /// default — means request/response only; capability discovery IS
+    /// this call, so plain providers carry zero burden.
+    fn realtime(&self, _config: RealtimeConfig) -> Option<Box<dyn RealtimeSession>> {
+        None
+    }
 }
