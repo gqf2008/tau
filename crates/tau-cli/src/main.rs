@@ -901,14 +901,20 @@ async fn main() -> Result<()> {
     let mut events = print_events.expect("print mode always subscribes");
     let renderer = tokio::spawn(async move {
         use std::io::Write;
+        // Same live sink as the interactive renderer (Phase 1).
+        let mut sink = audio::PlaybackSink::new();
         loop {
             match events.recv().await {
                 Ok(AgentEvent::TextDelta(delta)) => {
                     print!("{delta}");
                     let _ = std::io::stdout().flush();
                 }
-                Ok(AgentEvent::AudioDelta { bytes, media_type }) => {
-                    eprintln!("[tau] audio Δ {bytes} bytes ({media_type})")
+                Ok(AgentEvent::RunStart) => sink.begin_run(),
+                Ok(AgentEvent::AudioDelta { data, media_type }) => {
+                    sink.push(&data, &media_type);
+                    if sink.take_announce() {
+                        eprintln!("[tau] ▶ streaming ({})", sink.desc());
+                    }
                 }
                 Ok(AgentEvent::ToolCallStart { name, .. }) => eprintln!("\n[tau] tool → {name}"),
                 Ok(AgentEvent::ToolCallEnd {
@@ -966,8 +972,16 @@ async fn main() -> Result<()> {
                 Ok(AgentEvent::FollowUp(message)) => {
                     eprintln!("[tau] follow-up: {}", message.text())
                 }
-                Ok(AgentEvent::Abort) => eprintln!("[tau] aborted"),
-                Ok(AgentEvent::RunEnd { .. } | AgentEvent::RunError { .. }) => break,
+                Ok(AgentEvent::Abort) => {
+                    sink.clear();
+                    eprintln!("[tau] aborted");
+                }
+                Ok(AgentEvent::RunEnd { .. } | AgentEvent::RunError { .. }) => {
+                    if let Some(summary) = sink.end_run() {
+                        eprintln!("{summary}");
+                    }
+                    break;
+                }
                 Ok(_) => {}
                 Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
                     eprintln!("[tau] renderer lagged, skipped {n} events")

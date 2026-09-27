@@ -67,6 +67,35 @@ server VAD 与 barge-in → 关会话）。Phase 2 的本质就是补这个抽�
 `media_type` 解析采样率喂输出流；打断时清缓冲）。就是把
 `main.rs:803` 那行 `eprintln!` 换掉。
 
+### Phase 1 实施定稿（2026-09-28）
+
+- **sink 形态**：`audio::PlaybackSink` 随 `drive()` 创建，订阅渲染层
+  的 `AudioDelta`（替换 main.rs/repl.rs 的 `eprintln!` 占位）；环形
+  缓冲（`VecDeque<f32>`，上限 4s 音频，溢出丢最旧——实时语义下
+  积压意味着已经听不到了）。输出流创建失败（无设备）→ null sink：
+  照常收帧计数、不发声、不红——门禁在无音频硬件的机器上照样
+  断言「流过了」。
+- **media_type → 解码**：`audio/wav` 自描述——攒头 44+ 字节解析
+  WAV 头后按流喂 PCM（Phase 0 的回声替身上下两块天然是同
+  container 的连续字节）；`audio/pcm` 按 MIME 参数 `rate=` 解析
+  （缺省 24000，OpenAI realtime 约定），16-bit 小端 mono。
+- **打断清缓冲**：`Control::Abort` / Ctrl-C 路径调 `sink.clear()`；
+  跨 media_type 切换（组装规则同）也清——残声不该漏进下一段。
+- **总线修正（落地时发现）**：`AgentEvent::AudioDelta` 原本只带
+  字节数（"bytes are not on the bus"），即收即播无米下锅——改为
+  携带 `data: Vec<u8>`（tau-core Rust API 破坏性改动，计入
+  0.3.0）。**契约零改动的承诺保住**：WIT 一字未动，wasm 订阅
+  路径的 `audio-segment` 仍只给计数（无音频热路径进 guest），
+  字节只为宿主渲染层而上车。
+- **与 Phase 0 的交接**：delta 已即收即播，run 结束后**不再回放**
+  组装块（听过的不重听）；Phase 0 的 run 后回放只保留给「无
+  delta 的整块音频」（当前组装路径必经 delta，实为死路，但语义
+  上留给未来非流式 provider）。
+- **验收**（validate.sh 11b 升级）：sine 回声三 chunk 进 sink →
+  断言 sink 计数行 `[tau] ▶ streamed N samples (audio/wav @
+  16kHz)` 且 N == 完整 clip 采样数（逐字节对上，不是「有声音」
+  级别的断言）；打断路径由单元测试覆盖（clear 后计数归零）。
+
 ### Phase 2 — 全双工（契约 0.3.0 主菜）
 
 - `tau-core` 加 `RealtimeSession`（`Model` 的可选能力）：
@@ -99,7 +128,13 @@ base64-JSON 块调用换 `stream<u8>`，按 `docs/wasip3-streams.md` 的
       （2026-09-28 落地）：`/mic <sec> [sine]` 录制/合成 → WAV 上行；
       demo 替身回声 3 个 AudioDelta；组装块 run 后回放（无输出设备
       仅提示不红）；validate.sh 11b pty 全链断言（sine 路径）
-- [ ] Phase 1：渲染层播放 sink（即收即播 + 打断清缓冲）
+- [x] Phase 1：渲染层播放 sink（2026-09-28 落地）：
+      `audio::PlaybackSink` 挂在两个渲染器（REPL + print）上，
+      AudioDelta 即收即播（WAV 增量解析 / `audio/pcm;rate=` 裸流，
+      环形缓冲 4s 溢出丢最旧，无输出设备降级 null sink 照常计数）；
+      打断/换段清缓冲；`AgentEvent::AudioDelta` 为此携带字节
+      （WIT 契约不变）；validate.sh 11b 断言逐样本账目
+      （32000 == 2s @ 16kHz）
 - [ ] Phase 2：`RealtimeSession` trait + 新事件 kind + WIT world
       `realtime` + consent 门类（microphone/camera）+ faux provider
       测试替身

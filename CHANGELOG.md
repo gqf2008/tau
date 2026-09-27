@@ -70,6 +70,29 @@
   echo → assembly → playback path → audio/wav block in the session
   JSONL. Deps: cpal 0.17 + hound 3.5, tau-cli only.
 
+### Added — realtime-av Phase 1: live playback sink (docs/realtime-av.md)
+
+- `audio::PlaybackSink` hangs off both renderers (interactive + print):
+  `AudioDelta` chunks play AS THEY ARRIVE — incremental WAV header
+  parse (RIFF walk to the data chunk, then raw PCM per chunk), raw
+  `audio/pcm` / `audio/L16` with the `rate=` MIME parameter (default
+  24000), a 4s ring buffer that drops the OLDEST samples on overflow
+  (realtime semantics: a backlog is sound you can no longer catch up
+  to), and a null-sink fallback with no output device that decodes and
+  counts identically — headless machines assert "it streamed", never
+  red. Abort/Ctrl-C and segment switches clear the buffer mid-run.
+- Host API break (counts toward 0.3.0): `AgentEvent::AudioDelta` now
+  carries `data: Vec<u8>` instead of the `bytes: usize` count — the
+  sink cannot play a count. **The WIT contract is untouched**: the
+  guest subscribe path's `audio-segment` stays count-only, no audio
+  hot path crosses to wasm.
+- Post-run replay (Phase 0) now only fires for audio whose deltas
+  never streamed, so live-played sound never plays twice.
+- Acceptance: validate.sh step 11b asserts the sink's per-sample
+  accounting — 32000 samples == the full 2s @ 16kHz sine clip — plus
+  unit tests for chunk-split WAV decode, clear-on-abort, segment
+  switch, and the pcm rate default.
+
 ### Breaking — contract `tau:extension@0.3.0` (tool media results, wit-review F4)
 
 - Tool results are **multi-block**: `tool-result.content` is now

@@ -23,12 +23,15 @@ pub enum AgentEvent {
     RunStart,
     /// A fragment of assistant text.
     TextDelta(String),
-    /// A provider streamed audio (realtime-style): how many bytes just
-    /// arrived and of what media type. The bytes themselves are not on
-    /// the bus — they land in the assistant message as Content::Audio.
+    /// A provider streamed audio (realtime-style): the bytes of this
+    /// chunk and the media type of the segment they belong to. The
+    /// bytes ride the bus so the host renderer's playback sink can play
+    /// as they arrive (realtime-av Phase 1); they also land in the
+    /// assistant message as Content::Audio. The wasm subscribe path
+    /// stays count-only (audio-segment) — no audio hot path to guests.
     AudioDelta {
-        /// How many bytes just arrived.
-        bytes: usize,
+        /// The audio bytes of this chunk.
+        data: Vec<u8>,
         /// The media type of the segment they belong to.
         media_type: String,
     },
@@ -649,7 +652,7 @@ impl Agent {
                 }
                 ModelEvent::AudioDelta { data, media_type } => {
                     self.emit(AgentEvent::AudioDelta {
-                        bytes: data.len(),
+                        data: data.clone(),
                         media_type: media_type.clone(),
                     });
                     match audio.last_mut() {

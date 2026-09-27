@@ -1,16 +1,18 @@
 #!/usr/bin/env python
-"""Realtime-AV Phase 0 smoke (docs/realtime-av.md, validate.sh step 11b):
+"""Realtime-AV voice loop (docs/realtime-av.md, validate.sh step 11b):
 drives the interactive REPL over a pty through the full voice loop with
 the hardware-free synthetic signal:
 
   /mic 2 sine  →  440Hz WAV synthesized host-side  →  Content::Audio
   user message  →  demo model echoes it as 3 AudioDelta chunks  →
-  assembly concatenates them  →  post-run playback path runs.
+  the LIVE SINK (Phase 1) plays them as they arrive  →  assembly
+  concatenates them into the session block.
 
-Asserted: capture bytes, the demo model's echo turn, the assembled
-audio/wav block IN the session JSONL, and that the playback path ran
-("▶ played" when an output device exists, a playback notice otherwise —
-headless machines must not go red, but the path must execute).
+Asserted: capture bytes, the demo model's echo turn, the sink's
+announce + summary lines with the EXACT sample count (2s @ 16kHz =
+32000 — byte-exact, not "some sound happened"), and the assembled
+audio/wav block IN the session JSONL. Headless machines run the null
+sink: it counts identically, so this gate is hardware-free.
 
 Usage: python scripts/av_phase0_e2e.py <path-to-tau-binary> <work-dir>
 Requires pywinpty; validate.sh skips step 11b when it is missing.
@@ -89,16 +91,13 @@ def main():
         # …the demo model echoes the clip (the turn ran on the voice
         # message)…
         tau.wait("echoing your voice clip.", 30)
-        # …and the playback path executed — either real playback (an
-        # output device exists) or the honest notice (headless).
-        deadline = time.time() + 15
-        while time.time() < deadline:
-            with tau.lock:
-                if "[tau] ▶ played " in tau.buf or "[tau] playback: " in tau.buf:
-                    break
-            time.sleep(0.1)
-        else:
-            raise AssertionError(f"playback path never ran: {tau.buf[-1500:]}")
+        # …the live sink announced the segment as the first delta
+        # landed (media_type + rate parsed from the WAV header)…
+        tau.wait("[tau] ▶ streaming (audio/wav @ 16kHz)", 15)
+        # …and at RunEnd the sink accounted for EVERY sample of the 2s
+        # @ 16kHz clip — byte-exact downlink accounting, device or no
+        # device (null sink counts identically).
+        tau.wait("[tau] ▶ streamed 32000 samples (audio/wav @ 16kHz)", 15)
         tau.send("/quit\r")
         tau.wait_exit()
     finally:
@@ -123,7 +122,7 @@ def main():
     assert audio_found, f"no audio/wav block in the session: kinds={kinds}"
 
     print("ok — voice loop closed (sine → Content::Audio uplink → demo echo "
-          "→ 3 AudioDelta assembled → playback path → audio/wav in session)")
+          "→ 3 AudioDelta streamed live (32000 samples exact) → audio/wav in session)")
 
 
 main()

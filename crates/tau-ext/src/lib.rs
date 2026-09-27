@@ -322,9 +322,12 @@ pub(crate) fn poll_subscription(
             Ok(tau_core::AgentEvent::TextDelta(text)) if sub.text_delta => {
                 out.push(StreamEvent::TextDelta(text));
             }
-            Ok(tau_core::AgentEvent::AudioDelta { bytes, media_type }) if sub.audio_delta => {
+            // Contract stays count-only (audio-segment): the bytes ride
+            // the host bus for the renderer's sink, but no audio hot
+            // path crosses to guests.
+            Ok(tau_core::AgentEvent::AudioDelta { data, media_type }) if sub.audio_delta => {
                 out.push(StreamEvent::AudioDelta(AudioSegment {
-                    bytes: bytes as u64,
+                    bytes: data.len() as u64,
                     media_type,
                 }));
             }
@@ -1477,7 +1480,7 @@ mod stream_subscription_tests {
 
         bus.send(AgentEvent::TextDelta("he".into())).unwrap();
         bus.send(AgentEvent::AudioDelta {
-            bytes: 7,
+            data: vec![0; 7],
             media_type: "audio/pcm".into(),
         })
         .unwrap(); // off-topic: dropped
@@ -1502,7 +1505,7 @@ mod stream_subscription_tests {
         state.channel.wire(bus.clone(), tau_core::control::channel().0);
         let id = Host::subscribe(&mut state, vec!["audio-delta".into()]).unwrap();
         bus.send(AgentEvent::AudioDelta {
-            bytes: 2048,
+            data: vec![0; 2048],
             media_type: "audio/pcm;rate=24000".into(),
         })
         .unwrap();

@@ -160,9 +160,13 @@ pub(crate) async fn drive(
     mut inject: UnboundedReceiver<Control>,
 ) -> Result<()> {
     // Renderer: another event-bus subscriber, formatting events into
-    // complete lines for the printer.
+    // complete lines for the printer. It also owns the live playback
+    // sink (realtime-av Phase 1): AudioDelta bytes play as they
+    // arrive, an abort silences the buffer mid-run.
     let (render_tx, mut render_rx) = unbounded_channel::<String>();
     let mut events = agent.events();
+    let mut sink = crate::audio::PlaybackSink::new();
+    let sink_streamed = sink.streamed_handle();
     let renderer = tokio::spawn(async move {
         let mut partial = String::new();
         loop {
@@ -177,8 +181,19 @@ pub(crate) async fn drive(
                         None => continue,
                     }
                 }
-                Ok(AgentEvent::AudioDelta { bytes, media_type }) => {
-                    format!("[tau] audio Δ {bytes} bytes ({media_type})")
+                Ok(AgentEvent::RunStart) => {
+                    sink.begin_run();
+                    continue;
+                }
+                Ok(AgentEvent::AudioDelta { data, media_type }) => {
+                    // Live playback IS the rendering of an audio delta;
+                    // one announce line per segment, not per chunk.
+                    sink.push(&data, &media_type);
+                    if sink.take_announce() {
+                        format!("[tau] ▶ streaming ({})", sink.desc())
+                    } else {
+                        continue;
+                    }
                 }
                 Ok(AgentEvent::ToolCallStart { name, .. }) => format!("[tau] tool → {name}"),
                 Ok(AgentEvent::ToolCallEnd {
@@ -231,8 +246,16 @@ pub(crate) async fn drive(
                 Ok(AgentEvent::ExtensionFact(fact)) => {
                     format!("[tau] ext fact: {}", compact_preview(&fact.to_string()))
                 }
-                Ok(AgentEvent::Abort) => "[tau] aborted".to_string(),
+                Ok(AgentEvent::Abort) => {
+                    sink.clear();
+                    "[tau] aborted".to_string()
+                }
                 Ok(AgentEvent::RunEnd { .. } | AgentEvent::RunError { .. }) => {
+                    if let Some(summary) = sink.end_run()
+                        && render_tx.send(summary).is_err()
+                    {
+                        return;
+                    }
                     if partial.is_empty() {
                         continue;
                     }
@@ -503,22 +526,26 @@ pub(crate) async fn drive(
                     }
                     None => return Err(anyhow::anyhow!("run channel closed")),
                 };
-                for message in &produced {
-                    for content in &message.content {
-                        if let Content::Audio { media } = content {
-                            let MediaSource::Bytes(bytes) = &media.source else {
-                                continue;
-                            };
-                            // Phase 0 playback: after the run, blocking
-                            // (docs/realtime-av.md — the live sink is
-                            // Phase 1). No output device is a notice,
-                            // never a failure (headless machines exist).
-                            match crate::audio::play_wav(bytes) {
-                                Ok(n) => print(&format!(
-                                    "[tau] ▶ played {n} samples ({})",
-                                    media.media_type
-                                )),
-                                Err(e) => print(&format!("[tau] playback: {e:#}")),
+                // Post-run replay is only for audio whose deltas never
+                // streamed (a non-streaming provider — no current path
+                // produces it, kept for the semantics): what the live
+                // sink already played must not play twice.
+                if sink_streamed.load(std::sync::atomic::Ordering::Relaxed) == 0 {
+                    for message in &produced {
+                        for content in &message.content {
+                            if let Content::Audio { media } = content {
+                                let MediaSource::Bytes(bytes) = &media.source else {
+                                    continue;
+                                };
+                                // No output device is a notice, never a
+                                // failure (headless machines exist).
+                                match crate::audio::play_wav(bytes) {
+                                    Ok(n) => print(&format!(
+                                        "[tau] ▶ played {n} samples ({})",
+                                        media.media_type
+                                    )),
+                                    Err(e) => print(&format!("[tau] playback: {e:#}")),
+                                }
                             }
                         }
                     }

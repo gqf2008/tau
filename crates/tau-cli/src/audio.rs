@@ -10,7 +10,9 @@
 //! describing — rate/depth travel in the header, so the downlink
 //! assembly of same-media_type deltas needs zero parsing).
 
-use std::sync::mpsc;
+use std::collections::VecDeque;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, Mutex, mpsc};
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, bail};
@@ -185,6 +187,353 @@ pub fn play_wav(wav: &[u8]) -> Result<u64> {
     Ok(total)
 }
 
+// ---------- Phase 1: the live playback sink (docs/realtime-av.md) ----------
+
+/// How many seconds of audio the ring holds; beyond it the OLDEST
+/// samples drop — under realtime semantics a backlog is sound the
+/// listener can no longer catch up to.
+const RING_SECONDS: u32 = 4;
+
+/// Live downlink sink: `AudioDelta` chunks in, speaker out. One per
+/// renderer (interactive + print). The output stream opens lazily on
+/// the first chunk — text-only sessions never touch audio hardware —
+/// and a missing/unusable device degrades to a NULL sink that still
+/// decodes and counts every sample, so the gate asserts "it streamed"
+/// on machines with no speaker.
+pub struct PlaybackSink {
+    output: Option<Output>,
+    /// Incremental decoder for the current segment (same-media_type
+    /// chunks of one container; a media_type switch clears it).
+    decoder: Option<Decoder>,
+    /// Samples pushed this run (input rate, pre-resample) — the
+    /// assertable counter, shared with the post-run replay gate.
+    streamed: Arc<AtomicU64>,
+    /// A new segment started and the renderer has not announced it.
+    pending_announce: bool,
+    /// The null-sink notice went out once.
+    noticed_null: bool,
+}
+
+struct Output {
+    _stream: cpal::Stream,
+    ring: Arc<Mutex<VecDeque<f32>>>,
+    rate: u32,
+}
+
+struct Decoder {
+    media_type: String,
+    rate: u32,
+    channels: usize,
+    /// WAV: unparsed header bytes accumulate here until the RIFF walk
+    /// finds the data chunk; empty afterwards.
+    header: Vec<u8>,
+    header_done: bool,
+    /// One carried byte when a chunk split a 16-bit sample.
+    tail: Option<u8>,
+    /// A megabyte without a data chunk is not a WAV — fail open:
+    /// count nothing, play nothing, stay silent.
+    broken: bool,
+}
+
+impl PlaybackSink {
+    pub fn new() -> Self {
+        Self {
+            output: None,
+            decoder: None,
+            streamed: Arc::new(AtomicU64::new(0)),
+            pending_announce: false,
+            noticed_null: false,
+        }
+    }
+
+    /// Shared counter for the post-run replay gate (assembled blocks
+    /// whose deltas already played live must not replay).
+    pub fn streamed_handle(&self) -> Arc<AtomicU64> {
+        self.streamed.clone()
+    }
+
+    /// Samples pushed since the last `begin_run`/`clear`.
+    pub fn streamed(&self) -> u64 {
+        self.streamed.load(Ordering::Relaxed)
+    }
+
+    /// "{media_type} @ {rate}kHz" once the rate is known, else the bare
+    /// media type (a WAV header still accumulating).
+    pub fn desc(&self) -> String {
+        match &self.decoder {
+            Some(d) if d.header_done && !d.broken => {
+                format!("{} @ {}", d.media_type, format_rate(d.rate))
+            }
+            Some(d) => d.media_type.clone(),
+            None => "no stream".to_string(),
+        }
+    }
+
+    /// New run: reset the per-run counter (the decoder survives — a
+    /// segment spanning the boundary is not a real shape, but the next
+    /// chunk's media_type check would rebuild it anyway).
+    pub fn begin_run(&mut self) {
+        self.streamed.store(0, Ordering::Relaxed);
+        self.pending_announce = false;
+    }
+
+    /// Feed one AudioDelta chunk. Returns true when a NEW segment just
+    /// started (the renderer announces it with `desc()`).
+    pub fn push(&mut self, data: &[u8], media_type: &str) -> bool {
+        if self.decoder.as_ref().is_some_and(|d| d.media_type != media_type) {
+            // Segment switch: stale sound must not leak into the next
+            // segment — same rule as an interrupt.
+            self.clear();
+        }
+        let started = self.decoder.is_none();
+        if started {
+            self.decoder = Some(Decoder::new(media_type));
+            self.pending_announce = true;
+        }
+        let samples = match self.decoder.as_mut() {
+            Some(d) => d.feed(data),
+            None => return false,
+        };
+        if samples.is_empty() {
+            return started;
+        }
+        self.streamed.fetch_add(samples.len() as u64, Ordering::Relaxed);
+        self.ensure_output();
+        if let Some(out) = &self.output {
+            // Chunk-wise naive resample (boundary clicks are accepted —
+            // Phase 1 playback, not an audio engine); the null sink
+            // skips it but still counted above.
+            let decoder = self.decoder.as_ref().expect("decoder alive");
+            let pcm = if out.rate != decoder.rate {
+                resample_linear(&samples, decoder.rate, out.rate)
+            } else {
+                samples
+            };
+            let mut ring = out.ring.lock().unwrap_or_else(|p| p.into_inner());
+            let cap = RING_SECONDS as usize * out.rate as usize;
+            ring.extend(pcm);
+            while ring.len() > cap {
+                ring.pop_front();
+            }
+        }
+        started
+    }
+
+    /// Renderer announces once per segment; clears the pending flag.
+    pub fn take_announce(&mut self) -> bool {
+        std::mem::take(&mut self.pending_announce)
+    }
+
+    /// Interrupt / abort: drop every buffered and half-parsed sample.
+    /// Silence NOW beats the tail of a canceled answer.
+    pub fn clear(&mut self) {
+        if let Some(out) = &self.output {
+            out.ring
+                .lock()
+                .unwrap_or_else(|p| p.into_inner())
+                .clear();
+        }
+        self.decoder = None;
+        self.streamed.store(0, Ordering::Relaxed);
+        self.pending_announce = false;
+    }
+
+    /// Run finished: the summary line for the renderer, if anything
+    /// streamed. Does NOT reset the counter — the post-run replay gate
+    /// reads it between RunEnd and the next RunStart.
+    pub fn end_run(&mut self) -> Option<String> {
+        self.pending_announce = false;
+        let n = self.streamed();
+        (n > 0).then(|| format!("[tau] ▶ streamed {n} samples ({})", self.desc()))
+    }
+
+    fn ensure_output(&mut self) {
+        if self.output.is_some() {
+            return;
+        }
+        match Output::open() {
+            Ok(out) => self.output = Some(out),
+            Err(e) => {
+                if !self.noticed_null {
+                    eprintln!("[tau] playback: {e:#} — null sink (counting silently)");
+                    self.noticed_null = true;
+                }
+            }
+        }
+    }
+}
+
+impl Output {
+    fn open() -> Result<Self> {
+        let host = cpal::default_host();
+        let device = host
+            .default_output_device()
+            .context("no default output device (speaker)")?;
+        let supported = device
+            .default_output_config()
+            .context("output device has no default config")?;
+        let format = supported.sample_format();
+        let config: cpal::StreamConfig = supported.into();
+        let rate = config.sample_rate;
+        let channels = config.channels.max(1) as usize;
+
+        let ring: Arc<Mutex<VecDeque<f32>>> = Arc::new(Mutex::new(VecDeque::new()));
+        let read_ring = ring.clone();
+        let drain = move |data: &mut [f32]| {
+            let mut ring = read_ring.lock().unwrap_or_else(|p| p.into_inner());
+            for frame in data.chunks_mut(channels) {
+                let sample = ring.pop_front().unwrap_or(0.0);
+                for channel in frame.iter_mut() {
+                    *channel = sample;
+                }
+            }
+        };
+        let err = |e| eprintln!("[tau] playback stream: {e}");
+        let stream = match format {
+            cpal::SampleFormat::F32 => {
+                device.build_output_stream(&config, move |d: &mut [f32], _| drain(d), err, None)?
+            }
+            cpal::SampleFormat::I16 => device.build_output_stream(
+                &config,
+                move |d: &mut [i16], _| {
+                    let mut scratch = vec![0.0f32; d.len()];
+                    drain(&mut scratch);
+                    for (dst, src) in d.iter_mut().zip(scratch) {
+                        *dst = (src * 32767.0).clamp(-32768.0, 32767.0) as i16;
+                    }
+                },
+                err,
+                None,
+            )?,
+            other => bail!("unsupported output sample format: {other}"),
+        };
+        stream.play()?;
+        Ok(Self { _stream: stream, ring, rate })
+    }
+}
+
+impl Decoder {
+    fn new(media_type: &str) -> Self {
+        let lower = media_type.to_lowercase();
+        // audio/pcm and audio/L16 carry their rate as a MIME parameter
+        // (default 24000 — the OpenAI realtime convention), 16-bit LE
+        // mono, no container.
+        let bare = lower.starts_with("audio/pcm") || lower.starts_with("audio/l16");
+        let rate = if bare { mime_rate(&lower).unwrap_or(24_000) } else { 0 };
+        Self {
+            media_type: media_type.to_string(),
+            rate,
+            channels: 1,
+            header: Vec::new(),
+            header_done: bare,
+            tail: None,
+            broken: false,
+        }
+    }
+
+    /// Feed a chunk; returns the decoded mono f32 samples (empty while
+    /// a WAV header is still accumulating).
+    fn feed(&mut self, data: &[u8]) -> Vec<f32> {
+        if self.broken {
+            return Vec::new();
+        }
+        if !self.header_done {
+            self.header.extend_from_slice(data);
+            return match wav_header(&self.header) {
+                Some((rate, channels, start)) => {
+                    self.rate = rate;
+                    self.channels = channels;
+                    self.header_done = true;
+                    // Split borrows: take the header out of self, then
+                    // feed its PCM tail through the normal path.
+                    let header = std::mem::take(&mut self.header);
+                    self.pcm_bytes(&header[start..])
+                }
+                None => {
+                    if self.header.len() > 1 << 20 {
+                        eprintln!("[tau] playback: WAV header never parsed — dropping segment");
+                        self.broken = true;
+                    }
+                    Vec::new()
+                }
+            };
+        }
+        self.pcm_bytes(data)
+    }
+
+    fn pcm_bytes(&mut self, bytes: &[u8]) -> Vec<f32> {
+        let mut raw: Vec<u8> = Vec::with_capacity(bytes.len() + 1);
+        if let Some(tail) = self.tail.take() {
+            raw.push(tail);
+        }
+        raw.extend_from_slice(bytes);
+        if raw.len() % 2 == 1 {
+            self.tail = raw.pop();
+        }
+        let mut samples: Vec<i16> = raw
+            .chunks_exact(2)
+            .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+            .collect();
+        // Downmix like capture does (Phase 1 clips are mono, but an
+        // interleaved stereo WAV must not play at double speed).
+        if self.channels > 1 {
+            let ch = self.channels;
+            samples = samples
+                .chunks(ch)
+                .map(|frame| frame.iter().map(|&s| s as i32).sum::<i32>() / ch as i32)
+                .map(|mean| mean.clamp(i16::MIN as i32, i16::MAX as i32) as i16)
+                .collect();
+        }
+        samples.iter().map(|&s| s as f32 / 32768.0).collect()
+    }
+}
+
+/// Minimal RIFF walk: locate fmt (rate, channels) and the data chunk's
+/// start. None means "incomplete" — the caller accumulates more bytes.
+/// Only called for media_type audio/wav, so a malformed container just
+/// never parses (fail-open notice after 1 MiB).
+fn wav_header(bytes: &[u8]) -> Option<(u32, usize, usize)> {
+    if bytes.len() < 12 || &bytes[0..4] != b"RIFF" || &bytes[8..12] != b"WAVE" {
+        return None;
+    }
+    let mut at = 12usize;
+    let mut fmt: Option<(u32, usize)> = None;
+    while at + 8 <= bytes.len() {
+        let tag = &bytes[at..at + 4];
+        let size = u32::from_le_bytes(bytes[at + 4..at + 8].try_into().ok()?) as usize;
+        if tag == b"fmt " && at + 16 <= bytes.len() {
+            let channels = u16::from_le_bytes(bytes[at + 10..at + 12].try_into().ok()?) as usize;
+            let rate = u32::from_le_bytes(bytes[at + 12..at + 16].try_into().ok()?);
+            fmt = Some((rate, channels.max(1)));
+        }
+        if tag == b"data" {
+            let (rate, channels) = fmt?;
+            return Some((rate, channels, at + 8));
+        }
+        at += 8 + size + (size & 1);
+    }
+    None
+}
+
+/// `rate=` parameter of a MIME type ("audio/pcm;rate=16000").
+fn mime_rate(media_type: &str) -> Option<u32> {
+    for part in media_type.split(';').skip(1) {
+        let part = part.trim();
+        if let Some(value) = part.strip_prefix("rate=") {
+            return value.parse().ok();
+        }
+    }
+    None
+}
+
+fn format_rate(rate: u32) -> String {
+    if rate.is_multiple_of(1000) {
+        format!("{}kHz", rate / 1000)
+    } else {
+        format!("{:.1}kHz", rate as f64 / 1000.0)
+    }
+}
+
 /// 440 Hz sine, 16 kHz mono — deterministic, hardware-free.
 fn sine_wav(seconds: u32) -> Vec<u8> {
     let rate = 16_000u32;
@@ -253,6 +602,70 @@ mod tests {
         // (a silent "sine" would pass every structural check).
         let peak = samples.iter().map(|s| s.unsigned_abs()).max().unwrap();
         assert!(peak > 10_000, "sine peak too low: {peak}");
+    }
+
+    #[test]
+    fn sink_decodes_wav_chunks_and_counts_every_sample() {
+        // The demo echo's shape: one WAV split into three chunks.
+        let wav = record_wav(2, true).unwrap();
+        let third = wav.len() / 3;
+        let mut sink = PlaybackSink::new();
+        sink.begin_run();
+        assert!(sink.push(&wav[..third], "audio/wav"));
+        assert!(sink.take_announce());
+        assert!(!sink.push(&wav[third..2 * third], "audio/wav"));
+        assert!(!sink.push(&wav[2 * third..], "audio/wav"));
+        // Every sample of the 2s @ 16kHz clip decoded and counted —
+        // headless (null sink) or not, the counter is the gate.
+        assert_eq!(sink.streamed(), 32_000);
+        assert_eq!(sink.desc(), "audio/wav @ 16kHz");
+        let summary = sink.end_run().unwrap();
+        assert!(summary.contains("streamed 32000 samples (audio/wav @ 16kHz)"), "{summary}");
+    }
+
+    #[test]
+    fn clear_silences_and_zeroes() {
+        let wav = record_wav(1, true).unwrap();
+        let mut sink = PlaybackSink::new();
+        sink.begin_run();
+        sink.push(&wav, "audio/wav");
+        assert!(sink.streamed() > 0);
+        sink.clear();
+        assert_eq!(sink.streamed(), 0);
+        assert!(sink.end_run().is_none());
+    }
+
+    #[test]
+    fn media_type_switch_drops_the_stale_segment() {
+        let wav = record_wav(1, true).unwrap();
+        let mut sink = PlaybackSink::new();
+        sink.begin_run();
+        sink.push(&wav, "audio/wav");
+        assert!(sink.streamed() > 0);
+        // A pcm segment starts: the half-parsed WAV must not leak.
+        assert!(sink.push(&[0u8; 100], "audio/pcm;rate=24000"));
+        assert_eq!(sink.streamed(), 50); // 100 bytes of 16-bit pcm
+        assert_eq!(sink.desc(), "audio/pcm;rate=24000 @ 24kHz");
+    }
+
+    #[test]
+    fn pcm_rate_defaults_to_realtime_convention() {
+        let mut sink = PlaybackSink::new();
+        sink.begin_run();
+        sink.push(&[0u8; 20], "audio/pcm");
+        assert_eq!(sink.desc(), "audio/pcm @ 24kHz");
+    }
+
+    #[test]
+    fn wav_header_walks_real_riff_layout() {
+        let wav = record_wav(1, true).unwrap();
+        let (rate, channels, start) = wav_header(&wav).unwrap();
+        assert_eq!(rate, 16_000);
+        assert_eq!(channels, 1);
+        assert!(start >= 44);
+        assert_eq!(wav.len() - start, 32_000); // 16k samples * 2 bytes
+        // A truncated header reports incomplete, never garbage.
+        assert!(wav_header(&wav[..20]).is_none());
     }
 
     #[test]
