@@ -2,6 +2,13 @@
 
 ## [Unreleased]
 
+### Docs
+
+- Design documents (status: unimplemented, code must not precede them):
+  `docs/host-channel.md` (guest->host channel for the extension world),
+  `docs/im-channels.md` (WeChat/Feishu/DingTalk/WhatsApp bridges),
+  `docs/realtime-av.md` (bidirectional realtime audio/video, phased).
+
 ### Changed
 
 - `repository`/`homepage` metadata now point at the public repo,
