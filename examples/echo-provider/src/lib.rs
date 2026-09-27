@@ -1,5 +1,7 @@
 //! Example tau provider component: no network, echoes the last user
 //! message back word by word through the push channel (events.emit).
+//! Keywords: "probe" reports the received request's length + checksum,
+//! "env NAME" probes the WASI env policy, "audio" emits audio deltas.
 //!
 //! Build:
 //!   cargo build --manifest-path examples/echo-provider/Cargo.toml \
@@ -46,6 +48,23 @@ impl Guest for Echo {
             .flatten();
 
         match last_user_text {
+            // "probe" reports what the guest actually received: the byte
+            // length and a FNV-1a checksum of the whole request JSON.
+            // The host-side test recomputes both over the exact string it
+            // sent, so truncation or corruption at the component boundary
+            // (multi-MiB media inflates the JSON far past the usual few
+            // KiB) shows up as a mismatch.
+            Some(text) if text == "probe" => {
+                emit(&serde_json::json!({
+                    "kind": "text-delta",
+                    "text": format!(
+                        "probe bytes={} fnv1a={:016x}",
+                        request_json.len(),
+                        fnv1a(request_json.as_bytes()),
+                    ),
+                }));
+                emit(&serde_json::json!({ "kind": "done", "stop": "stop" }));
+            }
             // "env NAME" reports whether the ambient env var is visible —
             // demos the host's WASI policy (allow-all inherits, deny-all
             // sees nothing).
@@ -96,6 +115,16 @@ impl Guest for Echo {
 
 fn emit(event: &serde_json::Value) {
     tau::extension::events::emit(&event.to_string());
+}
+
+/// FNV-1a 64-bit — dependency-free checksum for the "probe" keyword.
+fn fnv1a(bytes: &[u8]) -> u64 {
+    let mut hash: u64 = 0xcbf29ce484222325;
+    for &b in bytes {
+        hash ^= b as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    hash
 }
 
 export!(Echo);

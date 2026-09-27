@@ -48,7 +48,7 @@ trap cleanup EXIT
 # --- pre-flight -------------------------------------------------------
 step "build release binary + wasm examples"
 cargo build --release -p tau-cli --quiet
-for ex in upper http-provider mcp-bridge guard; do
+for ex in upper http-provider mcp-bridge guard echo-provider; do
     cargo build --manifest-path "examples/${ex}/Cargo.toml" \
         --target wasm32-wasip2 --release --quiet
 done
@@ -56,10 +56,12 @@ UPPER="$ROOT/examples/upper/target/wasm32-wasip2/release/upper.wasm"
 HTTP_PROVIDER="$ROOT/examples/http-provider/target/wasm32-wasip2/release/http_provider.wasm"
 MCP_BRIDGE="$ROOT/examples/mcp-bridge/target/wasm32-wasip2/release/mcp_bridge.wasm"
 GUARD="$ROOT/examples/guard/target/wasm32-wasip2/release/guard.wasm"
+ECHO_PROVIDER="$ROOT/examples/echo-provider/target/wasm32-wasip2/release/echo_provider.wasm"
 [ -f "$UPPER" ] || fail "upper example missing"
 [ -f "$HTTP_PROVIDER" ] || fail "http-provider example missing"
 [ -f "$MCP_BRIDGE" ] || fail "mcp-bridge example missing"
 [ -f "$GUARD" ] || fail "guard example missing"
+[ -f "$ECHO_PROVIDER" ] || fail "echo-provider example missing"
 
 rm -rf "$WORK"
 mkdir -p "$WORK"
@@ -348,6 +350,40 @@ for evil in 'http://evil.invalid\@127.0.0.1:8402/' \
     fi
 done
 echo "ok — origin gate: userinfo/backslash stay home, tricks and twins refused"
+
+# --- step 4b: large payload over the component boundary ----------------
+step "4b/11 large media crosses the component boundary intact"
+# A 3 MiB image in the session history inflates the request JSON past
+# 4 MiB of base64 — far beyond the few KiB every other step sends. The
+# echo provider's "probe" keyword reports the byte length of the
+# request the GUEST received; the session → materialize → wasm boundary
+# path must deliver it whole, not choke, truncate, or refuse. (The
+# exact length + FNV-1a contract against the sent string is pinned by
+# tau-ext's large_payload_tests; here the real CLI drives it.)
+python - << 'PYEOF'
+import base64, json, random
+random.seed()
+data = random.randbytes(3 * 1024 * 1024)
+msg = {
+    "id": "big", "parent": None, "type": "message",
+    "message": {"role": "user", "content": [
+        {"type": "text", "text": "big media attached"},
+        {"type": "image", "media": {"media_type": "image/png",
+            "source": "base64", "data": base64.b64encode(data).decode()}},
+    ]},
+}
+with open("big-session.jsonl", "w") as f:
+    f.write(json.dumps(msg) + "\n")
+PYEOF
+OUT="$("$TAU" --allow-unsigned \
+    --provider-wasm "$ECHO_PROVIDER" --model echo \
+    --session big-session.jsonl --continue \
+    -p "probe" 2>&1)" || fail "large-payload run: $OUT"
+BYTES=$(echo "$OUT" | grep -o 'bytes=[0-9]*' | head -1 | cut -d= -f2)
+[ -n "$BYTES" ] || fail "guest never reported the payload size: $OUT"
+[ "$BYTES" -gt 4000000 ] \
+    || fail "payload truncated at the boundary: guest saw only $BYTES bytes"
+echo "ok — 3 MiB of media crossed session→guest whole ($BYTES bytes of request JSON)"
 
 # --- step 5: MCP bridge (consent-gated spawn) --------------------------
 step "5/11 MCP bridge (consent-gated spawn)"

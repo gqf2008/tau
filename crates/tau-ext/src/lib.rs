@@ -857,3 +857,111 @@ mod auth_payload_tests {
         assert_eq!(with["model"], "m");
     }
 }
+
+#[cfg(test)]
+mod large_payload_tests {
+    use std::collections::HashSet;
+    use std::path::PathBuf;
+
+    use futures::StreamExt;
+    use tau_core::{Content, Media, Model, ModelEvent, Request};
+
+    fn artifact() -> Option<PathBuf> {
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/echo-provider/target/wasm32-wasip2/release/echo_provider.wasm");
+        path.exists().then_some(path)
+    }
+
+    /// Same FNV-1a the echo provider's "probe" reports.
+    fn fnv1a(bytes: &[u8]) -> u64 {
+        let mut hash: u64 = 0xcbf29ce484222325;
+        for &b in bytes {
+            hash ^= b as u64;
+            hash = hash.wrapping_mul(0x100000001b3);
+        }
+        hash
+    }
+
+    /// The request JSON handed to the guest must arrive byte-for-byte.
+    /// 8 MiB of media inflates it past 10 MiB of base64 — far beyond the
+    /// few KiB every other test sends — and the guest reports back the
+    /// length and checksum of what IT received. Both are recomputed here
+    /// over the very string the host sends (`super::request_json`, not a
+    /// re-implementation), so truncation or corruption anywhere on the
+    /// host→component copy mismatches loudly.
+    #[tokio::test]
+    async fn a_multi_mib_request_arrives_at_the_guest_byte_for_byte() {
+        let Some(path) = artifact() else {
+            eprintln!("skipping: echo_provider.wasm not built");
+            return;
+        };
+        let mut message = tau_core::Message::user("probe");
+        // xorshift noise, not a repeating pattern: a checksum over
+        // periodic bytes could miss a swapped or duplicated chunk.
+        let mut bytes = vec![0u8; 8 * 1024 * 1024];
+        let mut state: u64 = 0x9e3779b97f4a7c15;
+        for b in bytes.iter_mut() {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            *b = state as u8;
+        }
+        message.content.push(Content::Image {
+            media: Media::bytes("image/png", bytes),
+        });
+        let req = Request {
+            system: None,
+            messages: vec![message],
+            tools: vec![],
+        };
+        let expected = super::request_json("echo", &req, None);
+        assert!(
+            expected.len() > 10 * 1024 * 1024,
+            "fixture must inflate past 10 MiB of base64, got {}",
+            expected.len()
+        );
+
+        let host = super::ExtensionHost::new();
+        let model = host
+            .load_provider(&path, "echo", HashSet::new(), None)
+            .expect("load echo provider");
+        let mut stream = model.stream(&req).await;
+        let mut text = String::new();
+        let mut done = false;
+        while let Some(event) = stream.next().await {
+            match event {
+                ModelEvent::TextDelta { text: t } => text.push_str(&t),
+                ModelEvent::Done { .. } => done = true,
+                ModelEvent::Error { message } => panic!("provider error: {message}"),
+                _ => {}
+            }
+        }
+        assert!(done, "stream never completed");
+        let want = format!(
+            "bytes={} fnv1a={:016x}",
+            expected.len(),
+            fnv1a(expected.as_bytes())
+        );
+        assert!(
+            text.contains(&want),
+            "guest received a different payload than the host sent: got {text:?}, want {want:?}"
+        );
+
+        // The instance is reused across runs: a normal-sized turn right
+        // after the big one must still work (no poisoned allocator, no
+        // leaked linear memory breaking the next call).
+        let followup = Request {
+            system: None,
+            messages: vec![tau_core::Message::user("still alive ")],
+            tools: vec![],
+        };
+        let mut stream = model.stream(&followup).await;
+        let mut text = String::new();
+        while let Some(event) = stream.next().await {
+            if let ModelEvent::TextDelta { text: t } = event {
+                text.push_str(&t);
+            }
+        }
+        assert_eq!(text, "still alive ");
+    }
+}
