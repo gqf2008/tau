@@ -58,6 +58,13 @@ rel_zip=$(sed -n 's/^for ex in \(.*\); do$/\1/p' "$ROOT/scripts/release.sh" | se
     || fail "release.sh build list drifted from validate.sh EXAMPLES"
 [ "$(echo $EXAMPLES | tr ' ' '\n' | sort)" = "$(echo $rel_zip | tr ' ' '\n' | sort)" ] \
     || fail "release.sh zip list drifted from validate.sh EXAMPLES"
+# examples/README.md ships in the dist zip — it is a THIRD copy of the
+# example enumeration; every shipped component must have a row.
+for ex in $EXAMPLES; do
+    wasm_name="$(echo "$ex" | tr '-' '_').wasm"
+    grep -q "`$wasm_name`" "$ROOT/examples/README.md" \
+        || fail "examples/README.md missing a row for $wasm_name"
+done
 
 step "build release binary + wasm examples"
 cargo build --release -p tau-cli --quiet

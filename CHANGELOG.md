@@ -338,6 +338,14 @@
   https://github.com/gqf2008/tau, and member crates actually inherit it
   (rides the next crates.io publish).
 
+### Fixed
+
+- `examples/README.md` (shipped in the dist zip) listed only 10 of the
+  14 components; rows for whatsapp/wecom/dingtalk bridges and
+  realtime-echo added, and validate.sh pre-flight now fails if the
+  README, release.sh's two loops, and the EXAMPLES list ever disagree
+  again (three-way drift guard).
+
 ## [0.2.0] — 2026-09-27
 
 Examples-and-docs-only release: the five crates are byte-identical
