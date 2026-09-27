@@ -67,6 +67,19 @@
   against `scripts/im_mock.py` (stdlib threaded mock platform) in
   validate.sh step 5c, including the unconsented-steer refusal path.
 
+### Fixed — ambient WASI preopens invisible to guests (Windows)
+
+- `preopen_host_fs` formatted the guest path from a `u8` loop variable:
+  `format!("/{letter}")` renders a `u8` as its decimal code, so drives
+  were preopened as `/99`, `/100`, … instead of `/c`, `/d`, … Every
+  host-side check passed (the preopens existed, `preopened_dir` returned
+  `Ok`) while guests saw a filesystem that existed but could not be
+  spelled — every path lookup failed `no-entry`. Fixed to format the
+  letter as a character; regression test
+  `allow_all_preopens_are_reachable_under_contract_names` probes the
+  boundary from inside a guest (guard example's `fscheck` leg) so a
+  host-side-only green can never pass again.
+
 ### Added — `ws` capability for bridges (docs/im-channels.md, 0.3.0)
 
 - The bridge world imports `ws`: `connect` / `send` / `recv` / `close`

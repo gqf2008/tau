@@ -7,7 +7,10 @@
 //! carrying "wasicheck" make the probe read the ambient environment:
 //! under the default allow-all WASI it sees the host's TAU_AMBIENT and
 //! blocks (proving the leak); under --deny-wasi the guest env is empty
-//! and the call passes (proving the sandbox). It also registers the
+//! and the call passes (proving the sandbox). Arguments carrying
+//! "fscheck" do the same for ambient filesystem preopens: allow-all
+//! preopens `/` (unix) or each drive as `/<letter>` (Windows), so a
+//! probe that can list any of them blocks; deny-all shows zero. It also registers the
 //! observe-only `session_start` point and reports the session via
 //! `host.notify` — observe leg (probes.md), verdict ignored by contract.
 //!
@@ -97,6 +100,30 @@ impl Probes for Guard {
                     action: Action::Block,
                     payload_json: None,
                     reason: Some("ambient env leaked into the guest".into()),
+                };
+            }
+            return continue_();
+        }
+        // Same boundary for the ambient filesystem: allow-all preopens
+        // `/` (unix) / every drive as `/<letter>` (Windows). Count how
+        // many candidate roots actually list — under allow-all at least
+        // one must, under --deny-wasi none can. (Regression: a host that
+        // preopened drives under mangled guest names failed this check —
+        // the preopens existed but at paths the guest never guesses.)
+        if text.as_deref().is_some_and(|t| t.contains("fscheck")) {
+            let mut reachable = std::fs::read_dir("/").is_ok() as usize;
+            for letter in b'a'..=b'z' {
+                if std::fs::read_dir(format!("/{}", letter as char)).is_ok() {
+                    reachable += 1;
+                }
+            }
+            if reachable > 0 {
+                return Verdict {
+                    action: Action::Block,
+                    payload_json: None,
+                    reason: Some(format!(
+                        "ambient fs leaked into the guest ({reachable} preopens reachable)"
+                    )),
                 };
             }
             return continue_();

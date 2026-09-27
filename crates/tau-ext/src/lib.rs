@@ -545,7 +545,7 @@ fn preopen_host_fs(ctx: &mut WasiCtxBuilder) {
         if std::path::Path::new(&drive).is_dir() {
             let _ = ctx.preopened_dir(
                 &drive,
-                format!("/{letter}"),
+                format!("/{}", letter as char),
                 wasmtime_wasi::FsPerms::ReadWrite,
             );
         }

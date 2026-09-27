@@ -63,3 +63,38 @@ async fn deny_wasi_hides_the_ambient_env_that_allow_all_exposes() {
     // SAFETY: same as above.
     unsafe { std::env::remove_var("TAU_AMBIENT") };
 }
+
+/// Regression: allow-all preopens must be reachable UNDER THE NAMES the
+/// contract promises (`/` on unix, `/<letter>` per drive on Windows).
+/// A host that pushed drive preopens under mangled guest names (a u8
+/// formatted as its decimal code — "/99" instead of "/c") passed every
+/// host-side check while guests saw a filesystem that existed but could
+/// not be spelled; this test fails on that host.
+#[tokio::test]
+async fn allow_all_preopens_are_reachable_under_contract_names() {
+    let Some(path) = artifact() else {
+        eprintln!("skipping: guard.wasm not built");
+        return;
+    };
+    let host = ExtensionHost::new();
+    let extension = host.load(&path).expect("load extension");
+    let (_tools, probes) = extension.into_parts();
+    let verdict = probes[0]
+        .probe(ProbePoint::BeforeTool, tool_payload("f1", "fscheck"))
+        .await;
+    assert!(
+        matches!(verdict, Verdict::Block { .. }),
+        "allow-all must expose at least one preopen at a contract name, got {verdict:?}"
+    );
+
+    let host = ExtensionHost::new().with_wasi_policy(WasiPolicy::DenyAll);
+    let extension = host.load(&path).expect("load extension");
+    let (_tools, probes) = extension.into_parts();
+    let verdict = probes[0]
+        .probe(ProbePoint::BeforeTool, tool_payload("f2", "fscheck"))
+        .await;
+    assert!(
+        matches!(verdict, Verdict::Continue),
+        "--deny-wasi must expose zero preopens, got {verdict:?}"
+    );
+}
