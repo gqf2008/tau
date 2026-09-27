@@ -11,7 +11,8 @@
 #
 # Environment contract (Windows: dirs::home_dir ignores HOME/USERPROFILE,
 # so ~/.tau is the REAL one): the script keygens one throwaway key,
-# records its fingerprint, and removes exactly that key + pub on exit.
+# records its fingerprint, and removes exactly that key + pub and the
+# blobs it seeded on exit (even on FAIL).
 # Nothing else in ~/.tau is touched; the consent store is not written.
 set -euo pipefail
 cd "$(dirname "$0")/.."
@@ -23,7 +24,7 @@ WORK="$ROOT/target/validate"
 MOCK_PID=""
 REG_PID=""
 OCI_BLOB=""
-GC_BLOB=""
+GC_SEEDS=""
 THROWAWAY_FP=""
 
 step() { echo; echo "== $1"; }
@@ -33,7 +34,7 @@ cleanup() {
     [ -n "$MOCK_PID" ] && kill "$MOCK_PID" 2>/dev/null || true
     [ -n "$REG_PID" ] && kill "$REG_PID" 2>/dev/null || true
     [ -n "$OCI_BLOB" ] && rm -f "$HOME/.tau/oci/blobs/$OCI_BLOB"
-    [ -n "$GC_BLOB" ] && rm -f "$HOME/.tau/blobs/$GC_BLOB"
+    for b in $GC_SEEDS; do rm -f "$HOME/.tau/blobs/$b"; done
     # Step 8 may have created the blob store; leave it only if it was
     # already there or something legitimately lives in it.
     rmdir --ignore-fail-on-non-empty "$HOME/.tau/blobs" 2> /dev/null || true
@@ -106,6 +107,13 @@ fi
 grep -q "not a signing fingerprint" sign-key.out \
     || fail "unexpected sign rejection: $(cat sign-key.out)"
 echo "ok — tau sign --key rejects non-fingerprint input"
+
+# A garbage pubkey must be refused as a bad KEY — the shared Malformed
+# variant used to misreport it as "not a wasm binary".
+OUT="$("$TAU" trust 'not-base64!!!' 2>&1 || true)"
+echo "$OUT" | grep -q "invalid public key" \
+    || fail "garbage pubkey error misleads: $OUT"
+echo "ok — garbage pubkey refused with a key-shaped message"
 
 # Tamper attacks on the signed component: however the bytes were corrupted
 # after signing, the default gate must refuse them.
@@ -585,6 +593,9 @@ COMPACT_HASH=$(echo "$HASHES" | cut -d' ' -f2)
 BRANCH_HASH=$(echo "$HASHES" | cut -d' ' -f3)
 ORPHAN_HASH=$(echo "$HASHES" | cut -d' ' -f4)
 ORPHAN_FILE="$HOME/.tau/blobs/$(echo "$ORPHAN_HASH" | tr ':' '_')"
+# Register all seeds with the exit trap: a FAIL mid-step must not
+# leave them squatting in the real store (they break the next run).
+GC_SEEDS=$(echo "$HASHES" | tr ':' '_')
 
 # a (active message, LIVE) → b (compaction summary, COMPACT) → d (head);
 # c hangs off a as an abandoned branch (BRANCH). The mark walks the
@@ -616,7 +627,29 @@ for hash in "$LIVE_HASH" "$COMPACT_HASH" "$BRANCH_HASH"; do
     rm -f "$f"
 done
 echo "ok — --yes frees exactly the orphan; active, compacted, and abandoned-branch blobs survive"
-GC_BLOB=""
+
+# A mistyped --session must not orphan live data: gc refuses missing
+# session files, even under --yes (it used to treat them as empty and
+# would have deleted every referenced blob).
+TYPO_HASH=$(python - << 'PYEOF'
+import hashlib, os, random
+random.seed()
+data = random.randbytes(1000)
+digest = "sha256:" + hashlib.sha256(data).hexdigest()
+with open(os.path.expanduser("~/.tau/blobs/" + digest.replace(":", "_")), "wb") as f:
+    f.write(data)
+print(digest)
+PYEOF
+)
+TYPO_FILE="$HOME/.tau/blobs/$(echo "$TYPO_HASH" | tr ':' '_')"
+GC_SEEDS="$GC_SEEDS $(echo "$TYPO_HASH" | tr ':' '_')"
+OUT="$("$TAU" gc --session does-not-exist.jsonl --yes 2>&1 || true)"
+echo "$OUT" | grep -q "session file not found" \
+    || fail "gc --yes accepted a missing session: $OUT"
+[ -f "$TYPO_FILE" ] || fail "gc --yes with a typo session deleted a blob"
+rm -f "$TYPO_FILE"
+echo "ok — gc refuses a missing session file, even under --yes"
+GC_SEEDS=""
 
 # --- step 9: compaction --------------------------------------------------
 step "9/11 compaction (summary entry; originals stay in the tree)"

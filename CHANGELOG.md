@@ -45,6 +45,9 @@ the extension unit instead of in-process scripts.
   digest-addressed cache that verifies hits and re-pulls a corrupted
   entry instead of handing bad bytes to the load path;
   signature/trust/consent apply to pulled bytes unchanged.
+  Registry calls carry connect and per-request total timeouts (tight
+  for manifest/token calls, generous for blob transfers) — a mute or
+  blackholed registry errors instead of hanging the CLI forever.
   The dist zip ships the example components unsigned (`release.sh`
   strips any local dev signature), so a first user meets the
   documented sign-and-trust onboarding, not a foreign key.
@@ -59,7 +62,10 @@ the extension unit instead of in-process scripts.
   image, audio, video, file), media >256KB externalized to a
   content-addressed blob store with `tau gc`. Blob writes are atomic
   and reads verify the hash: a corrupt blob degrades to a placeholder,
-  wrong bytes are never served to the model. Multi-MiB media crosses
+  wrong bytes are never served to the model. gc fails closed: a session
+  path that does not exist is an error, never an empty mark set — a
+  mistyped `--session` cannot orphan every live blob, even under
+  `--yes`. Multi-MiB media crosses
   the wasm boundary byte-for-byte — the guest reports the length and
   FNV-1a of the request it received and the host pins both against the
   string it sent, and a normal turn right after still works on the
@@ -85,21 +91,24 @@ full tour.
 
 `scripts/validate.sh` proves the release the way a first user meets it,
 in eleven steps: demo, the signing/trust chain (trusted load; untrusted,
-byte-flipped, signature-stripped, and corrupted-signature rejection),
+byte-flipped, signature-stripped, and corrupted-signature rejection; a
+garbage pubkey refused with a key-shaped message),
 all three built-in providers
 against a loopback mock, wasm-provider consent gate (a consent-escaping 302 is shown to the guest, never followed; userinfo/backslash URLs stay on the consented host while delimiter tricks and normalized twins are refused), multi-MiB media crossing the session→guest boundary whole, an unadvertised provider --model refused at load with the available ids named, MCP bridge spawn
 gate, remembered-consent lifecycle, credential delivery (the token
 reaches the origin through the guest; consent and session files never
 persist the secret; TAU_PROVIDER_AUTH flows only with the grant),
 OCI push/pull/trust onboarding,
-blob GC (the mark covers the whole session tree — active, compacted, and abandoned-branch references all keep their blobs), compaction (summary entry; originals stay; follow-ups run on
+blob GC (the mark covers the whole session tree — active, compacted, and abandoned-branch references all keep their blobs; a missing session file is refused even under --yes), compaction (summary entry; originals stay; follow-ups run on
 the compacted branch), torn-tail recovery, concurrent access, and
 probe verdicts (block, continue, and a trapped probe degrading without
 going dead), and the WASI sandbox boundary (ambient env visible by
 default, empty under --deny-wasi), and the interactive REPL over a
 real pty (banner, a full turn, /help, idle Ctrl-C, /quit, recall
 history) — restoring
-the environment exactly afterwards. 119 tests, clippy-clean across all
+the environment exactly afterwards, even when a step fails mid-run
+(seeded blobs are registered with the exit trap, never left squatting
+in the real store). 121 tests, clippy-clean across all
 workspaces.
 
 Performance baseline (docs/perf.md): extension load 202ms cold → 9ms

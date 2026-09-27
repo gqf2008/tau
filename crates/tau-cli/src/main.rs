@@ -261,6 +261,14 @@ async fn run_sub(sub: Sub) -> Result<()> {
             };
             let mut live = std::collections::HashSet::new();
             for path in &sessions {
+                // Fail closed: a missing session must not silently mark
+                // nothing — under --yes a mistyped path would delete
+                // every blob the real sessions still reference.
+                anyhow::ensure!(
+                    path.exists(),
+                    "session file not found: {} — gc marks live blobs from the sessions you list; a wrong path would orphan live blobs",
+                    path.display()
+                );
                 let store = tau_core::session::JsonlStore::open(path)
                     .with_context(|| format!("opening {}", path.display()))?;
                 live.extend(store.live_blob_hashes());

@@ -110,6 +110,11 @@ struct Registry {
     base: String,
     repo: String,
     token: Option<String>,
+    /// Total budget for manifest/token requests (small; a registry that
+    /// cannot answer these in time is dead).
+    small_total: std::time::Duration,
+    /// Total budget for blob transfers (bulk; slow links stay possible).
+    blob_total: std::time::Duration,
 }
 
 /// What came back from one request: Location (for upload sessions) and
@@ -121,6 +126,25 @@ struct Reply {
 
 impl Registry {
     fn new(oci_ref: &OciRef) -> Self {
+        // A registry that accepts but never answers (filtering drivers
+        // make loopback ports "open" on some machines) must not hang the
+        // CLI forever: bounded connect, bounded total per request —
+        // tight for the small manifest/token calls a dead registry dies
+        // on, generous for bulk blob transfers on slow links.
+        Self::with_timeouts(
+            oci_ref,
+            std::time::Duration::from_secs(10),
+            std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(600),
+        )
+    }
+
+    fn with_timeouts(
+        oci_ref: &OciRef,
+        connect: std::time::Duration,
+        small_total: std::time::Duration,
+        blob_total: std::time::Duration,
+    ) -> Self {
         // Loopback registries (local dev, tests) are plain http;
         // everything else is https-only.
         let scheme = if oci_ref.registry.starts_with("127.0.0.1")
@@ -132,10 +156,15 @@ impl Registry {
             "https"
         };
         Self {
-            client: reqwest::blocking::Client::new(),
+            client: reqwest::blocking::Client::builder()
+                .connect_timeout(connect)
+                .build()
+                .expect("static reqwest client config"),
             base: format!("{scheme}://{}", oci_ref.registry),
             repo: oci_ref.repo.clone(),
             token: None,
+            small_total,
+            blob_total,
         }
     }
 
@@ -178,6 +207,17 @@ impl Registry {
     ) -> Result<Reply, OciError> {
         let attempt = |token: Option<&str>| -> reqwest::Result<reqwest::blocking::Response> {
             let mut request = self.client.request(method.clone(), url);
+            // Bulk = anything carrying a body (blob PUTs) or downloading
+            // one (blob GETs). Everything else — manifest/token JSON and
+            // the (bodyless) upload-session POST — is small, and a dead
+            // registry dies on those within the small budget.
+            let bulk =
+                body.is_some() || (method == reqwest::Method::GET && url.contains("/blobs/"));
+            request = request.timeout(if bulk {
+                self.blob_total
+            } else {
+                self.small_total
+            });
             for (name, value) in headers {
                 request = request.header(*name, *value);
             }
@@ -453,6 +493,37 @@ fn challenge_param(challenge: &str, key: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A server that accepts but never answers must not hang the client
+    /// forever (filtering drivers make loopback ports "open" on some
+    /// machines; a mute registry is the same shape). The read timeout
+    /// turns the hang into an error.
+    #[test]
+    fn a_mute_registry_fails_within_the_read_timeout() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            for conn in listener.incoming() {
+                std::mem::forget(conn); // hold the socket, never answer
+            }
+        });
+        let reference = format!("oci://127.0.0.1:{port}/x/y:tag");
+        let mut registry = Registry::with_timeouts(
+            &parse(&reference).unwrap(),
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+            std::time::Duration::from_secs(1),
+        );
+        let url = format!("http://127.0.0.1:{port}/v2/x/y/manifests/tag");
+        let start = std::time::Instant::now();
+        let result = registry.get(&url, &[]);
+        let elapsed = start.elapsed();
+        assert!(result.is_err(), "mute registry answered?!");
+        assert!(
+            elapsed < std::time::Duration::from_secs(30),
+            "mute registry held the client {elapsed:?}"
+        );
+    }
 
     #[test]
     fn parses_references() {

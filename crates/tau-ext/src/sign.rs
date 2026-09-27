@@ -24,9 +24,12 @@ pub const SIGNATURE_SECTION: &str = "tau-signature";
 /// Failures signing, verifying, or trusting components.
 #[derive(Debug, Error)]
 pub enum SignError {
-    /// Input was not a parseable wasm binary, or key material was malformed.
+    /// Input was not a parseable wasm binary.
     #[error("not a wasm binary: {0}")]
     Malformed(String),
+    /// Key material handed over directly (a base64 pubkey) was malformed.
+    #[error("invalid public key: {0}")]
+    BadKey(String),
     /// The signature section's JSON did not parse.
     #[error("signature section is not valid json: {0}")]
     BadSignatureJson(String),
@@ -390,11 +393,11 @@ pub fn trust_key(pubkey_b64: &str) -> Result<String, SignError> {
 pub fn trust_key_in(dir: &Path, pubkey_b64: &str) -> Result<String, SignError> {
     let bytes: [u8; 32] = b64()
         .decode(pubkey_b64.trim())
-        .map_err(|e| SignError::Malformed(e.to_string()))?
+        .map_err(|e| SignError::BadKey(e.to_string()))?
         .as_slice()
         .try_into()
-        .map_err(|_| SignError::Malformed("pubkey must be 32 bytes".into()))?;
-    let key = VerifyingKey::from_bytes(&bytes).map_err(|e| SignError::Malformed(e.to_string()))?;
+        .map_err(|_| SignError::BadKey("pubkey must be 32 bytes".into()))?;
+    let key = VerifyingKey::from_bytes(&bytes).map_err(|e| SignError::BadKey(e.to_string()))?;
     let fp = fingerprint(&key);
     std::fs::create_dir_all(dir)?;
     std::fs::write(dir.join(format!("{fp}.pub")), pubkey_b64.trim())?;
@@ -433,6 +436,22 @@ pub fn sign_file(path: &Path, key: &SigningKey) -> Result<String, SignError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A garbage pubkey must be refused as a bad KEY — the shared
+    /// Malformed variant used to misreport it as "not a wasm binary".
+    #[test]
+    fn trust_key_rejects_garbage_with_a_key_shaped_message() {
+        let dir = std::env::temp_dir().join(format!("tau-badkey-{}", std::process::id()));
+        let err = trust_key_in(&dir, "not-base64!!!").unwrap_err();
+        let message = err.to_string();
+        assert!(message.contains("invalid public key"), "got: {message}");
+        assert!(!message.contains("wasm"), "misleading: {message}");
+
+        // Valid base64, wrong length.
+        let err = trust_key_in(&dir, "aGVsbG8=").unwrap_err();
+        assert!(err.to_string().contains("32 bytes"), "got: {err}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 
     /// Minimal valid module: magic + version + one custom section.
     fn tiny_module() -> Vec<u8> {
