@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # First-user validation: prove the release candidate works for someone
-# who just installed tau, in eleven steps — demo, the signing/trust chain
-# (incl. tamper rejection), all three built-in providers against a
+# who just installed tau, in eleven steps — demo, the built-in tools
+# (default set, off switch, no shell through --demo), the signing/trust
+# chain (incl. tamper rejection), all three built-in providers against a
 # loopback mock, the wasm provider consent gate, the MCP bridge spawn
 # gate, the remembered-consent lifecycle, OCI distribution, blob GC,
 # compaction, probe verdicts, and the interactive REPL over a real pty
@@ -134,6 +135,42 @@ step "1c/11 stream subscription (guest polls text deltas)"
 OUT="$("$TAU" --allow-unsigned -e "$STREAMER" --demo -p "hello" 2>&1)" || fail "streamer run: $OUT"
 echo "$OUT" | grep -qE "ext info: stream observed: [1-9][0-9]* text deltas" || fail "stream observation notice missing or empty: $OUT"
 echo "ok — guest polled the run's text deltas and reported them"
+
+# --- step 1d: built-in tools (docs/builtin-tools.md) ------------------
+step "1d/11 built-in tools (default set; a named one runs for real)"
+# The default set is every built-in this platform has, and the run says
+# which ones it registered — that line is the contract, and it is printed
+# even when the answer is "none" (1e).
+EXPECTED_TOOLS="bash, edit, find, grep, ls, read, write"
+case "$(uname -s)" in
+    MINGW* | MSYS* | CYGWIN*) EXPECTED_TOOLS="bash, edit, find, grep, ls, powershell, read, write" ;;
+esac
+OUT="$("$TAU" --demo -p "hello" 2>&1)" || fail "default run: $OUT"
+echo "$OUT" | grep -qxF "[tau] built-in tools: $EXPECTED_TOOLS" || fail "default built-in line: $OUT"
+# A named read-only built-in may be scripted by the demo, and the real
+# tool runs: what comes back is a directory listing, not a canned answer.
+OUT="$("$TAU" --tools ls --demo -p "." 2>&1)" || fail "tools ls run: $OUT"
+echo "$OUT" | grep -qxF "[tau] built-in tools: ls" || fail "selection line: $OUT"
+echo "$OUT" | grep -qF "tool ← ls: " || fail "ls never executed: $OUT"
+echo "ok — built-ins are on by default, and a named one really ran"
+
+# --- step 1e: built-in tools (off switch; --demo cannot run a shell) --
+step "1e/11 built-in tools (off switch; the demo cannot run a shell)"
+# --no-builtin-tools leaves the toolset to the components, and says so.
+OUT="$("$TAU" --no-builtin-tools --demo -p "hello" 2>&1)" || fail "no-builtin-tools run: $OUT"
+echo "$OUT" | grep -qxF "[tau] built-in tools: none" || fail "off switch line: $OUT"
+# --demo may never script a mutating built-in, even when named: `--tools
+# bash` puts bash in the registry, and the run still cannot write a file.
+rm -f marker.txt
+OUT="$("$TAU" --tools bash --demo -p "echo pwned > marker.txt" 2>&1)" || fail "tools bash run: $OUT"
+echo "$OUT" | grep -q "tau is alive" || fail "tools bash run lost its answer: $OUT"
+[ ! -f marker.txt ] || fail "--demo scripted a mutating built-in: marker.txt exists"
+# A name nothing answers to stops the run rather than shrinking the
+# toolset silently.
+if "$TAU" --tools nope --demo -p "hello" > /dev/null 2>&1; then
+    fail "--tools nope exited 0"
+fi
+echo "ok — the off switch works, the demo cannot run a shell, typos are fatal"
 
 # --- step 2: signing + trust chain ------------------------------------
 step "2/11 signing and trust chain"

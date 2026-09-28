@@ -121,10 +121,18 @@ impl BuiltinTools {
                 });
             }
         }
-        Ok(Self {
+        Ok(Self::selecting(cwd, names))
+    }
+
+    /// Exactly `names`, unchecked. The CLI uses this because `--tools` names
+    /// component tools as well (pi's flag picks from both), and those are
+    /// only known once the components have loaded — so the caller checks the
+    /// union itself, and a name that is no built-in registers nothing here.
+    pub fn selecting(cwd: impl Into<PathBuf>, names: &[String]) -> Self {
+        Self {
             cwd: cwd.into(),
             only: Some(names.iter().cloned().collect()),
-        })
+        }
     }
 
     /// The directory relative paths resolve against (the session's working

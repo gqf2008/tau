@@ -2,6 +2,7 @@
 //! answer to stdout, persist the session as JSONL. Interactive mode (no
 //! `-p` on a terminal): scrollback REPL — see `repl` module.
 
+use std::collections::BTreeSet;
 use std::path::PathBuf;
 
 use anyhow::{Context, Result};
@@ -52,6 +53,20 @@ struct Cli {
     /// Wasm extension to load; repeatable.
     #[arg(short = 'e', long = "extension")]
     extensions: Vec<PathBuf>,
+
+    /// Built-in tools to register, comma-separated — replaces the default
+    /// set, which is every built-in this platform has. A name may also be a
+    /// component tool (pi's flag picks from both), and a name nothing
+    /// answers to stops the run instead of quietly shrinking the toolset.
+    /// Unselected tools are never registered, so the model does not see
+    /// them.
+    #[arg(long, value_name = "LIST", conflicts_with = "no_builtin_tools")]
+    tools: Option<String>,
+
+    /// Register no built-in tools: the toolset is exactly what the loaded
+    /// components provide, and nothing reads, writes, or runs on its own.
+    #[arg(long)]
+    no_builtin_tools: bool,
 
     /// System prompt.
     #[arg(long)]
@@ -595,7 +610,47 @@ async fn main() -> Result<()> {
         }
     };
 
+    // One capture of the working directory for the whole run: every built-in
+    // resolves relative paths against it, and the session payload below
+    // reports the same value. A directory that cannot be read at startup is
+    // not worth failing over — absolute paths still work.
+    let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // `--tools` names built-ins *and* component tools (pi's semantics), and
+    // the components load below — so a name that is no built-in is not an
+    // error yet. Whatever it names that nothing provides is caught after the
+    // last component has registered.
+    let requested: Option<Vec<String>> = cli.tools.as_deref().map(|list| {
+        list.split(',')
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .map(str::to_string)
+            .collect()
+    });
+    let mut available: BTreeSet<String> =
+        tau_tools::names().into_iter().map(String::from).collect();
+
     let mut tools = ToolRegistry::new();
+    // Built-ins go in first: registration is last-wins, so a component
+    // shipping its own `read` shadows the built-in (pi's behaviour too).
+    let builtins = if cli.no_builtin_tools {
+        tau_tools::BuiltinTools::none(&cwd)
+    } else {
+        match &requested {
+            Some(names) => tau_tools::BuiltinTools::selecting(&cwd, names),
+            None => tau_tools::BuiltinTools::all(&cwd),
+        }
+    };
+    let registered = tau_tools::register(&mut tools, &builtins);
+    // Always printed, "none" included: a run says which built-in tools it
+    // has, and validate.sh asserts on this line.
+    eprintln!(
+        "[tau] built-in tools: {}",
+        if registered.is_empty() {
+            "none".to_string()
+        } else {
+            registered.join(", ")
+        }
+    );
     let mut probes = ProbeRegistry::new();
     let host = if cli.allow_unsigned {
         tau_ext::ExtensionHost::new()
@@ -621,7 +676,17 @@ async fn main() -> Result<()> {
         }
         let (ext_tools, ext_probes) = extension.into_parts();
         for tool in ext_tools {
-            eprintln!("[tau]   tool: {}", tool.def().name);
+            let name = tool.def().name;
+            available.insert(name.clone());
+            if let Some(names) = &requested
+                && !names.contains(&name)
+            {
+                // `--tools` replaced the selection: a component tool it did
+                // not name is loaded but not offered to the model.
+                eprintln!("[tau]   tool: {name} (not selected by --tools)");
+                continue;
+            }
+            eprintln!("[tau]   tool: {name}");
             tools.register(tool);
         }
         for probe in ext_probes {
@@ -698,7 +763,15 @@ async fn main() -> Result<()> {
         }
         let (bridge_tools, bridge_probes) = bridge.into_parts();
         for tool in bridge_tools {
-            eprintln!("[tau]   mcp tool: {}", tool.def().name);
+            let name = tool.def().name;
+            available.insert(name.clone());
+            if let Some(names) = &requested
+                && !names.contains(&name)
+            {
+                eprintln!("[tau]   mcp tool: {name} (not selected by --tools)");
+                continue;
+            }
+            eprintln!("[tau]   mcp tool: {name}");
             tools.register(tool);
         }
         // The IM outbound leg: bridge probes (after_response) register
@@ -715,6 +788,19 @@ async fn main() -> Result<()> {
                 ..tau_ext::consent::RememberedConsent::from(consent)
             },
         )?;
+    }
+
+    // Fail-closed on `--tools`: every name the user asked for has to exist
+    // this run, or the run does not start — a typo must not hand the model a
+    // smaller toolset than the user believes it has.
+    if let Some(names) = &requested {
+        for name in names {
+            anyhow::ensure!(
+                tools.get(name).is_some(),
+                "unknown tool: {name} (available: {})",
+                available.iter().cloned().collect::<Vec<_>>().join(", ")
+            );
+        }
     }
 
     let (model, model_label, mic_consent): (Box<dyn Model>, String, bool) = if cli.demo {
@@ -844,9 +930,7 @@ async fn main() -> Result<()> {
     // ignored by contract (observe-only).
     let session_payload = serde_json::json!({
         "session": cli.session.display().to_string(),
-        "cwd": std::env::current_dir()
-            .map(|p| p.display().to_string())
-            .unwrap_or_default(),
+        "cwd": cwd.display().to_string(),
         "model": model_label,
     });
     // Print mode: the renderer's receiver subscribes before the session
