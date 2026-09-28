@@ -82,6 +82,10 @@ IM 平台                    tau
      `read-body(handle, max, timeout-ms)` 与 `ws.recv` 同形（0 拒绝、
      超时显式 error），宿主两条单测（0 拒绝；静默对端在预算内返回且
      句柄可续读）+ validate.sh 静默路由腿。
+     **0.5.0 补齐同类面（wit-review F11）**：`http.request` 等响应头、
+     `ws.connect` 等握手也各带 `timeout-ms`（0 拒绝、无响应即显式
+     error）——IM 侧的现实是「连上了但平台不发帧/不回头」，与静默 SSE
+     同族。本仓四条 bridge 示例统一 30s（`NET_MS`）。
 2. **`ingress` 能力**（webhook 平台：WhatsApp/企微）：consent-gated
    端口监听，宿主按路由把请求体喂给对应组件（UX 明示
    「该组件要监听 :8080/im/whatsapp」）。宿主依然不懂任何 IM 协议。

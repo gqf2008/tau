@@ -2,7 +2,7 @@
 
 End-to-end: from an empty crate to a signed, distributed component. The
 contract is `wit/tau.wit` (versioned — the `package` line there is the
-authority, currently `tau:extension@0.4.0`); this guide
+authority, currently `tau:extension@0.5.0`); this guide
 walks the three worlds — `extension` (tools + probes), `provider`
 (models), `bridge` (external protocols) — using the shipped examples as
 reference implementations.
@@ -254,11 +254,13 @@ validate.sh step 11d.
 
 Since 0.3.0 the bridge world also imports `ws` — a WebSocket frame pipe
 for stream-mode protocols (IM long connections, docs/im-channels.md):
-`connect(url)` (origin allowlist shared with `http`; `--mcp-url` accepts
-ws(s) URLs), `send(handle, frame)`, `recv(handle, timeout-ms)` (the
-timeout is mandatory — a recv that can block forever hides a dead
-connection; the host pings every 30s and closes with a named reason
-after 60s of inbound silence), `close(handle)`. Handles are
+`connect(url, timeout-ms)` (origin allowlist shared with `http`;
+`--mcp-url` accepts ws(s) URLs; the budget bounds the TCP/TLS connect and
+the upgrade handshake — since 0.5.0), `send(handle, frame)`,
+`recv(handle, timeout-ms)` (both timeouts are mandatory — a recv or a
+handshake that can block forever hides a dead connection; the host pings
+every 30s and closes with a named reason after 60s of inbound silence),
+`close(handle)`. Handles are
 generation-fenced like `process`. Demo: `examples/ws-echo-bridge`.
 
 Also since 0.3.0 (the docs/im-channels.md contract amendment): bridges

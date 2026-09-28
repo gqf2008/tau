@@ -1,5 +1,67 @@
 # Changelog
 
+## [Unreleased]
+
+### Breaking — contract `tau:extension@0.5.0`: every wait on a peer gets a budget (wit-review F11)
+
+- Three host calls could block forever, each on a different peer shape, and
+  each now takes a `timeout-ms` like `http.read-body` and `ws.recv`:
+  - `http.request(method, url, headers, body, timeout-ms)` — the wait for
+    **response headers**. reqwest's blocking `timeout` runs until the
+    response body has finished, so it cannot bound this phase without also
+    cutting long SSE streams short; the host runs the send on a helper
+    thread and bounds the wait here instead. A peer that accepts the TCP
+    connection and then says nothing is indistinguishable from a dead one:
+    `err("http.request: no response headers within Nms")`.
+  - `ws.connect(url, timeout-ms)` — the **handshake**. `tungstenite::connect`
+    does TCP + TLS + the upgrade in one unbounded blocking call, and the
+    read tick is only set after it returns, so nothing else could have
+    bounded it. `err("ws.connect: no handshake within Nms")`.
+  - `process.read-stdout(handle, max, timeout-ms)` — the wait for **bytes**.
+    A child that is alive but silent used to park the host thread until it
+    exited; the timeout is neither EOF nor a dead handle
+    (`err("process.read-stdout: no bytes within Nms")`), so the guest can
+    retry or kill it.
+- 0 is refused in all three, naming the missing budget: "block forever is
+  not a contract". The budget belongs to the guest: the IM bridges pass 30s
+  (`NET_MS`), the MCP bridge 60s (shared with its body reads), the ws-echo
+  example 5s, and the demo HTTP provider reuses its `idle=<ms>` prompt token
+  so the gate can exercise a short budget instead of waiting out the
+  production one.
+- Landed with: seven host unit tests (0 refused at each of the three; a
+  silent loopback peer for the headers; a listener that never upgrades for
+  the handshake; a quiet child for the stdout read, plus one that speaks
+  late — the late bytes are still delivered after the timeout) and two
+  validate.sh legs (`/mute` route for the headers bound, a TCP listener that
+  never upgrades for the handshake bound).
+- Single source for the contract version: `tau-ext`'s `CONTRACT_VERSION`
+  now backs both load-error messages that name it (the extension version
+  hint and the bridge instantiation failure) and the comparison that
+  decides whether to add the hint, and a test asserts it equals the
+  `package` line in `wit/tau.wit` — the hint can no longer drift from the
+  contract it names.
+- Recorded, deliberately not in scope: `process.write-stdin` is the one
+  blocking host call left unbounded (wit-review F12), and it cannot take the
+  same shape — a write that times out may already have delivered part of the
+  data, so "retry the whole buffer" silently replays half a message. Fixing
+  it means a partial-write return (bytes written, guest-held offset), an
+  interface-shape change for a later round.
+
+### Docs — the current contract version is stated once per doc, at 0.5.0
+
+- `docs/architecture.md` §4.1, `docs/extensions.md`, `docs/host-channel.md`
+  and `docs/wasm-languages.md` (contract-history line) now name
+  `tau:extension@0.5.0`; `docs/bridges.md` and `docs/im-channels.md` state
+  the new bounds where they describe the capability; `docs/wit-review.md`
+  records F11 as landed and opens F12. The `media-tool` and `notifier`
+  example headers follow the contract they build against.
+- Re-verified this round: the six-language matrix in
+  `docs/wasm-languages.md` (C / C++ / Python / JS / TS / Go — Java has no
+  path) was rebuilt against 0.5.0 and all six pass the two-line acceptance.
+  A contract bump is exactly what invalidates that table, because the
+  version is part of every export name; `docs/release.md` now says so in
+  the pre-flight.
+
 ## [0.4.0] — 2026-09-28
 
 ### Breaking — contract `tau:extension@0.4.0`: `http.read-body` gains an idle budget (wit-review F9)

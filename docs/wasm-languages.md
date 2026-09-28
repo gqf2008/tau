@@ -5,11 +5,14 @@
 ——工具名 `upper`，把入参 `text` 转大写——用七种主流语言各写一个最小
 扩展，并用同一条验收命令**真加载**验证。
 
-契约版本 `tau:extension@0.4.0`（0.1.0 → 0.2.0：`hooks` 接口正名
+契约版本 `tau:extension@0.5.0`（0.1.0 → 0.2.0：`hooks` 接口正名
 `probes`，extension world 新增 `host` import；0.2.0 → 0.3.0：
 `tool-result.content` 从 `string` 改为 `list<result-block>`——
 工具可返回媒体块，见 docs/tool-media.md；0.3.0 → 0.4.0：
-`http.read-body` 增加 `timeout-ms` idle 预算，见 docs/bridges.md）。
+`http.read-body` 增加 `timeout-ms` idle 预算，见 docs/bridges.md；
+0.4.0 → 0.5.0：等待对端的每一处都设界——`http.request` 等响应头、
+`ws.connect` 等握手、`process.read-stdout` 等字节，各加 `timeout-ms`
+（0 拒绝），见 docs/bridges.md）。
 旧契约产物会被宿主
 点名拒载（版本错配写进 load 错误），重建即迁移。各语言的
 result-block 构造：C 填 tag+union，C++ 用 variant 转换构造
@@ -60,6 +63,19 @@ v0.3.0 的树上用当前工具链（wit-bindgen 0.62）重建，报同一个
 Go 按本节三个 env 重建通过（工具链沿用
 上一轮的安装；`tinygo`/`wasm-opt` 都不在 PATH 上，必须显式给）。
 产物尺寸为 0.4.0 实测，十进制（KB=10³ B、MB=10⁶ B）。
+
+**0.5.0 复验（2026-09-28）**：六格全部**重新构建**并跑上面两条验收
+命令，六格都出现两行 transcript，尺寸与本表一致（同日实测，十进制：
+C 7986 B / C++ 8598 B / py 18.47 MB / js 12.76 MB / ts 12.76 MB /
+go 3.32 MB）。C / C++ / Python / JS / TS 一次通过（C++ 上轮补的垫片
+仍在），Go 仍须显式给 `TINYGO`/`WASMOPT`/`ADAPTER`（沿用 %TEMP% 里
+上一轮的安装）。为什么必重建、而不是「0.4.0 也能跑」：契约版本写在
+每个**导出名**里（`tau:extension/tools@x.y.z`），宿主按名精确匹配，
+所以上一轮建的产物在这一轮必被拒载——**留一条反向实录**：用 0.4.0 的
+宿主加载本轮新建的 C 组件，报
+`component targets tau:extension@0.5.0; this host requires @0.4.0`。
+版本门禁两个方向都硬：新宿主拒绝旧组件，旧宿主同样拒绝新组件，
+「产物能跑」与「源码可重建」是两件事（见下）。
 
 ## C —— 零依赖 freestanding 路线
 

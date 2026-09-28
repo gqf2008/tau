@@ -73,11 +73,18 @@ world also imports `tau:extension/http`: a plain-data, handle-based interface
 same shape as `process` rather than `wasi:http` — the guest never touches
 pollables, and SSE responses are consumed incrementally and closed early once
 the JSON-RPC response arrives (the server may legally hold the stream open).
-Each `read-body` call carries its own idle budget (`timeout-ms`, 0 refused):
-a peer that goes quiet returns an explicit error instead of parking the host
-thread until exit, and the guest picks the budget — a long-poll that honestly
-waits longer passes a larger one, while a server holding a stream open must
-keep it fed (progress events or SSE keepalives) — wit-review F9.
+Every wait on a peer carries its own budget (`timeout-ms`, 0 refused), and
+the guest picks it. Each `read-body` call has its own idle budget: a peer
+that goes quiet returns an explicit error instead of parking the host thread
+until exit — a long-poll that honestly waits longer passes a larger one,
+while a server holding a stream open must keep it fed (progress events or
+SSE keepalives) — wit-review F9. `request` bounds the wait for **response
+headers** separately (0.5.0, wit-review F11), because a peer that accepts
+the TCP connection and then never answers is indistinguishable from a dead
+one; the headers budget is not derivable from the body's, and reqwest's
+blocking `timeout` covers the body too, so the host bounds the header wait
+itself. The same argument bounds the `ws.connect` handshake (im-channels.md
+`ws`).
 
 The host enforces the consent: an origin allowlist (`scheme://host[:port]`).
 Every request's origin is checked before sending; **redirects are never

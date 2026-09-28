@@ -162,13 +162,44 @@ idle 超时随 `tau:extension@0.4.0`（2026-09-28，owner 已裁定 A 的同一
   consent-escaping 302 实测；
 - 签名/信任全链 fail-closed（51 条断言覆盖）。
 
-### F11 [低·一致性] `process.read-stdout` 无 idle 超时（F9 同类面，本轮如实不扩范围）
+### F11 [低·一致性] `process.read-stdout` 无 idle 超时 —— 已落地（0.5.0，同批补齐等响应头/等握手）
 
 `http.read-body` 与 `ws.recv` 现在都有界，`process.read-stdout` 仍是
 「Blocks until at least one byte is available or the stream closes」——
 子进程挂死且不写 stdout 时，宿主线程同样会永久阻塞。F9 的设计文字只
 点名了 http，本轮按范围纪律不顺手改它。若要把「永不永阻」做成全能力
 不变量，下一批按同一形状补 `timeout-ms`（契约 0.5.0）。
+
+**已落地（2026-09-28，`tau:extension@0.5.0`）**：owner 开 0.5.0 轮并
+指定先做 F11，实施时按「等待对端的每一处都设界」把同类面一次收口，
+共三处签名加 `timeout-ms`——`process.read-stdout(handle, max,
+timeout-ms)`（等字节）、`http.request(…, timeout-ms)`（等响应头）、
+`ws.connect(url, timeout-ms)`（等握手）。三处都是 0 拒绝（理由：
+「block forever is not a contract」）+ 超时显式 error，句柄/子进程
+在超时后仍可用。**宿主实现各有各的形状**：reqwest 的阻塞 `timeout`
+是「直到响应体读完」的总超时，拿来界响应头会连带把长 SSE 截断，所以
+改成辅助线程 + `mpsc::recv_timeout` 只界头部（体仍归 `read-body` 的
+预算）；`tungstenite::connect` 把 TCP+TLS+upgrade 合成一次无界阻塞调用
+且读滴答要握手后才设得上，同样只能线程 + 通道界住。验收：宿主七条
+单测（三处 0 拒绝 + 静默对端等头 / 永不 upgrade 的监听 / 静默子进程，
+外加一条「超时后迟到的字节仍读得到」）+ validate.sh 两条腿（`/mute`
+路由等头超时、只 accept 不 upgrade 的监听握手超时）。
+
+### F12 [低·一致性] `process.write-stdin` 无界，但它不能照抄 F11 的形状 —— 已登记（下一批）
+
+F9/F11 之后，`write-stdin` 是唯一仍可能永久阻塞的宿主调用：子进程不读
+自己的 stdin 时，管道缓冲区写满即阻塞。**但它与那一类是不同型的问题**：
+`read-*`/`connect` 超时可以「放弃等待 + 显式 error」，客座重试仍然安全
+（没读到就没有副作用；`connect` 只是重开一条连接）；而一次 write 超时后
+可能**已经送进去一部分**，
+此时返回 error 会让客座重试整段数据，等于静默重放半条 JSON-RPC 消息
+——比挂起更糟。要正解就得先给契约加「部分写入」语义（`write-stdin`
+返回已写字节数，客座自持偏移续写），那是接口形状变更，不是加一个
+参数。故本轮如实登记为下一批候选，不在 0.5.0 顺手改。
+
+（`http.request` 不属于这一型：超时后「发出去了但不知道结果」是任何 HTTP
+客户端的固有性质，标准解法是幂等键或调用方判断，界本身仍是净收益——它不像
+write 那样把「重试安全」直接破坏掉，只是把「无限等」换成「确定的未知」。）
 
 ## 0.2.0 契约动作清单（从 findings 汇总）
 
@@ -183,10 +214,22 @@ idle 超时随 `tau:extension@0.4.0`（2026-09-28，owner 已裁定 A 的同一
 6. ~~F4~~：工具媒体结果——已落地（0.3.0：`tool-result.content` 收
    `list<result-block>`，非递归变体绕开 wasmtime bindgen 的递归类型
    拒编；provider 边非 image 媒体降级为占位符；旧 session 读兼容）。
-7. F9：ws 随 0.3.0、http idle 超时随 0.4.0 落地；遗留 F11
-   （process.read-stdout）如实登记。
+7. F9：ws 随 0.3.0、http idle 超时随 0.4.0 落地。F11 随 0.5.0 落地
+   （read-stdout + request 等头 + connect 等握手三处一次收口）；
+   新登记的 F12（write-stdin 无界）留待下一批——它需要部分写入语义，
+   不是加参数。
 
 ## 修订记录
+
+- 2026-09-28（0.5.0 批次**已落地**，本仓 main）：F11 收口为「等待对端的
+  每一处都设界」——`process.read-stdout` / `http.request` / `ws.connect`
+  三处签名加 `timeout-ms`（0 拒绝、超时显式 error、句柄与子进程在超时后
+  仍可用）；实现细节见 F11 段（等头与等握手只能靠辅助线程 + 通道，因为
+  reqwest 的阻塞 `timeout` 覆盖到响应体、tungstenite 的 connect 把
+  TCP+TLS+upgrade 合成一次调用）。同批把契约版本收成单一来源：
+  `tau-ext` 的 `CONTRACT_VERSION` 供 load 错误提示使用，并有测试断言它
+  等于 `wit/tau.wit` 的 `package` 行。新登记 F12（`write-stdin` 无界，
+  需部分写入语义，不是加参数）留待下一批。
 
 - 2026-09-27（评审后讨论）：**信封约定被推翻**。原约定「消息载荷一律
   JSON 信封」经质询后确认论证有误——pi 兼容约束的是 session 文件与

@@ -29,7 +29,7 @@ MIME 主类型即语义（image/* audio/* video/*，其余=file），不另立
 kind 枚举。
 
 下文片段记的是当时（0.2.0）的形状；现行契约以 `wit/tau.wit` 的
-`package` 行为准（当前 `tau:extension@0.4.0`）。
+`package` 行为准（当前 `tau:extension@0.5.0`）。
 
 ```wit
 package tau:extension@0.2.0;

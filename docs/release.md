@@ -6,7 +6,9 @@ version` in the root `Cargo.toml`). Bump it once, then also bump the
 `crates/*/Cargo.toml` (tau-core/tau-openai/tau-anthropic/tau-ext edges) —
 cargo refuses to resolve otherwise. `cargo check --workspace` then
 refreshes the lockfile.
-0.x semantics: any minor bump may break.
+0.x semantics: any minor bump may break. The same commit renames
+`CHANGELOG.md`'s `## [Unreleased]` heading to `## [x.y.z] — <date>` (work lands under
+`[Unreleased]`; only the cut stamps it).
 
 Publish order (each depends on the previous being live on crates.io):
 
@@ -54,6 +56,14 @@ unconditionally at its own step, because an existence guard there used to
 reuse the previous contract's artifact. So on a contract bump run
 validate.sh first and `cargo test` second; the 0.4.0 bump hit exactly this
 with `echo-provider` and `bad-schema`.
+
+**Contract bumps also invalidate the language matrix.** The contract version
+is part of every export name (`tau:extension/tools@x.y.z`), so the components
+in `docs/wasm-languages.md` are refused by the next host until they are built
+against the new WIT — and each cell's ✅ only ever testifies to the round that
+rebuilt it. Rebuild all six cells (the table lists the commands; C++ and Go
+need the shims/env named in their sections) and re-run the two-line
+acceptance before trusting the table.
 
 ## Package checks
 
