@@ -23,7 +23,8 @@
 //! runtime.block_on(async {
 //!     // FauxModel is the scripted stand-in — no API key needed; swap in
 //!     // tau_openai / tau_anthropic / a wasm provider for a real model.
-//!     let agent = Agent::new(Box::new(FauxModel::demo()), ToolRegistry::new());
+//!     // `None` = script no tool call (belt and braces: the registry is empty).
+//!     let agent = Agent::new(Box::new(FauxModel::demo(None)), ToolRegistry::new());
 //!     let produced = agent
 //!         .run(&[], Message::user("hello"))
 //!         .await

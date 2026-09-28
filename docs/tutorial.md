@@ -175,10 +175,12 @@ tau is alive. The tool answered: 6 words, 32 characters. (faux model — set ANT
 ```
 
 What just happened: the load line and the `tool:` line are the host reading
-your `definitions()`; `--demo` is a scripted model that calls the **first**
-tool once, filling required string parameters with your prompt text (numbers
-with `1`, booleans with `true`; other required shapes skip the call), then
-answers in prose. It is deterministic and offline, which is why it is the
+your `definitions()`; `--demo` is a scripted model that calls **the tool the
+run picked** once, filling required string parameters with your prompt text
+(numbers with `1`, booleans with `true`; other required shapes skip the
+call), then answers in prose. The pick is the run's own tool set: a tool you
+load with `-e` — `wordcount` above — takes the slot, and a run with no such
+tool scripts nothing at all. It is deterministic and offline, which is why it is the
 right way to test a component — `docs/extensions.md` §9's checklist is about
 the real model, this is about your code.
 

@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Changed
+
+- `--demo` scripts **the tool the run picked**, not the alphabetically
+  first one. The pick comes from `Tool::demo_tier` +
+  `ToolRegistry::demo_pick` (lowest tier, then first name) and is resolved
+  by name against the request: a pick the request does not advertise
+  scripts nothing (the old `first()` fallback is gone), and a tool can opt
+  out of the demo entirely with a `None` tier. `docs/tutorial.md` and
+  `docs/bridges.md` carry the new rule.
+
 ### Fixed
 
 - `tau sign` reported signing-key failures as `not a wasm binary`: a

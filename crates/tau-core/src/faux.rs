@@ -14,6 +14,9 @@ use crate::model::{Model, ModelEvent, RealtimeConfig, RealtimeSession, Request, 
 pub struct FauxModel {
     rounds: Mutex<Vec<Vec<ModelEvent>>>,
     demo: std::sync::atomic::AtomicBool,
+    /// The one tool the demo script may call, resolved from the registry by
+    /// [`crate::tool::ToolRegistry::demo_pick`]. `None` = script no call.
+    demo_pick: Option<String>,
 }
 
 impl FauxModel {
@@ -22,20 +25,30 @@ impl FauxModel {
         Self {
             rounds: Mutex::new(rounds),
             demo: std::sync::atomic::AtomicBool::new(false),
+            demo_pick: None,
         }
     }
 
     /// Demo mode: exercises the tool loop when tools are registered.
-    /// First model call of a run (tools present, no tool result in the
-    /// history yet) emits one call to the first tool — required string
-    /// parameters are filled with the last user text, numbers with 1,
-    /// booleans with true; required parameters of other shapes skip the
-    /// call. The follow-up call (tool result present) answers plain text.
-    /// Deterministic, offline, and makes `--demo -e tool.wasm` real.
-    pub fn demo() -> Self {
-        let model = Self::scripted(vec![]); // rounds unused; stream() synthesizes
-        model.demo.store(true, std::sync::atomic::Ordering::Relaxed);
-        model
+    /// First model call of a run (the picked tool is advertised, no tool
+    /// result in the history yet) emits one call to `pick` — required
+    /// string parameters are filled with the last user text, numbers with
+    /// 1, booleans with true; required parameters of other shapes skip the
+    /// call, as does a `pick` the request does not advertise. The follow-up
+    /// call (tool result present) answers plain text. Deterministic,
+    /// offline, and makes `--demo -e tool.wasm` real.
+    ///
+    /// `pick` is [`crate::tool::ToolRegistry::demo_pick`]: with built-ins on
+    /// by default that is `None` (they return `None`/`DEMO_USER_NAMED`
+    /// tiers), so `tau --demo` still answers plain text, and only a tool the
+    /// user put in the run — an `-e` component, or a built-in named with
+    /// `--tools` — is scripted.
+    pub fn demo(pick: Option<String>) -> Self {
+        Self {
+            rounds: Mutex::new(vec![]), // unused; stream() synthesizes
+            demo: std::sync::atomic::AtomicBool::new(true),
+            demo_pick: pick,
+        }
     }
 
     /// One round of plain text, for demos.
@@ -175,7 +188,7 @@ impl Model for FauxModel {
     async fn stream(&self, req: &Request) -> BoxStream<'static, ModelEvent> {
         // Demo rounds are synthesized from the request, not scripted.
         if self.demo.load(std::sync::atomic::Ordering::Relaxed) {
-            return stream::iter(demo_round(req)).boxed();
+            return stream::iter(demo_round(req, self.demo_pick.as_deref())).boxed();
         }
         // The Model contract forbids panicking: once the script is
         // exhausted (interactive demo use runs past it), answer with a
@@ -203,8 +216,9 @@ impl Model for FauxModel {
 }
 
 /// One synthesized demo round: a scripted tool call when the run has
-/// not seen a tool result yet, else the plain alive-text answer.
-fn demo_round(req: &Request) -> Vec<ModelEvent> {
+/// not seen a tool result yet, else the plain alive-text answer. `pick`
+/// is the one tool the script may call ([`ToolRegistry::demo_pick`]).
+fn demo_round(req: &Request, pick: Option<&str>) -> Vec<ModelEvent> {
     use crate::model::StopReason;
     use crate::types::{Content, MediaSource, Role};
 
@@ -254,7 +268,7 @@ fn demo_round(req: &Request) -> Vec<ModelEvent> {
             .iter()
             .any(|c| matches!(c, Content::ToolResult { .. }))
     });
-    if !answered && let Some(call) = demo_tool_call(req) {
+    if !answered && let Some(call) = demo_tool_call(req, pick) {
         return vec![
             ModelEvent::ToolCallDelta {
                 index: 0,
@@ -303,12 +317,15 @@ fn demo_round(req: &Request) -> Vec<ModelEvent> {
     ]
 }
 
-/// Build one deterministic tool call from the first tool's schema:
+/// Build one deterministic tool call from the picked tool's schema:
 /// required strings get the last user text, numbers 1, booleans true;
-/// anything else unfillable skips the call (None).
-fn demo_tool_call(req: &Request) -> Option<(String, String, String)> {
+/// anything else unfillable skips the call (None). The pick is a NAME and
+/// is looked up in the request — a pick the request does not advertise
+/// scripts nothing (fail-closed: no `first()` fallback, so an unwelcome
+/// tool can never be called by accident).
+fn demo_tool_call(req: &Request, pick: Option<&str>) -> Option<(String, String, String)> {
     use crate::types::Content;
-    let tool = req.tools.first()?;
+    let tool = req.tools.iter().find(|t| Some(t.name.as_str()) == pick)?;
     let prompt = req
         .messages
         .iter()
@@ -359,12 +376,12 @@ mod realtime_tests {
     #[test]
     fn realtime_capability_is_demo_only() {
         assert!(FauxModel::echo().realtime(config()).is_none());
-        assert!(FauxModel::demo().realtime(config()).is_some());
+        assert!(FauxModel::demo(None).realtime(config()).is_some());
     }
 
     #[tokio::test]
     async fn faux_realtime_vad_echo_and_close_script() {
-        let mut session = FauxModel::demo().realtime(config()).unwrap();
+        let mut session = FauxModel::demo(None).realtime(config()).unwrap();
         let mut events = session.events();
         session.push_audio(vec![1, 2, 3, 4]).await.unwrap();
         session.push_audio(vec![5, 6]).await.unwrap();
@@ -463,7 +480,7 @@ mod realtime_tests {
 
     #[tokio::test]
     async fn closed_session_refuses_chunks_at_the_door() {
-        let mut session = FauxModel::demo().realtime(config()).unwrap();
+        let mut session = FauxModel::demo(None).realtime(config()).unwrap();
         session.close().await.unwrap();
         assert!(session.push_audio(vec![1]).await.is_err());
         assert!(session.interrupt().await.is_err());
@@ -543,10 +560,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn demo_calls_the_first_tool_then_answers() {
+    async fn demo_calls_the_picked_tool_then_answers() {
         use crate::model::StopReason;
         use crate::tool::ToolDef;
-        let model = FauxModel::demo();
+        let model = FauxModel::demo(Some("upper".into()));
         let tool = ToolDef {
             name: "upper".into(),
             description: "shout".into(),
@@ -618,6 +635,82 @@ mod tests {
                 stop: StopReason::Stop
             })
         ));
+    }
+
+    fn one_tool(name: &str) -> crate::tool::ToolDef {
+        crate::tool::ToolDef {
+            name: name.into(),
+            description: "stub".into(),
+            parameters: serde_json::json!({
+                "type": "object",
+                "properties": { "text": { "type": "string" } },
+                "required": ["text"],
+            }),
+        }
+    }
+
+    fn request_with(tools: Vec<crate::tool::ToolDef>) -> Request {
+        Request {
+            system: None,
+            messages: vec![crate::Message::user("say hi")],
+            tools,
+        }
+    }
+
+    fn tool_calls(events: &[ModelEvent]) -> Vec<String> {
+        events
+            .iter()
+            .filter_map(|e| match e {
+                ModelEvent::ToolCallDelta { name, .. } => name.clone(),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn demo_without_a_pick_scripts_nothing() {
+        // The default-on built-ins return None/DEMO_USER_NAMED, so a plain
+        // `tau --demo` resolves to no pick: text only, no tool call.
+        let model = FauxModel::demo(None);
+        let events: Vec<_> = model
+            .stream(&request_with(vec![one_tool("bash")]))
+            .await
+            .collect()
+            .await;
+        assert!(tool_calls(&events).is_empty(), "{events:?}");
+        let answer: String = events
+            .iter()
+            .filter_map(|e| match e {
+                ModelEvent::TextDelta { text } => Some(text.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(answer.starts_with("tau is alive."), "{answer}");
+    }
+
+    #[tokio::test]
+    async fn demo_pick_absent_from_the_request_scripts_nothing() {
+        // Fail-closed: the pick is looked up by name, with no `first()`
+        // fallback — a pick the request does not advertise is a no-op.
+        let model = FauxModel::demo(Some("ghost".into()));
+        let events: Vec<_> = model
+            .stream(&request_with(vec![one_tool("bash")]))
+            .await
+            .collect()
+            .await;
+        assert!(tool_calls(&events).is_empty(), "{events:?}");
+    }
+
+    #[tokio::test]
+    async fn demo_picks_by_name_not_by_registry_order() {
+        // "aaa" sorts first; the pick names "zzz" and must win.
+        let model = FauxModel::demo(Some("zzz".into()));
+        let events: Vec<_> = model
+            .stream(&request_with(vec![one_tool("aaa"), one_tool("zzz")]))
+            .await
+            .collect()
+            .await;
+        assert_eq!(tool_calls(&events), vec!["zzz".to_string()]);
     }
 
     #[tokio::test]

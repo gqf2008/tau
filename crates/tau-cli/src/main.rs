@@ -720,7 +720,11 @@ async fn main() -> Result<()> {
     let (model, model_label, mic_consent): (Box<dyn Model>, String, bool) = if cli.demo {
         // Host doctrine: the CLI on an explicit user command holds the
         // user's authority (same as /mic) — no device consent category.
-        (Box::new(FauxModel::demo()), "demo".into(), true)
+        (
+            Box::new(FauxModel::demo(tools.demo_pick())),
+            "demo".into(),
+            true,
+        )
     } else if let Some(raw) = &cli.provider_wasm {
         let path = &resolve_component(raw).await?;
         let name = cli

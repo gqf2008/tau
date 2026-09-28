@@ -174,7 +174,9 @@ CLI subcommand → result back into the session. `walgit mcp` reads its
 usual config (`~/.walgit/walgit.toml`), so `repo_*` tools operate on the
 configured bucket directly.
 
-Two demo notes: the registry hands tools to the model sorted by name, so
-the faux demo model's "first tool" is `ci_status`; and `--repo` defaults
+Two demo notes: the demo scripts exactly one tool per run — the lowest tier
+present, then the alphabetically first name — and a bridge's tools are
+user-loaded, so the pick here is `ci_status` (with no `-e` there would be
+nothing to script); and `--repo` defaults
 to the cwd — run from a git checkout (or pass one) for the `collab_*` /
 `ci_status` tools, while `repo_list` works anywhere.
