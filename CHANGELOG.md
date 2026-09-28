@@ -2,6 +2,42 @@
 
 ## [Unreleased]
 
+### Breaking — contract `tau:extension@0.6.0`: `write-stdin` takes a budget and says how much it took (wit-review F12)
+
+- `process.write-stdin(handle, data, timeout-ms) -> result<u32, string>`:
+  the last host call that could block forever has a bound now, and it is not
+  the shape the reads took. A write that times out may already have delivered
+  part of its buffer, so "return an error and let the guest retry" would
+  silently replay half a JSON-RPC message — worse than a hang. The count
+  returned is what the host **took**: those bytes are handed to the child in
+  order and belong to the host from that moment, so the guest resumes at
+  `data[taken..]` and never resends. A short count is normal, `0` means the
+  child took nothing within the budget, and a hard error means no more can
+  ever be taken (stdin closed, or the child is gone). `timeout-ms` is
+  refused at 0 like every other budget here.
+- Host side: each child gets a writer thread that owns its end of the pipe
+  plus a bounded buffer (64 KiB, queued in 8 KiB chunks), so a child that
+  stops reading costs one buffer, never a parked host thread. The
+  taken/delivered counters live in the host; the guest holds the offset.
+- Guest side: `examples/mcp-bridge` sends in offsets and fails by name —
+  "server took nothing from stdin in 3 budgets of 3000ms — is it reading?"
+  — instead of waiting forever, and bytes the server has not read yet are
+  still delivered in order afterwards.
+- Landed with: five host unit tests (`0` refused; a small message handed
+  over without waiting; a child that never reads bounded, remainder left to
+  the caller; what was taken really does reach a child that reads late; a
+  dead child's stdin is an error, not a `0`) and one validate.sh leg — a
+  request inflated past the host's buffer (`TAU_MCP_PAD`) against a
+  `--mute-stdin` server must surface as the named stall.
+- Docs: `docs/bridges.md` states the write path's shape, `docs/wit-review.md`
+  closes F12 — its last open finding — and the contract-version references in
+  `docs/extensions.md`, `docs/architecture.md`, `docs/host-channel.md` and
+  `docs/wasm-languages.md` move to 0.6.0. The six-language matrix was
+  rebuilt and re-accepted (all six cells: two-line transcript each, sizes
+  unchanged); the round touches only the `bridge` world, so that rebuild is
+  the version gate's doing — every import/export name carries the contract
+  version — not a semantic change for those cells.
+
 ### Docs — the post-publish check is a recipe now, not a sentence
 
 - `docs/release.md`'s post-publish block spells out the stranger test the

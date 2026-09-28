@@ -13,7 +13,7 @@
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::path::Path;
-use std::process::{Child, ChildStdin, Command, Stdio};
+use std::process::{Child, Command, Stdio};
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
@@ -62,14 +62,62 @@ impl WasiView for BridgeState {
     }
 }
 
+/// How much undelivered stdin data the host holds for one child: one pipe
+/// buffer's worth. A guest that writes faster than the child reads gets a
+/// short count instead of unbounded host memory, and a child that has
+/// stopped reading is noticed within a buffer (wit-review F12).
+const STDIN_BUFFER_CAP: usize = 64 * 1024;
+
+/// Chunks handed to the writer thread never exceed this, so the host can see
+/// the pipe draining in steps instead of one all-or-nothing write.
+const STDIN_CHUNK: usize = 8 * 1024;
+
+/// What the writer thread reports after each chunk it hands to the pipe.
+enum WriteReport {
+    /// `n` bytes made it into the pipe.
+    Delivered(usize),
+    /// Nothing more can be delivered; the text says why.
+    Broken(String),
+}
+
 /// One spawned child: piped stdin, stdout drained by a reader thread into a
-/// channel so `read-stdout` never blocks the wasm engine on a raw pipe.
+/// channel so `read-stdout` never blocks the wasm engine on a raw pipe, and
+/// stdin fed by a writer thread so `write-stdin` never does either. Taken
+/// bytes are the host's from the moment the count is returned (wit-review
+/// F12), which is why the counters live here and not in the guest.
 struct ChildProcess {
     child: Child,
-    stdin: ChildStdin,
+    /// Chunks queued for the writer thread, in order.
+    stdin_tx: std::sync::mpsc::Sender<Vec<u8>>,
+    /// Progress and failure reports from the writer thread.
+    stdin_reports: std::sync::mpsc::Receiver<WriteReport>,
+    /// Bytes handed to the pipe so far (the sum of the delivered reports).
+    stdin_delivered: u64,
+    /// Bytes accepted from the guest so far.
+    stdin_taken: u64,
+    /// Set once the child's stdin is known to be gone.
+    stdin_broken: Option<String>,
     rx: std::sync::mpsc::Receiver<std::io::Result<Vec<u8>>>,
     pending: VecDeque<u8>,
     eof: bool,
+}
+
+impl ChildProcess {
+    /// Fold every pending writer report into the counters. One report per
+    /// chunk, so this is cheap; a report left unread would only make the host
+    /// take fewer bytes than it could, never more.
+    fn drain_stdin_reports(&mut self) {
+        loop {
+            match self.stdin_reports.try_recv() {
+                Ok(WriteReport::Delivered(n)) => self.stdin_delivered += n as u64,
+                Ok(WriteReport::Broken(why)) => {
+                    self.stdin_broken.get_or_insert(why);
+                }
+                Err(_) => break,
+            }
+        }
+    }
+
 }
 
 /// Handles pack a generation in the high 32 bits: the factory bumps the
@@ -102,7 +150,7 @@ impl ProcessRegistry {
             .stderr(Stdio::inherit())
             .spawn()
             .map_err(|e| format!("spawn {}: {e}", program))?;
-        let stdin = child.stdin.take().ok_or("spawn: no stdin pipe")?;
+        let mut stdin = child.stdin.take().ok_or("spawn: no stdin pipe")?;
         let mut stdout = child.stdout.take().ok_or("spawn: no stdout pipe")?;
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
@@ -122,13 +170,40 @@ impl ProcessRegistry {
                 }
             }
         });
+        // stdin gets the mirror treatment (wit-review F12): a thread of its
+        // own writes the pipe, so a child that has stopped reading can never
+        // park the host. The guest is answered with how many bytes the host
+        // took, and those bytes are the host's to deliver.
+        let (stdin_tx, stdin_rx) = std::sync::mpsc::channel::<Vec<u8>>();
+        let (report_tx, stdin_reports) = std::sync::mpsc::channel::<WriteReport>();
+        std::thread::spawn(move || {
+            while let Ok(chunk) = stdin_rx.recv() {
+                match stdin.write_all(&chunk).and_then(|()| stdin.flush()) {
+                    Ok(()) => {
+                        if report_tx.send(WriteReport::Delivered(chunk.len())).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) => {
+                        let _ = report_tx.send(WriteReport::Broken(format!(
+                            "the child's stdin is closed ({e})"
+                        )));
+                        break;
+                    }
+                }
+            }
+        });
         let handle = ((self.generation as u64) << 32) | (self.next as u64);
         self.next += 1;
         self.children.insert(
             handle,
             ChildProcess {
                 child,
-                stdin,
+                stdin_tx,
+                stdin_reports,
+                stdin_delivered: 0,
+                stdin_taken: 0,
+                stdin_broken: None,
                 rx,
                 pending: VecDeque::new(),
                 eof: false,
@@ -187,6 +262,80 @@ impl ProcessRegistry {
         let take = child.pending.len().min(max);
         let bytes: Vec<u8> = child.pending.drain(..take).collect();
         Ok((bytes, child.eof && child.pending.is_empty()))
+    }
+
+    /// Take up to `data.len()` bytes from the guest, waiting at most
+    /// `timeout_ms` for room in the buffer. The count returned is what the
+    /// host **took**: those bytes are queued in order and the host owns them
+    /// from that moment, so a short count is not an error and the caller
+    /// resumes at `data[taken..]` (wit-review F12). A blocking write that
+    /// timed out could never report an honest count — bytes already in the
+    /// pipe cannot be taken back — which is why the guest-facing shape counts
+    /// bytes taken rather than bytes delivered.
+    fn write_stdin(&mut self, handle: u64, data: &[u8], timeout_ms: u32) -> Result<u32, String> {
+        if timeout_ms == 0 {
+            return Err(
+                "process.write-stdin: timeout-ms must be > 0 — a write that can block forever hides a dead child (wit-review F12)"
+                    .into(),
+            );
+        }
+        let child = self.get(handle)?;
+        child.drain_stdin_reports();
+        if let Some(reason) = child.stdin_broken.clone() {
+            return Err(format!("process.write-stdin: {reason}"));
+        }
+        let deadline =
+            std::time::Instant::now() + std::time::Duration::from_millis(u64::from(timeout_ms));
+        let mut taken = 0usize;
+        while taken < data.len() {
+            let outstanding = child.stdin_taken.saturating_sub(child.stdin_delivered);
+            let free = (STDIN_BUFFER_CAP as u64).saturating_sub(outstanding) as usize;
+            if free == 0 {
+                // A cap's worth of bytes is already undelivered. Wait for room
+                // — but only up to the budget: taking bytes we cannot hand
+                // over would be a lie about progress.
+                let Some(remaining) = deadline.checked_duration_since(std::time::Instant::now())
+                else {
+                    break;
+                };
+                match child.stdin_reports.recv_timeout(remaining) {
+                    Ok(WriteReport::Delivered(n)) => {
+                        child.stdin_delivered += n as u64;
+                        continue;
+                    }
+                    Ok(WriteReport::Broken(why)) => {
+                        child.stdin_broken = Some(why);
+                        break;
+                    }
+                    Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+                    Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
+                        child.stdin_broken = Some("the child's stdin is closed".into());
+                        break;
+                    }
+                }
+            }
+            let n = free.min(data.len() - taken).min(STDIN_CHUNK);
+            if child.stdin_tx.send(data[taken..taken + n].to_vec()).is_err() {
+                // The writer thread is gone: the pipe is closed, and this is
+                // not a "try again later".
+                child.stdin_broken = Some("the child's stdin is closed".into());
+                break;
+            }
+            child.stdin_taken += n as u64;
+            taken += n;
+        }
+        if taken > 0 {
+            // A short count is the normal outcome on a busy child; the guest
+            // resumes from the offset it left off at.
+            return Ok(taken.min(u32::MAX as usize) as u32);
+        }
+        if let Some(reason) = child.stdin_broken.clone() {
+            return Err(format!("process.write-stdin: {reason}"));
+        }
+        // Nothing fit and nothing is broken: the child took nothing within the
+        // budget. The message is intact — the caller decides whether to retry,
+        // hold it back, or kill the child.
+        Ok(0)
     }
 }
 
@@ -407,13 +556,8 @@ impl bridge_bindings::tau::extension::process::Host for BridgeState {
         self.processes.spawn(&argv)
     }
 
-    fn write_stdin(&mut self, handle: u64, data: Vec<u8>) -> Result<(), String> {
-        let child = self.processes.get(handle)?;
-        child
-            .stdin
-            .write_all(&data)
-            .and_then(|()| child.stdin.flush())
-            .map_err(|e| format!("write-stdin: {e}"))
+    fn write_stdin(&mut self, handle: u64, data: Vec<u8>, timeout_ms: u32) -> Result<u32, String> {
+        self.processes.write_stdin(handle, &data, timeout_ms)
     }
 
     fn read_stdout(
@@ -958,5 +1102,172 @@ mod tests {
             "late",
             "the retry lost the bytes"
         );
+    }
+
+    /// A child that reads stdin and echoes it — the write path's counterpart
+    /// to `late_child_argv`. It stays quiet for ~1s first, so the test can
+    /// hand it bytes before it ever looks at the pipe: exactly the case the
+    /// host must still account for. `more` echoes line by line; `findstr`,
+    /// the obvious alternative, buffers to 4 KiB and would read as mute.
+    fn echo_child_argv() -> Vec<String> {
+        #[cfg(windows)]
+        {
+            vec![
+                "cmd".into(),
+                "/c".into(),
+                "ping -n 2 127.0.0.1 >nul & more".into(),
+            ]
+        }
+        #[cfg(not(windows))]
+        {
+            vec!["sh".into(), "-c".into(), "sleep 1; cat".into()]
+        }
+    }
+
+    /// A child that exits at once: its stdin is closed while the handle is
+    /// still known to the host.
+    fn exiting_child_argv() -> Vec<String> {
+        #[cfg(windows)]
+        {
+            vec!["cmd".into(), "/c".into(), "exit".into()]
+        }
+        #[cfg(not(windows))]
+        {
+            vec!["true".into()]
+        }
+    }
+
+    #[test]
+    fn write_stdin_rejects_zero_timeout() {
+        // 0 would mean "wait however long the child takes" — refused before
+        // the handle is even looked up (the same shape as the reads).
+        let mut registry = ProcessRegistry::new(1);
+        let err = registry.write_stdin(7, b"hi", 0).unwrap_err();
+        assert!(err.contains("must be > 0"), "unexpected error: {err}");
+        assert!(err.contains("block forever"), "reason missing: {err}");
+    }
+
+    #[test]
+    fn write_stdin_takes_everything_the_buffer_holds() {
+        // Under the cap the call is a hand-over, not a wait: the bytes are the
+        // host's and the guest advances its whole offset. A child that never
+        // reads must not change that.
+        let mut registry = ProcessRegistry::new(1);
+        let argv = quiet_child_argv();
+        let handle = registry.spawn(&argv).expect("spawn quiet child");
+        let data = vec![b'x'; 4096];
+        let started = std::time::Instant::now();
+        let taken = registry
+            .write_stdin(handle, &data, 300)
+            .expect("small write");
+        assert_eq!(taken as usize, data.len(), "a small message was cut short");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(300),
+            "a hand-over waited: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn write_stdin_bounds_a_child_that_never_reads() {
+        // Before F12 this call parked the host until the child drained the
+        // pipe: a server that never reads its stdin hung the whole run. The
+        // host now takes what it can hold and says so, and the rest stays the
+        // guest's to resend. The final 0 is the caller's cue — the host never
+        // claims progress it did not take.
+        let mut registry = ProcessRegistry::new(1);
+        let argv = quiet_child_argv();
+        let handle = registry.spawn(&argv).expect("spawn quiet child");
+        let data = vec![b'x'; STDIN_BUFFER_CAP + 128 * 1024];
+        let started = std::time::Instant::now();
+        let mut sent = 0usize;
+        let mut calls = 0;
+        loop {
+            match registry.write_stdin(handle, &data[sent..], 300) {
+                Ok(0) => break,
+                Ok(n) => {
+                    sent += n as usize;
+                    calls += 1;
+                    assert!(calls < 16, "the host kept claiming room: {sent} bytes");
+                }
+                Err(e) => panic!("unexpected error: {e}"),
+            }
+        }
+        assert!(sent > 0, "the first buffer was refused");
+        assert!(
+            sent < data.len(),
+            "the host swallowed {} bytes from a child that reads nothing",
+            sent
+        );
+        // The bound is per call, not per message: two budgets' worth of
+        // waiting still lands well inside the test's patience.
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(1200),
+            "write-stdin outlived its budget: {:?}",
+            started.elapsed()
+        );
+    }
+
+    #[test]
+    fn write_stdin_hands_over_bytes_the_child_then_reads() {
+        // What the guest handed over is really delivered, in order, even
+        // though the call returned before the child looked at the pipe.
+        let mut registry = ProcessRegistry::new(1);
+        let argv = echo_child_argv();
+        let handle = registry.spawn(&argv).expect("spawn echo child");
+        let data = b"tau-f12-marker\n".to_vec();
+        let taken = registry.write_stdin(handle, &data, 1000).expect("write");
+        assert_eq!(taken as usize, data.len(), "the marker was cut short");
+        let mut seen = Vec::new();
+        for _ in 0..20 {
+            match registry.read_stdout(handle, 4096, 1000) {
+                Ok((bytes, _)) => seen.extend_from_slice(&bytes),
+                Err(_) => continue,
+            }
+            if String::from_utf8_lossy(&seen).contains("tau-f12-marker") {
+                return;
+            }
+        }
+        panic!(
+            "the child never echoed what was taken: {:?}",
+            String::from_utf8_lossy(&seen)
+        );
+    }
+
+    #[test]
+    fn write_stdin_reports_a_stdin_that_is_gone() {
+        // A dead child is an error, not a 0: "nothing fit within the budget"
+        // and "there is nothing left to write to" are different answers, and
+        // the guest must not retry the second one. The handle stays usable —
+        // read-stdout is where the exit shows up.
+        let mut registry = ProcessRegistry::new(1);
+        let argv = exiting_child_argv();
+        let handle = registry.spawn(&argv).expect("spawn exiting child");
+        // Wait until the exit is observable: stdout closing is the signal.
+        let mut eof = false;
+        for _ in 0..20 {
+            if let Ok((_, true)) = registry.read_stdout(handle, 1, 500) {
+                eof = true;
+                break;
+            }
+        }
+        assert!(eof, "the child never closed its stdout");
+        // Over the cap, so a single call both fills the buffer and waits for
+        // room — which is when the writer's report lands. The first call may
+        // still hand back what it took before the pipe broke; the next one has
+        // to refuse on its own.
+        let data = vec![b'x'; STDIN_BUFFER_CAP + 4096];
+        let mut err = None;
+        for _ in 0..3 {
+            match registry.write_stdin(handle, &data, 300) {
+                Ok(_) => continue,
+                Err(e) => {
+                    err = Some(e);
+                    break;
+                }
+            }
+        }
+        let err = err.expect("a child that exited still took bytes");
+        assert!(err.contains("stdin"), "unexpected error: {err}");
     }
 }

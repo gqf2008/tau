@@ -86,6 +86,18 @@ blocking `timeout` covers the body too, so the host bounds the header wait
 itself. The same argument bounds the `ws.connect` handshake (im-channels.md
 `ws`).
 
+The write path is bounded too, but it cannot reuse that shape (0.6.0,
+wit-review F12): a write that times out may already have delivered part of
+its buffer, so timeout-plus-retry would replay half a message. Instead
+`write-stdin(handle, data, timeout-ms)` returns how many bytes the host
+**took** — taken bytes are delivered in order and belong to the host from
+that moment, a short count is normal, and `0` means the child took nothing
+within the budget. The guest resumes at the offset it left off, never
+resends, and treats a hard error as stdin gone. The host holds a bounded
+buffer per child (64 KiB) and writes it from a thread of its own, so a
+server that stops reading costs the host that buffer and nothing more;
+`examples/mcp-bridge` fails by name once a few budgets take nothing.
+
 The host enforces the consent: an origin allowlist (`scheme://host[:port]`).
 Every request's origin is checked before sending; **redirects are never
 followed** — a redirect would silently move the request to an origin the user

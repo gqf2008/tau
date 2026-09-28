@@ -44,6 +44,24 @@ const IDLE_MS: u32 = 60_000;
 /// hostile server flooding bytes without a newline would otherwise grow
 /// linear memory until the allocator traps the whole component.
 const MAX_MESSAGE: usize = 16 * 1024 * 1024;
+/// Budget for one `write-stdin` call: how long the bridge lets the host
+/// wait for the server to drain before the call hands back a short count
+/// (wit-review F12). The host never waits without a bound, so this is the
+/// bridge's own patience — the thing that decides when a server which reads
+/// nothing is declared wedged instead of waited on forever.
+const WRITE_MS: u32 = 3_000;
+/// Consecutive budgets that take nothing before the connection counts as
+/// wedged. A slow server still makes progress — every taken byte resets the
+/// count — so only a server reading nothing ever reaches this.
+const WRITE_STALLS: u32 = 3;
+
+/// Gate knob for the write path's F12 leg (scripts/validate.sh): pad every
+/// request so the gate can push more bytes than the host's stdin buffer at a
+/// server that never reads. It rides inside the JSON, so a real server sees a
+/// valid message with one field it can ignore, and no argv has to carry it.
+fn pad_bytes() -> Option<usize> {
+    std::env::var("TAU_MCP_PAD").ok()?.parse().ok()
+}
 
 enum Transport {
     Stdio(StdioConnection),
@@ -76,10 +94,14 @@ impl Tools for McpBridge {
     /// the visibility a broken server deserves.
     fn definitions() -> Vec<Definition> {
         let mut guard = CONNECTION.lock().unwrap();
-        let conn = connect(&mut guard).expect("mcp-bridge: connect/handshake failed");
+        // The panic carries the reason: this is the only failure path the
+        // tools world has (definitions() returns no Result), and the host
+        // surfaces the trap as a load error, guest stderr and all.
+        let conn = connect(&mut guard)
+            .unwrap_or_else(|e| panic!("mcp-bridge: connect/handshake failed: {e}"));
         let result = conn
             .request("tools/list", serde_json::json!({}))
-            .expect("mcp-bridge: tools/list failed");
+            .unwrap_or_else(|e| panic!("mcp-bridge: tools/list failed: {}", e.into_message()));
         result["tools"]
             .as_array()
             .cloned()
@@ -285,10 +307,42 @@ impl Connection {
 }
 
 impl StdioConnection {
+    /// Send one newline-delimited message, in offsets.
+    ///
+    /// `write-stdin` hands back how many bytes the host **took**, not how many
+    /// the server has read (wit-review F12): taken bytes are delivered in
+    /// order and belong to the host, so a short return is progress and the
+    /// loop resumes where it left off. Nothing is ever sent twice.
+    ///
+    /// `Ok(0)` is the one answer that is not progress: the host's buffer is
+    /// full of undelivered bytes and the server is not reading them. Waiting
+    /// longer is what the host just did, and resending the message would
+    /// corrupt it, so after a few budgets the connection is declared wedged by
+    /// name. A hard error from the host (the server is gone) propagates as-is.
     fn send(&mut self, message: &serde_json::Value) -> Result<(), String> {
+        let mut message = message.clone();
+        if let Some(pad) = pad_bytes() {
+            message["_pad"] = serde_json::Value::String(" ".repeat(pad));
+        }
         let mut bytes = message.to_string().into_bytes();
         bytes.push(b'\n');
-        proc::write_stdin(self.handle, &bytes)
+        let mut sent = 0usize;
+        let mut stalls = 0u32;
+        while sent < bytes.len() {
+            let taken = proc::write_stdin(self.handle, &bytes[sent..], WRITE_MS)?;
+            if taken == 0 {
+                stalls += 1;
+                if stalls >= WRITE_STALLS {
+                    return Err(format!(
+                        "server took nothing from stdin in {WRITE_STALLS} budgets of {WRITE_MS}ms — is it reading?"
+                    ));
+                }
+            } else {
+                stalls = 0;
+                sent += taken as usize;
+            }
+        }
+        Ok(())
     }
 
     /// Read newline-delimited messages until the response for `id` arrives.

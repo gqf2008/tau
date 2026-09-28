@@ -1,4 +1,4 @@
-package tau:extension@0.5.0;
+package tau:extension@0.6.0;
 
 /// ---- Message trunk: tau owns this schema, so it is typed, not JSON ----
 ///
@@ -412,15 +412,28 @@ interface process {
 
     /// Append bytes to the child's stdin.
     ///
-    /// The one blocking call here with no `timeout-ms`, and it cannot take
-    /// the same shape as the reads: a write that times out may already have
-    /// delivered part of the data, so the only safe retry would be to
-    /// resend the whole buffer — which silently replays half a message.
-    /// Bounding it means a partial-write return (bytes written, guest-held
-    /// offset): an interface change, not a parameter (wit-review F12). A
-    /// child that never reads its stdin can therefore still block the
-    /// caller.
-    write-stdin: func(handle: u64, data: list<u8>) -> result<_, string>;
+    /// Returns how many bytes of `data` the host **took**: short returns are
+    /// normal and are not an error. Taken bytes are delivered to the child
+    /// in order and belong to the host from that moment, so a caller that
+    /// gets `taken < data.len()` continues with `data[taken..]` and never
+    /// resends what it already handed over. Nothing is ever delivered
+    /// twice; `0` means the child took nothing within the budget, which is
+    /// the caller's cue to retry with a fresh budget, hold the message back,
+    /// or kill the child.
+    ///
+    /// The host buffers a bounded amount of undelivered data; once that is
+    /// full the call waits up to `timeout-ms` for the child to drain it and
+    /// then returns what it could take. `timeout-ms` therefore bounds the
+    /// wait, and 0 is rejected like every other budget here. The count is
+    /// deliberately bytes **taken**, not bytes delivered: a blocking write
+    /// that times out cannot say how much it delivered (wit-review F12), and
+    /// a re-sent half message is worse than a hang.
+    ///
+    /// An error means no more bytes can be taken at all — the child's stdin
+    /// is closed or the child is gone. Whatever an earlier call took is
+    /// still the host's responsibility, but a broken pipe loses it; the
+    /// next `read-stdout` reports the child's exit.
+    write-stdin: func(handle: u64, data: list<u8>, timeout-ms: u32) -> result<u32, string>;
 
     /// Read up to `max` bytes from the child's stdout. Returns as soon as
     /// at least one byte is available or the stream closes (eof = true).

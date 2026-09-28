@@ -7,6 +7,7 @@ Tools: echo (returns its text), fail (returns an error result).
 
 import json
 import sys
+import time
 
 # Test hook: --protocol-version X makes the server choose X in the
 # initialize reply instead of echoing the client's request.
@@ -18,6 +19,12 @@ if "--protocol-version" in sys.argv:
 # Test hook: --die-after-call makes the server exit right after replying
 # to the first tools/call — the fixture for mid-session server death.
 DIE_AFTER_CALL = "--die-after-call" in sys.argv
+
+# Test hook: --mute-stdin keeps the server alive with its stdout open but
+# never reads a byte of stdin — the peer a write can never complete against.
+# Before F12 the client blocked forever on it; now the host's bounded write
+# plus the bridge's patience turn it into a named stall.
+MUTE_STDIN = "--mute-stdin" in sys.argv
 
 TOOLS = [
     {
@@ -48,6 +55,9 @@ def reply(request_id, result=None, error=None):
 
 
 def main():
+    if MUTE_STDIN:
+        while True:
+            time.sleep(3600)
     while True:
         line = sys.stdin.readline()
         if not line:

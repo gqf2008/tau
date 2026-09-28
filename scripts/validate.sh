@@ -524,6 +524,18 @@ echo "$OUT" | grep -q "tool ← echo: bridge validation ok" \
     || fail "bridged echo tool did not close the loop: $OUT"
 echo "ok — consent-gated spawn served the echo tool through the MCP bridge"
 
+# A server that never reads its stdin must not wedge the bridge (wit-review
+# F12): the host takes what its buffer holds, the call returns a short count
+# under a bound, and the bridge fails by name once a few budgets take
+# nothing. TAU_MCP_PAD inflates the request past the host's buffer — no argv
+# can carry that many bytes.
+OUT="$(TAU_MCP_PAD=200000 "$TAU" --allow-unsigned --mcp-bridge "$MCP_BRIDGE" \
+    --mcp-command "[\"python\",\"$ROOT_WIN/examples/mcp-bridge/mock_server.py\",\"--mute-stdin\"]" \
+    --demo -p "write stall validation" 2>&1 || true)"
+echo "$OUT" | grep -q "took nothing from stdin" \
+    || fail "a server that never reads stdin was not reported: $OUT"
+echo "ok — a server that never reads stdin surfaces as a named stall, not a hang"
+
 # --- step 5b: ws capability (frame pipe, docs/im-channels.md) ---------
 step "5b/11 ws capability (frame pipe over a loopback echo server)"
 python "$ROOT/scripts/ws_echo_mock.py" > ws_mock.log 2>&1 &

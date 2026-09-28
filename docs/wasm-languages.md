@@ -5,14 +5,16 @@
 ——工具名 `upper`，把入参 `text` 转大写——用七种主流语言各写一个最小
 扩展，并用同一条验收命令**真加载**验证。
 
-契约版本 `tau:extension@0.5.0`（0.1.0 → 0.2.0：`hooks` 接口正名
+契约版本 `tau:extension@0.6.0`（0.1.0 → 0.2.0：`hooks` 接口正名
 `probes`，extension world 新增 `host` import；0.2.0 → 0.3.0：
 `tool-result.content` 从 `string` 改为 `list<result-block>`——
 工具可返回媒体块，见 docs/tool-media.md；0.3.0 → 0.4.0：
 `http.read-body` 增加 `timeout-ms` idle 预算，见 docs/bridges.md；
 0.4.0 → 0.5.0：等待对端的每一处都设界——`http.request` 等响应头、
 `ws.connect` 等握手、`process.read-stdout` 等字节，各加 `timeout-ms`
-（0 拒绝），见 docs/bridges.md）。
+（0 拒绝），见 docs/bridges.md；0.5.0 → 0.6.0：`process.write-stdin` 加
+`timeout-ms` 并改为返回**已收下**的字节数（客座自持偏移续写，短返回是
+常态），见 docs/bridges.md）。
 旧契约产物会被宿主
 点名拒载（版本错配写进 load 错误），重建即迁移。各语言的
 result-block 构造：C 填 tag+union，C++ 用 variant 转换构造
@@ -76,6 +78,18 @@ go 3.32 MB）。C / C++ / Python / JS / TS 一次通过（C++ 上轮补的垫片
 `component targets tau:extension@0.5.0; this host requires @0.4.0`。
 版本门禁两个方向都硬：新宿主拒绝旧组件，旧宿主同样拒绝新组件，
 「产物能跑」与「源码可重建」是两件事（见下）。
+
+**0.6.0 复验（2026-09-28）**：六格全部**重新构建**并跑上面两条验收
+命令，六格都出现两行 transcript（同日实测，十进制：C 7986 B / C++ 8598 B /
+py 18.40 MB / js 12.76 MB / ts 12.76 MB / go 3.32 MB），与上一轮一致。
+C / C++ / Python / JS / TS 一次通过（C++ 的垫片仍在），Go 仍须显式给
+`TINYGO`/`WASMOPT`/`ADAPTER`（沿用 %TEMP% 里上一轮的安装）。反向实录照旧留
+一条：用 0.5.0 的宿主加载本轮新建的 C 组件，报
+`component targets tau:extension@0.6.0; this host requires @0.5.0`。
+**注意本轮契约变更与矩阵无关**：0.6.0 只改 `bridge` world 的
+`process.write-stdin`（返回已收下字节数 + `timeout-ms`），矩阵六格用的是
+`extension` world，语义一字未动——**重建是版本门禁的要求**（导出名里带版本，
+旧产物必被拒载），不是矩阵本身出了变化。
 
 ## C —— 零依赖 freestanding 路线
 

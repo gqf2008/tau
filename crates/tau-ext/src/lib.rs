@@ -521,10 +521,10 @@ impl WasiPolicy {
 /// places is how a version hint silently goes wrong, so
 /// `contract_version_matches_wit` fails the build if it drifts from the
 /// vendored WIT.
-pub(crate) const CONTRACT_VERSION: &str = "0.5.0";
+pub(crate) const CONTRACT_VERSION: &str = "0.6.0";
 
 /// If the component exports `tau:extension` interfaces of another
-/// contract version, say so — "missing export tau:extension/tools@0.5.0"
+/// contract version, say so — "missing export tau:extension/tools@0.6.0"
 /// alone leaves the user guessing what the component was built against
 /// (docs/host-channel.md 兼容性: load errors name the version mismatch).
 fn version_hint(component: &Component) -> String {
