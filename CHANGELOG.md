@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.6.0] — 2026-09-28
 
 ### Breaking — contract `tau:extension@0.6.0`: `write-stdin` takes a budget and says how much it took (wit-review F12)
 
