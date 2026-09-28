@@ -210,6 +210,45 @@ tau --provider-wasm target/wasm32-wasip2/release/my_provider.wasm \
   --model my-model --provider-origin https://api.example.com -p "hi"
 ```
 
+## 5.5 Realtime providers (world `realtime`)
+
+A provider that also exports `session` becomes a realtime provider: the
+world is `import events + http`, `export models + session` — so the
+component still doubles as an ordinary provider (`models.run` serves
+print mode), while `/live N` in the REPL opens a full-duplex session.
+Capability discovery is the export itself: the host probes the component
+type for `tau:extension/session@…`, there is no flag to set.
+
+- `open(config-json)` — the config carries `input-media-type` (e.g.
+  `audio/pcm;rate=16000`) plus optional output media type and
+  instructions. Refuse a config you cannot serve with `err`.
+- `push-audio(bytes)` / `push-image(jpeg)` — uplink. Every call is a
+  `result<_, string>`: once you consider the session dead, refuse at
+  the door instead of trapping.
+- `interrupt()` — the user barged in (Ctrl-C during `/live`). What you
+  already emitted is what the user heard; freeze the current output
+  segment and emit an `interrupted` model-event.
+- `close()` — flush terminal events (`speech-stopped`, then exactly one
+  `done`); the host ends your event stream right after. One session per
+  instance — the host instantiates fresh per session, and a trapped
+  session poisons only its own instance.
+
+Downlink events ride the same `events.emit` as plain providers, with
+four extra model-event kinds: `input-audio-chunk` (uplink fact),
+`speech-started` / `speech-stopped` (VAD), `interrupted`. The audio
+bytes cross to the host in `audio-delta` payloads; the guest-side
+subscription channel stays count-only by design (no audio hot path
+through `host.poll`).
+
+Device consent is the host's job, not yours: a real microphone uplink
+requires the user's `--microphone` grant (the category guards the
+device, not the session — the synthetic `sine` uplink needs none), and
+the `camera` category is registered but admits no capture path yet.
+
+Reference: `examples/realtime-echo` — a deterministic VAD + echo double
+(the same script as the native demo provider), exercised end to end by
+validate.sh step 11d.
+
 ## 6. Bridges (world `bridge`)
 
 Since 0.3.0 the bridge world also imports `ws` — a WebSocket frame pipe
