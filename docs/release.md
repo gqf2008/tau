@@ -43,7 +43,11 @@ cargo clippy --workspace --all-targets   # expect Checking <crate> per member
 The examples are not workspace members: the ones with code changes need their
 own run (`cargo clippy --manifest-path examples/<ex>/Cargo.toml
 --target wasm32-wasip2`), and they cache the same way. Hit on the 0.4.0 cut:
-two consecutive clippy runs finished in ~0.5s with zero `Checking` lines.
+two consecutive clippy runs finished in ~0.5s with zero `Checking` lines. Hit
+again on the 0.6.0 cut: the mcp-bridge leg printed no `Checking` line on a
+brand-new cut commit, because a version-only cut does not move an example's
+fingerprints — `touch examples/mcp-bridge/src/lib.rs` and rerun before
+believing the green.
 
 **Contract bumps: build the fixtures before the suites.** The tau-ext unit
 tests load example artifacts (`echo-provider`, `upper`, `guard`, …) straight
