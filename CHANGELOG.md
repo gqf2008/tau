@@ -20,6 +20,46 @@
   instantiated component can serve more than one session, while
   registering into a clone still affects only that clone. `register`
   still takes a `Box`, so no call site changed.
+- **ACP mode** (`--acp`): tau speaks the Agent Client Protocol over
+  stdin/stdout, natively (`agent-client-protocol` 2.2.0) — no adapter
+  and no second binary — so an editor can spawn it as an agent. stdout
+  carries the protocol and nothing else; diagnostics stay on stderr. One
+  process serves any number of sessions, and in this mode `--session`
+  names a **directory** (default `.tau/sessions`): each session is a
+  JSONL at `<dir>/<session-id>.jsonl`, which is an ordinary tau session
+  (`tau tree --session` reads it, `--continue --session` resumes it).
+  The handshake claims only what is true — v1, `loadSession: false`,
+  `promptCapabilities.image: true`, no auth methods — and every method
+  tau does not implement (`session/load`, `authenticate`, `fs/*`,
+  `terminal/*`) is answered method-not-found. A prompt's blocks fold, in
+  order, into one message; the loop's events become `session/update`
+  (text deltas; a tool call announced before its update, which carries a
+  flattened preview of the output); tool-call ids on the wire are
+  `{turn}:{provider id}`, because a scripted model reuses its own ids
+  across turns and a client would otherwise draw one call that never
+  ends. `session/cancel` is honored only while a turn is in flight — at
+  rest it is dropped, not queued, because a queued abort would stop the
+  *next* run before its first token — and it cannot interrupt a tool that
+  is already running (give the tool a `timeout:`). `--acp` conflicts with
+  `-p`/`--print`, `--compact`, `--continue` and `--continue-from`.
+  `docs/acp.md` is the reference.
+- **A permission gate for the mutating built-ins, in ACP mode only.**
+  `write`, `edit`, `bash` and `powershell` ask the client through
+  `session/request_permission` before they run, with the protocol's four
+  options (allow or reject, once or for the session); `always` is
+  remembered per tool in that session and never written to disk. The gate
+  is a `before_tool` probe registered *after* the components', so an
+  extension's rewritten arguments are what the user approves, and a call
+  an extension already blocked is never asked about. The question has no
+  timeout: `session/cancel` is what unblocks it, arriving as `cancelled`
+  and read as a refusal of that one call — as is every other non-allow
+  outcome, because a gate that fails open is not a gate. A refusal
+  becomes the tool result `blocked: …` with `is_error`, the client sees
+  the call go `failed`, and the model reads why. Outside this mode
+  nothing changed: the built-ins are host code with no gate
+  (`docs/builtin-tools.md`). The handshake also reports once, on stderr,
+  the `fs`/`terminal` delegation a client offers and tau does not take
+  up.
 
 ### Changed
 

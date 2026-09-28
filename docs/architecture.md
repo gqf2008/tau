@@ -42,9 +42,10 @@ ABI 是已知的未来改进项，当前边界先行钉死。
 
 ```
 ┌─────────────────────────────────────────────────┐
-│ tau-cli   tau 二进制：print / REPL 两种模式，      │
-│           子命令（sign/trust/consent/gc/push…）， │
-│           授权解析与合并（flags + remembered）      │
+│ tau-cli   tau 二进制：print / REPL / --acp          │
+│           三种模式，子命令（sign/trust/             │
+│           consent/gc/push…），授权解析与合并        │
+│           （flags + remembered）                    │
 ├─────────────────────────────────────────────────┤
 │ tau-openai / tau-anthropic   内置 provider       │
 │ （三个 API：chat completions / Responses /        │
@@ -91,6 +92,9 @@ tau-core 不知道 wasm 的存在；tau-ext 不知道 CLI 的存在；
   - **控制通道**（`control.rs`，无界 mpsc）：命令（steer/follow-up/
     abort），循环在检查点消费，steer 永不落在 tool_use 与
     tool_result 之间。
+- **入口不新增核心构件**：print / REPL / ACP 三种模式共用同一份
+  `Agent` + session 树 + 工具与探针注册表；ACP 只是这些构件的
+  JSON-RPC 序列化外壳（`docs/acp.md`），tau-core 不知道协议存在。
 - **媒体与 blob**（`types.rs`/`blobs.rs`）：内存里是诚实字节，base64
   只存在于 JSON 边缘；>256KB 的媒体在会话写入时外置到内容寻址 blob
   存储，请求边缘物化回来；`tau gc` 全树标记清扫。
@@ -294,9 +298,12 @@ digest）、blob 先验 sha256 再落盘、内容寻址缓存命中校验、腐�
   能力的宿主实现，没有额外的进程隔离层（被 spawn 的 MCP server 是
   用户自己选的风险，与原生 MCP 客户端相同）。
 - **内置工具在沙箱之外**：`read/write/edit/ls/grep/find/bash/
-  powershell` 是宿主代码，`--deny-wasi` 只管 wasm 组件、管不到它们，
-  也没有审批门；唯一的关断是启动时的 `--tools` / `--no-builtin-tools`
-  （`docs/builtin-tools.md`）。
+  powershell` 是宿主代码，`--deny-wasi` 只管 wasm 组件、管不到它们；
+  唯一的关断是启动时的 `--tools` / `--no-builtin-tools`
+  （`docs/builtin-tools.md`）。**唯一例外是 ACP 模式**：编辑器在连接
+  的另一端，四个 mutating 内置工具经 `session/request_permission` 先
+  问宿主（`docs/acp.md`）——这是「另一端有人可问」才有的门，不是沙箱；
+  模式外一切照旧、无门。
 - **wasip3 流式 ABI**：当前边界是「字符串整体拷入 guest」，大 ABI
   改造是保留给未来的显式决策，不被动滑入。工具链现状已 spike
   钉死：guest 侧 stable 阻塞至 Rust 1.100（预计 2026-11），host
@@ -309,6 +316,7 @@ digest）、blob 先验 sha256 再落盘、内容寻址缓存命中校验、腐�
 | `wit/tau.wit` | 扩展契约（先读这个） |
 | `docs/extensions.md` | 扩展作者指南：scaffold → 三 world → 签名 → OCI |
 | `docs/builtin-tools.md` | 内置工具：八个原生工具、两个旗标、沙箱诚实性 |
+| `docs/acp.md` | ACP 模式：编辑器接入、会话映射、事件表、权限门 |
 | `docs/probes.md` | 九个探针点的载荷与 verdict 语义 |
 | `docs/events.md` | 事件总线 / 探针 / 控制通道的三通道模型 |
 | `docs/bridges.md` | 桥的能力模型与 MCP 参考实现 |

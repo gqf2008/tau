@@ -329,6 +329,10 @@ components**: they read, write, and spawn with the permissions of the
 tau process, and `--deny-wasi` says nothing about them. They are not
 consent-gated either — turning them off is `--no-builtin-tools`, which
 is about what the model may call, not about what the sandbox allows.
+The one place a built-in asks before it acts is ACP mode, where the four
+mutating tools go through the editor's `session/request_permission`
+first (`docs/acp.md`); that is a prompt shown to a person, which is not
+the same thing as a boundary, and outside that mode there is none.
 
 So do not mistake the gates for a sandbox. If a real boundary is what
 you need, that is an OS-level question about the process tau runs in.

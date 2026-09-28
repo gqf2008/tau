@@ -65,6 +65,16 @@ extensible — but extensions are **wasm components**, not in-process scripts.
   real microphone uplink behind a wasm provider requires the
   `--microphone` consent (remembered with `--remember`), the synthetic
   `sine` uplink needs no grant. See `docs/realtime-av.md`.
+- **Editor-attached mode**: `tau --acp` speaks the Agent Client Protocol
+  (JSON-RPC over stdin/stdout) to Zed and anything else that hosts ACP
+  agents — native, no adapter and no second binary. One process serves
+  any number of sessions, each with its own session file; stdout carries
+  the protocol and nothing else. The four built-ins that change the
+  machine (`write`, `edit`, `bash`, `powershell`) ask the client first
+  through `session/request_permission` — the only place tau has a
+  permission gate, because it is the only place with a human on the
+  other end (outside it, the built-ins are host code; see
+  `docs/builtin-tools.md`). See `docs/acp.md`.
 
 ## Try it
 
@@ -82,6 +92,9 @@ cargo run -p tau-cli -- -p "hello"
 
 # interactive mode (terminal, no -p):
 cargo run -p tau-cli -- --demo
+
+# as an editor's agent (Agent Client Protocol on stdin/stdout):
+cargo run -p tau-cli -- --acp
 
 # build the example extension, then use it (unsigned -> dev escape, or sign
 # it: `tau keygen` once, then `tau sign <file>.wasm`):
@@ -107,9 +120,9 @@ tau is alive. The tool answered: SHOUT HELLO TAU. (faux model — …)
 
 See `CHANGELOG.md` for what's in each version. `scripts/validate.sh`
 proves the release candidate the way a first user meets it (demo,
-built-in tools, signing/trust chain, built-in provider against a loopback
-mock, wasm-provider consent gate) and restores the environment
-afterwards. `scripts/release.sh` runs the full suite, rebuilds the wasm
+built-in tools, an ACP client over real pipes, signing/trust chain,
+built-in provider against a loopback mock, wasm-provider consent gate)
+and restores the environment afterwards. `scripts/release.sh` runs the full suite, rebuilds the wasm
 examples, builds the release binary (lto + strip), and assembles
 `dist/tau-<version>-<target>.zip` with the binary, README, LICENSE, docs/,
 and prebuilt (unsigned) example components.
@@ -123,9 +136,9 @@ and prebuilt (unsigned) example components.
 | `crates/tau-anthropic` | Anthropic Messages API provider |
 | `crates/tau-ext` | wasmtime component host (WASI open by default) |
 | `crates/tau-tools` | built-in native tools (read/write/edit/ls/grep/find/bash/powershell) |
-| `crates/tau-cli` | `tau` binary (print + interactive modes) |
+| `crates/tau-cli` | `tau` binary (print, interactive, and `--acp` modes) |
 | `wit/tau.wit` | the extension contract, versioned |
-| `docs/` | architecture (the design doc), extensions (author guide), tutorial (hands-on walkthrough), builtin-tools, probes, events, bridges, signing, oci, media, wasip3-streams, release, perf |
+| `docs/` | architecture (the design doc), extensions (author guide), tutorial (hands-on walkthrough), builtin-tools, acp, probes, events, bridges, signing, oci, media, wasip3-streams, release, perf |
 | `examples/upper` | example wasm extension (tool) |
 | `examples/echo-provider` | example wasm provider (push-mode streaming) |
 | `examples/http-provider` | example wasm provider (consent-gated http) |

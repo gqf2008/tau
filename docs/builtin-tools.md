@@ -127,16 +127,20 @@ them:
 - They are **not** affected by `--deny-wasi`. That flag governs what
   wasm components may do; the built-ins run in the tau process itself
   (`docs/extensions.md` §7).
-- They do **not** ask for approval. `--allow-inject`, `--remember`, the
-  consent store — none of it gates them. A tool call runs.
+- They do **not** ask for approval in print or REPL mode.
+  `--allow-inject`, `--remember`, the consent store — none of it gates
+  them. A tool call runs. The one exception is `--acp`, where the four
+  mutating tools ask the client first (`docs/acp.md`): that is a
+  permission prompt for a human on the other end of the connection, not
+  a sandbox.
 - The only thing that constrains them is `--tools` / `--no-builtin-tools`
   at startup. `--no-builtin-tools` means the toolset is exactly what the
   loaded components provide.
 
 If you need a run that cannot touch the filesystem or spawn a process,
 that is `--no-builtin-tools` plus a component that does the narrow thing
-you want — or, later, ACP mode, where mutating built-ins go through the
-editor's permission prompt.
+you want — or `--acp`, where the mutating four go through the editor's
+permission prompt before they run (`docs/acp.md`).
 
 ## `--demo`
 
