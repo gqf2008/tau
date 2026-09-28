@@ -22,5 +22,19 @@ policy, load them with `--allow-unsigned` (or sign them with your own key:
 | `dingtalk_bridge.wasm` | bridge (IM adapter: stream mode, CALLBACK double-decode + in-band ack) | `tau --allow-unsigned --mcp-bridge examples/dingtalk_bridge.wasm --mcp-url ws://<host>/dt --allow-inject --demo -p "hi"` → ack frame and reply POST both reach the platform (loopback: `scripts/dt_mock.py`) |
 | `realtime_echo.wasm` | provider (realtime, world `realtime`) | `tau --allow-unsigned --provider-wasm examples/realtime_echo.wasm --model echo-realtime` then `/live 2 sine` in the REPL → synthesized mic uplink crosses the boundary, the guest VADs and echoes every chunk back to the live playback sink (`--microphone` only for a real mic) |
 
+Three more components are built outside cargo — they need their own
+toolchains — and are shipped prebuilt so you can load-test without
+installing any of them:
+
+| file | language | try it |
+|------|----------|--------|
+| `c_upper.wasm` | C | `tau --allow-unsigned -e examples/c_upper.wasm --demo -p "shout hello using the upper tool"` |
+| `cpp_upper.wasm` | C++ | same, with `examples/cpp_upper.wasm` |
+| `go_upper.wasm` | Go | same, with `examples/go_upper.wasm` |
+
+(The Python/JS/TS ones are 12–18 MB and are not shipped; build them with
+`bash examples/<lang>/build.sh`.) Toolchains, the per-language breakpoints,
+and how to rebuild and re-accept all six: `docs/wasm-languages.md`.
+
 See `docs/bridges.md` for the bridge/MCP contract and `docs/signing.md` for
 signing, trust, and remembered consent.
