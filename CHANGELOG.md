@@ -46,10 +46,14 @@
   draft, not landed" — Phases 0/1/2a/2b are landed (its own inventory
   table already said so); only Phase 3 (wasip3 stream ABI) is pending.
 - The six-language matrix (docs/wasm-languages.md) was rebuilt end to end
-  and re-accepted at 0.4.0. C++ needed the value-form `std::expected` that
-  0.3.0's host channel made the generated bindings instantiate — its ✅ had
-  been stale since 0.3.0 — and the Go rebuild needs `TINYGO` / `WASMOPT` /
-  `ADAPTER` given explicitly (neither is on PATH). Sizes re-measured.
+  and re-accepted at 0.4.0. C++ needed the value-form `std::expected`, which
+  the generated bindings now instantiate. That gap is a property of the
+  current C++ generator, not of this contract change: rebuilding the v0.3.0
+  tree with the installed wit-bindgen 0.62 fails identically, and the 0.3.0
+  ✅ was backed by a real artifact (stamped @0.3.0, still loads and runs) that
+  had merely stopped being rebuildable. The Go rebuild needs `TINYGO` /
+  `WASMOPT` / `ADAPTER` given explicitly (neither is on PATH). Sizes
+  re-measured.
 
 ## [0.3.0] — 2026-09-28
 

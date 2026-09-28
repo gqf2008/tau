@@ -37,7 +37,7 @@ transcript 必须同时出现：
 | 语言 | 工具链 / 版本 | 产物 | 构建命令 | tau 加载 | 断点或依据 |
 |---|---|---|---|---|---|
 | C | wit-bindgen 0.62（c）+ clang 22.1.8 + wasm-tools 1.259 | `c_upper.wasm` 7.8 KB | `bash examples/c-upper/build.sh` | ✅ 跑通 | — |
-| C++ | wit-bindgen 0.62（cpp）+ clang++ 22.1.8 + wasm-tools 1.259 | `cpp_upper.wasm` 8.4 KB | `bash examples/cpp-upper/build.sh` | ✅ 跑通 | 0.2.0 需 -std=c++23 + 新增 expected/variant 垫片；0.3.0 起生成代码实例化**值形态** `expected<T, E>`，垫片到 0.4.0 复验才补齐（该格此前已失真，见下文） |
+| C++ | wit-bindgen 0.62（cpp）+ clang++ 22.1.8 + wasm-tools 1.259 | `cpp_upper.wasm` 8.4 KB | `bash examples/cpp-upper/build.sh` | ✅ 跑通 | 0.2.0 需 -std=c++23 + 新增 expected/variant 垫片；生成代码要实例化**值形态** `expected<T, E>`（与契约版本无关，见下文），垫片到 0.4.0 复验才补齐 |
 | Python | componentize-py 0.25.1（pip） | `py_upper.wasm` 18.4 MB | `bash examples/python-upper/build.sh` | ✅ 跑通 | 实现类命名坑，见下文 |
 | JavaScript | jco 1.35.0（npx，node 22.14） | `js_upper.wasm` 12.8 MB | `bash examples/js-upper/build.sh` | ✅ 跑通 | 必须 `--disable http fetch-event` |
 | TypeScript | jco 1.35.0（npx，node 22.14） | `ts_upper.wasm` 12.8 MB | `bash examples/ts-upper/build.sh` | ✅ 跑通 | 同上 |
@@ -49,10 +49,15 @@ Rust 本体（`examples/upper` 等 5 个既有示例）不在本轮范围内，�
 
 **0.4.0 复验（2026-09-28）**：六格全部重新构建并跑上面的验收命令，
 六格的 transcript 都出现了本文要求的两行。C / Python / JS / TS 一次
-通过；C++ 编译失败——0.3.0 的 `host.subscribe/poll` 让生成绑定开始
-实例化值形态 `std::expected<T, E>`，而垫片只有 `expected<void, E>`，
-即**该格的 ✅ 自 0.3.0 起就失真**（0.3.0 轮只改了本文的版本行，没重建
-产物）。垫片补齐后重建通过。Go 按本节三个 env 重建通过（工具链沿用
+通过；C++ 编译失败——生成绑定要实例化值形态 `std::expected<T, E>`，
+而垫片只有 `expected<void, E>`。**这不是 0.4.0 契约变更造成的**：在
+v0.3.0 的树上用当前工具链（wit-bindgen 0.62）重建，报同一个
+`implicit instantiation of undefined template`。0.3.0 那格的 ✅ 背后
+确有真产物（0.3.0 zip 里那份声明 `tau:extension@0.3.0`，在 0.3.0 宿主上
+跑通本文的验收命令）——它只是**此后已无法从源码重建**（那份产物早于
+`host.subscribe/poll` 生效，`build.sh` 又每次无条件重新生成绑定）；
+**矩阵里的 ✅ 只在被重建的那一轮才成立**。垫片补齐后重建通过。
+Go 按本节三个 env 重建通过（工具链沿用
 上一轮的安装；`tinygo`/`wasm-opt` 都不在 PATH 上，必须显式给）。
 产物尺寸为 0.4.0 实测。
 
@@ -78,15 +83,18 @@ libc++，这两头必须手写垫片（只覆盖生成代码实际用到的 API 
 `optional`/`span` 垫片也要补 `emplace`/`data`/`const value`）。
 垫片只服务编译与链接：本示例不调用 host 接口，垫片代码路径不执行。
 
-**0.4.0 复验发现的缺口**：0.3.0 的 `host.subscribe/poll` 返回
-`result<u64, string>` / `result<list<stream-event>, string>`，生成代码因此
-开始**实例化值形态** `std::expected<T, E>`（`expected<uint64_t, …>` 与
-`expected<wit::vector<StreamEvent>, …>`），而垫片只有 `expected<void, E>`
-⇒ `clang++` 报 `implicit instantiation of undefined template`。已补值形态
+**0.4.0 复验发现的缺口**：生成代码要**实例化值形态**
+`std::expected<T, E>`（`expected<uint64_t, …>` 与
+`expected<wit::vector<StreamEvent>, …>`，源自 `host.subscribe/poll` 的
+`result<u64, string>` / `result<list<stream-event>, string>`），而垫片
+只有 `expected<void, E>` ⇒ `clang++` 报
+`implicit instantiation of undefined template`。已补值形态
 （值/unexpected 构造、移动、`has_value`/`value`/`error`），重建与验收
-重新通过。同族教训见
-`LESSON_契约版本升级后示例夹具须先重建再跑测试_版本拒绝报错点名修复`：
-**矩阵里的 ✅ 只在被重建的那一轮才成立**。
+重新通过。**这不是 0.4.0 契约变更引入的**：v0.3.0 的树用当前
+wit-bindgen 0.62 重建报同一个错，缺口的时点是「生成器要值形态」
+而非「契约改了」；0.3.0 那格的 ✅ 当轮有真产物支撑，只是那以后再也
+构建不出来。同族教训见
+`LESSON_契约版本升级后示例夹具须先重建再跑测试_版本拒绝报错点名修复`。
 
 ## Python —— componentize-py 的类命名契约
 
