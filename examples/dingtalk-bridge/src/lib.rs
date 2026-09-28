@@ -142,10 +142,8 @@ fn utf8_len(first: u8) -> usize {
 fn reply_url(ws_url: &str) -> Option<String> {
     let (httpish, rest) = if let Some(rest) = ws_url.strip_prefix("ws://") {
         ("http", rest)
-    } else if let Some(rest) = ws_url.strip_prefix("wss://") {
-        ("https", rest)
     } else {
-        return None;
+        ("https", ws_url.strip_prefix("wss://")?)
     };
     let authority = rest.split('/').next()?;
     Some(format!("{httpish}://{authority}/reply"))

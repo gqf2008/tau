@@ -62,7 +62,7 @@ rel_zip=$(sed -n 's/^for ex in \(.*\); do$/\1/p' "$ROOT/scripts/release.sh" | se
 # example enumeration; every shipped component must have a row.
 for ex in $EXAMPLES; do
     wasm_name="$(echo "$ex" | tr '-' '_').wasm"
-    grep -q "`$wasm_name`" "$ROOT/examples/README.md" \
+    grep -q "\`$wasm_name\`" "$ROOT/examples/README.md" \
         || fail "examples/README.md missing a row for $wasm_name"
 done
 

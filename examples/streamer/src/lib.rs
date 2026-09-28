@@ -64,33 +64,33 @@ impl Probes for Streamer {
             },
             "before_run_end" => {
                 let handle = SUBSCRIPTION.load(Ordering::Relaxed);
-                if handle != u64::MAX {
-                    if let Ok(events) = host::poll(handle) {
-                        let mut deltas = 0u64;
-                        let mut chars = 0usize;
-                        let mut lagged = 0u64;
-                        for event in &events {
-                            match event {
-                                StreamEvent::TextDelta(text) => {
-                                    deltas += 1;
-                                    chars += text.len();
-                                }
-                                StreamEvent::Lagged(n) => lagged += n,
-                                StreamEvent::AudioDelta(_) => {}
+                if handle != u64::MAX
+                    && let Ok(events) = host::poll(handle)
+                {
+                    let mut deltas = 0u64;
+                    let mut chars = 0usize;
+                    let mut lagged = 0u64;
+                    for event in &events {
+                        match event {
+                            StreamEvent::TextDelta(text) => {
+                                deltas += 1;
+                                chars += text.len();
                             }
+                            StreamEvent::Lagged(n) => lagged += n,
+                            StreamEvent::AudioDelta(_) => {}
                         }
-                        let suffix = if lagged > 0 {
-                            format!(" (+{lagged} dropped)")
-                        } else {
-                            String::new()
-                        };
-                        let _ = host::notify(
-                            "info",
-                            &[Content::Text(format!(
-                                "stream observed: {deltas} text deltas, {chars} chars{suffix}"
-                            ))],
-                        );
                     }
+                    let suffix = if lagged > 0 {
+                        format!(" (+{lagged} dropped)")
+                    } else {
+                        String::new()
+                    };
+                    let _ = host::notify(
+                        "info",
+                        &[Content::Text(format!(
+                            "stream observed: {deltas} text deltas, {chars} chars{suffix}"
+                        ))],
+                    );
                 }
             }
             _ => {}

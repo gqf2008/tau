@@ -551,8 +551,10 @@ impl Decoder {
             self.tail = raw.pop();
         }
         let mut samples: Vec<i16> = raw
-            .chunks_exact(2)
-            .map(|pair| i16::from_le_bytes([pair[0], pair[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|&pair| i16::from_le_bytes(pair))
             .collect();
         // Downmix like capture does (Phase 1 clips are mono, but an
         // interleaved stereo WAV must not play at double speed).
