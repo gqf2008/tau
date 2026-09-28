@@ -232,14 +232,16 @@ signed target/wasm32-wasip2/release/wordcount.wasm with f7fecae971a390ca
 The signature is an embedded custom section (`tau-signature`), so the file
 stays one distributable artifact, and the signature covers the module with
 every such section stripped — re-signing is well-defined. If your keyring
-holds more than one key, `tau sign` asks you to choose (this machine's
-keyring did):
+holds more than one key, `tau sign` refuses until you name one (this
+machine's keyring did; the count is whatever your `~/.tau/keys` holds):
 
 ```
-Error: not a wasm binary: expected exactly one key in C:\Users\gxh\.tau\keys, found 3 — pass --key
+Error: invalid signing key: expected exactly one key in C:\Users\gxh\.tau\keys, found 2 — pass --key
 ```
 
-…so pass `--key <fingerprint>`; `ls ~/.tau/keys` lists the candidates.
+…so pass `--key <fingerprint>`; `ls ~/.tau/keys` lists the candidates. (On
+0.6.0 that refusal opened with `not a wasm binary:` — the key error shared
+the wasm parser's variant, so it named a file it never opens.)
 Now the run from §3 works unchanged, without the escape hatch:
 
 ```
@@ -389,10 +391,11 @@ that read like something else.
 
 ## Keeping this document honest
 
-Every command above was run as written against tau 0.6.0, and the two
-listings were compiled by extracting them from *this file* — not copied from
-a source tree that happens to be in sync. That is also the maintenance rule:
-when the listings or the contract change, re-run the document the same way
-before trusting it. A tutorial that quotes output is a tutorial that has to
-be re-run — `116 KB`, the digest, and `6 words, 32 characters` are 0.6.0's
-numbers, and none of them ages well on its own.
+Every command above was run as written against tau 0.6.0 — the `tau sign`
+refusal in §4 was re-captured on the fix that followed it, as it says — and
+the two listings were compiled by extracting them from *this file*, not
+copied from a source tree that happens to be in sync. That is also the
+maintenance rule: when the listings or the contract change, re-run the
+document the same way before trusting it. A tutorial that quotes output is a
+tutorial that has to be re-run — `116 KB`, the digest, and `6 words, 32
+characters` are 0.6.0's numbers, and none of them ages well on its own.

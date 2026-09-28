@@ -30,6 +30,10 @@ pub enum SignError {
     /// Key material handed over directly (a base64 pubkey) was malformed.
     #[error("invalid public key: {0}")]
     BadKey(String),
+    /// Signing-key material on disk — or the `--key` fingerprint naming it
+    /// — was unusable.
+    #[error("invalid signing key: {0}")]
+    BadSigningKey(String),
     /// The signature section's JSON did not parse.
     #[error("signature section is not valid json: {0}")]
     BadSignatureJson(String),
@@ -344,23 +348,31 @@ pub fn keygen() -> Result<String, SignError> {
 
 /// Load a signing key by fingerprint; with None, the single key in keys/.
 pub fn load_key(fp: Option<&str>) -> Result<(String, SigningKey), SignError> {
-    let dir = keys_dir();
+    load_key_in(&keys_dir(), fp)
+}
+
+/// [`load_key`] against an explicit keys directory (tests use a temp dir).
+///
+/// Every failure here is about the KEY, and renders as such: these paths
+/// used to share the module parser's `Malformed` variant and so read as
+/// "not a wasm binary" — a message about a file that was never opened.
+fn load_key_in(dir: &Path, fp: Option<&str>) -> Result<(String, SigningKey), SignError> {
     let chosen = match fp {
         Some(fp) => {
             if !fingerprint_shaped(fp) {
-                return Err(SignError::Malformed(format!(
+                return Err(SignError::BadSigningKey(format!(
                     "{fp:?} is not a signing fingerprint (16 lowercase hex chars)"
                 )));
             }
             fp.to_string()
         }
         None => {
-            let mut keys: Vec<_> = std::fs::read_dir(&dir)?
+            let mut keys: Vec<_> = std::fs::read_dir(dir)?
                 .filter_map(|e| e.ok())
                 .filter(|e| e.path().extension().is_some_and(|x| x == "key"))
                 .collect();
             if keys.len() != 1 {
-                return Err(SignError::Malformed(format!(
+                return Err(SignError::BadSigningKey(format!(
                     "expected exactly one key in {}, found {} — pass --key",
                     dir.display(),
                     keys.len()
@@ -375,10 +387,10 @@ pub fn load_key(fp: Option<&str>) -> Result<(String, SigningKey), SignError> {
     let bytes = std::fs::read(dir.join(format!("{chosen}.key")))?;
     let seed: [u8; 32] = b64()
         .decode(bytes)
-        .map_err(|e| SignError::Malformed(e.to_string()))?
+        .map_err(|e| SignError::BadSigningKey(e.to_string()))?
         .as_slice()
         .try_into()
-        .map_err(|_| SignError::Malformed("key must be 32 bytes".into()))?;
+        .map_err(|_| SignError::BadSigningKey("key must be 32 bytes".into()))?;
     Ok((chosen, SigningKey::from_bytes(&seed)))
 }
 
@@ -484,14 +496,61 @@ mod tests {
         assert!(matches!(verify(&signed), Err(SignError::BadSignature(_))));
     }
 
+    /// Every signing-key failure must read as a key problem, never as a
+    /// wasm parse failure: `load_key` used to share the parser's
+    /// `Malformed` variant, so an ambiguous keyring was reported as
+    /// "not a wasm binary" — a message about a file it never opened.
     #[test]
-    fn load_key_rejects_non_fingerprint_input() {
-        // The shape check fires before any filesystem access, so these
-        // never touch the real keys dir — `tau sign --key "../x"`-style
-        // input must die here, not in a path join.
-        assert!(load_key(Some("../escape")).is_err());
-        assert!(load_key(Some("AAAAAAAAAAAAAAAA")).is_err());
-        assert!(load_key(Some("abc123")).is_err());
+    fn load_key_errors_are_key_shaped() {
+        let dir = std::env::temp_dir().join(format!("tau-loadkey-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let message = |fp: Option<&str>| match load_key_in(&dir, fp) {
+            Ok(_) => panic!("expected an error for {fp:?}"),
+            Err(e) => e.to_string(),
+        };
+        let assert_key_shaped = |m: &str, what: &str| {
+            assert!(m.starts_with("invalid signing key"), "{what} got: {m}");
+            assert!(!m.contains("wasm"), "{what} misleads: {m}");
+            assert_ne!(m, "invalid signing key: ", "{what} carries no detail");
+        };
+        let write_key = |name: &str, bytes: &[u8]| {
+            std::fs::write(dir.join(format!("{name}.key")), bytes).unwrap()
+        };
+
+        // The shape check fires before any filesystem access, so
+        // `tau sign --key "../x"` must die here, not in a path join.
+        let m = message(Some("../escape"));
+        assert!(m.contains("not a signing fingerprint"), "got: {m}");
+        assert_key_shaped(&m, "path-shaped --key");
+        assert_key_shaped(&message(Some("AAAAAAAAAAAAAAAA")), "uppercase --key");
+
+        // Keyring selection: zero then two keys, both named by count.
+        let m = message(None);
+        assert!(m.contains("found 0"), "got: {m}");
+        assert_key_shaped(&m, "empty keyring");
+        write_key("0000000000000000", b"x");
+        write_key("0000000000000001", b"x");
+        let m = message(None);
+        assert!(m.contains("found 2"), "got: {m}");
+        assert_key_shaped(&m, "ambiguous keyring");
+
+        // The selected file itself: not base64, then not 32 bytes.
+        assert_key_shaped(&message(Some("0000000000000000")), "undecodable key");
+        write_key("0000000000000000", b64().encode([7u8; 16]).as_bytes());
+        let m = message(Some("0000000000000000"));
+        assert!(m.contains("32 bytes"), "got: {m}");
+        assert_key_shaped(&m, "short key");
+
+        // And the happy path still resolves the file named by the fingerprint.
+        write_key("0000000000000000", b64().encode([7u8; 32]).as_bytes());
+        let (fp, key) = load_key_in(&dir, Some("0000000000000000")).unwrap();
+        assert_eq!(fp, "0000000000000000");
+        assert_eq!(
+            key.verifying_key().to_bytes(),
+            SigningKey::from_bytes(&[7u8; 32]).verifying_key().to_bytes()
+        );
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

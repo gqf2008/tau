@@ -2,6 +2,16 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `tau sign` reported signing-key failures as `not a wasm binary`: a
+  malformed `--key` fingerprint, an ambiguous keyring, and an unreadable key
+  file all shared the module parser's error variant, so the message named a
+  file that was never opened. Key failures now carry their own key-shaped
+  message; `tau trust` had already been fixed the same way.
+- `scripts/validate.sh` asserts the wasm-parse wording cannot come back on
+  the `tau sign --key` path, not just on `tau trust`.
+
 ### Docs
 
 - `docs/tutorial.md`: the hands-on walkthrough of the path the author guide

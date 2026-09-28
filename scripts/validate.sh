@@ -167,10 +167,15 @@ if "$TAU" sign ext.wasm --key ../escape > sign-key.out 2>&1; then
 fi
 grep -q "not a signing fingerprint" sign-key.out \
     || fail "unexpected sign rejection: $(cat sign-key.out)"
+# ...and as a bad KEY: key problems used to share the module parser's
+# Malformed variant and render as "not a wasm binary".
+if grep -q "not a wasm binary" sign-key.out; then
+    fail "signing-key error misreported as a wasm parse error: $(cat sign-key.out)"
+fi
 echo "ok — tau sign --key rejects non-fingerprint input"
 
-# A garbage pubkey must be refused as a bad KEY — the shared Malformed
-# variant used to misreport it as "not a wasm binary".
+# A garbage pubkey must be refused as a bad KEY too — same history: the
+# shared Malformed variant used to misreport it as "not a wasm binary".
 OUT="$("$TAU" trust 'not-base64!!!' 2>&1 || true)"
 echo "$OUT" | grep -q "invalid public key" \
     || fail "garbage pubkey error misleads: $OUT"
