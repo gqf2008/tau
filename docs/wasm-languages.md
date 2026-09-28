@@ -36,8 +36,8 @@ transcript 必须同时出现：
 
 | 语言 | 工具链 / 版本 | 产物 | 构建命令 | tau 加载 | 断点或依据 |
 |---|---|---|---|---|---|
-| C | wit-bindgen 0.62（c）+ clang 22.1.8 + wasm-tools 1.259 | `c_upper.wasm` 7.8 KB | `bash examples/c-upper/build.sh` | ✅ 跑通 | — |
-| C++ | wit-bindgen 0.62（cpp）+ clang++ 22.1.8 + wasm-tools 1.259 | `cpp_upper.wasm` 8.4 KB | `bash examples/cpp-upper/build.sh` | ✅ 跑通 | 0.2.0 需 -std=c++23 + 新增 expected/variant 垫片；生成代码要实例化**值形态** `expected<T, E>`（与契约版本无关，见下文），垫片到 0.4.0 复验才补齐 |
+| C | wit-bindgen 0.62（c）+ clang 22.1.8 + wasm-tools 1.259 | `c_upper.wasm` 8.0 KB | `bash examples/c-upper/build.sh` | ✅ 跑通 | — |
+| C++ | wit-bindgen 0.62（cpp）+ clang++ 22.1.8 + wasm-tools 1.259 | `cpp_upper.wasm` 8.6 KB | `bash examples/cpp-upper/build.sh` | ✅ 跑通 | 0.2.0 需 -std=c++23 + 新增 expected/variant 垫片；生成代码要实例化**值形态** `expected<T, E>`（与契约版本无关，见下文），垫片到 0.4.0 复验才补齐 |
 | Python | componentize-py 0.25.1（pip） | `py_upper.wasm` 18.4 MB | `bash examples/python-upper/build.sh` | ✅ 跑通 | 实现类命名坑，见下文 |
 | JavaScript | jco 1.35.0（npx，node 22.14） | `js_upper.wasm` 12.8 MB | `bash examples/js-upper/build.sh` | ✅ 跑通 | 必须 `--disable http fetch-event` |
 | TypeScript | jco 1.35.0（npx，node 22.14） | `ts_upper.wasm` 12.8 MB | `bash examples/ts-upper/build.sh` | ✅ 跑通 | 同上 |
@@ -59,7 +59,7 @@ v0.3.0 的树上用当前工具链（wit-bindgen 0.62）重建，报同一个
 **矩阵里的 ✅ 只在被重建的那一轮才成立**。垫片补齐后重建通过。
 Go 按本节三个 env 重建通过（工具链沿用
 上一轮的安装；`tinygo`/`wasm-opt` 都不在 PATH 上，必须显式给）。
-产物尺寸为 0.4.0 实测。
+产物尺寸为 0.4.0 实测，十进制（KB=10³ B、MB=10⁶ B）。
 
 ## C —— 零依赖 freestanding 路线
 
