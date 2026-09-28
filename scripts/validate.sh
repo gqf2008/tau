@@ -1,13 +1,14 @@
 #!/usr/bin/env bash
 # First-user validation: prove the release candidate works for someone
 # who just installed tau, in eleven steps — demo, the built-in tools
-# (default set, off switch, no shell through --demo), the signing/trust
-# chain (incl. tamper rejection), all three built-in providers against a
-# loopback mock (and a real tool-call round trip on that wire), the wasm
-# provider consent gate, the MCP bridge spawn
-# gate, the remembered-consent lifecycle, OCI distribution, blob GC,
-# compaction, probe verdicts, and the interactive REPL over a real pty
-# (skipped with a note when pywinpty is not installed).
+# (default set, off switch, no shell through --demo), the ACP mode over
+# the pipes an editor uses, the signing/trust chain (incl. tamper
+# rejection), all three built-in providers against a loopback mock (and
+# a real tool-call round trip on that wire), the wasm provider consent
+# gate, the MCP bridge spawn gate, the remembered-consent lifecycle, OCI
+# distribution, blob GC, compaction, probe verdicts, and the interactive
+# REPL over a real pty (skipped with a note when pywinpty is not
+# installed).
 #
 # Usage: scripts/validate.sh
 #
@@ -172,6 +173,14 @@ if "$TAU" --tools nope --demo -p "hello" > /dev/null 2>&1; then
     fail "--tools nope exited 0"
 fi
 echo "ok — the off switch works, the demo cannot run a shell, typos are fatal"
+
+# --- step 1f: ACP mode over the pipes an editor uses (docs/acp.md) ----
+step "1f/11 acp (a scripted client speaks the editor protocol)"
+# A real client in python: handshake, session/new, a streamed prompt,
+# a component's tool round trip, a cancel at rest, and --acp -p refused.
+# It parses EVERY line tau writes to stdout, so a diagnostic that leaked
+# into the protocol stream fails here.
+python "$ROOT/scripts/acp_e2e.py" "$TAU" "$UPPER" "$WORK/acp-e2e" || fail "acp e2e failed"
 
 # --- step 2: signing + trust chain ------------------------------------
 step "2/11 signing and trust chain"
