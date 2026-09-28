@@ -1,5 +1,19 @@
 # Changelog
 
+## [Unreleased]
+
+### Docs — the post-publish check is a recipe now, not a sentence
+
+- `docs/release.md`'s post-publish block spells out the stranger test the
+  0.4.0 and 0.5.0 rounds actually ran: the crates.io binary against the dist
+  zip's components (the two-line acceptance of docs/wasm-languages.md), the
+  side-effect-ledger check that the install really replaced the previous
+  version, and a previous-contract component refused with both versions
+  named. It also says plainly that `scripts/validate.sh` builds from the
+  checkout — it proves the tree, not the upload — and warns that a native
+  `tau.exe` cannot read an MSYS `/tmp/...` argument (`os error 3` under
+  "reading <path>", which reads like a component defect and is not one).
+
 ## [0.5.0] — 2026-09-28
 
 ### Breaking — contract `tau:extension@0.5.0`: every wait on a peer gets a budget (wit-review F11)

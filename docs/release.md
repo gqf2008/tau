@@ -94,14 +94,29 @@ cargo publish -p tau-cli
 git tag v$(grep '^version' Cargo.toml | head -1 | cut -d'"' -f2)
 ```
 
-Post-publish, verify as a stranger would (README's install line must
-work verbatim) and push the tag:
+Post-publish, verify as a stranger would: the README's install line
+verbatim, then the **published** artifacts under the freshly installed
+binary. `scripts/validate.sh` builds from the checkout, so it proves the
+tree — not the upload:
 
 ```bash
-cargo install tau-cli --locked
-scripts/validate.sh
+cargo install tau-cli --locked              # must replace the previous version
+grep -m1 tau-cli ~/.cargo/.crates.toml      # the install really happened (side-effect ledger)
+unzip -q dist/tau-<version>-<target>.zip -d "$TEMP/stranger"
+cd "$TEMP/stranger/tau-<version>-<target>"  # relative paths from here on
+tau --version                               # names the published version
+for c in upper c_upper cpp_upper go_upper; do   # the two-line acceptance, docs/wasm-languages.md
+    tau --allow-unsigned -e "examples/$c.wasm" --demo -p "shout hello using the upper tool"
+done
+unzip -q <previous release's zip> -d "$TEMP/prev"    # and the old contract is refused
+tau --allow-unsigned -e "$TEMP/prev/<dist>/examples/upper.wasm" --demo -p "shout hi"
 git push origin main --tags
 ```
+
+Write the component paths relative (as above) or `C:/`-style: a native
+`tau.exe` cannot read an MSYS `/tmp/...` argument — it fails with
+`os error 3` under "reading <path>", which reads like a component defect
+and is not one.
 
 If the machine replaces the crates-io source with a mirror (e.g.
 `rsproxy-sparse` in `~/.cargo/config.toml`), `cargo publish` refuses
