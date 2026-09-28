@@ -12,6 +12,13 @@ extensible — but extensions are **wasm components**, not in-process scripts.
   points are wired). Compaction condenses the branch into a summary
   entry (`--compact`, `/compact` in the interactive REPL); the originals
   stay in the tree, pi-style.
+- **Tools**: eight built-in native tools — `read`, `write`, `edit`, `ls`,
+  `grep`, `find`, `bash`, `powershell` — so a run can work on a repository
+  with nothing installed first. They are host code (the wasm sandbox does
+  not apply to them): `--tools read,grep` narrows the set,
+  `--no-builtin-tools` hands the toolset to the components, and a
+  component tool with the same name shadows the built-in. See
+  `docs/builtin-tools.md`.
 - **Extensions**: drop a `.wasm` in. Components implement the
   `tau:extension` WIT world (`wit/tau.wit`): `tools` (contribute agent
   tools), `probes` (observe and influence the run), and the `host`
@@ -88,6 +95,7 @@ The demo with the extension loaded shows the whole agent loop — call,
 result, answer citing the result:
 
 ```
+[tau] built-in tools: bash, edit, find, grep, ls, powershell, read, write
 [tau] loaded extension: upper
 [tau]   tool: upper
 [tau] tool → upper
@@ -97,9 +105,10 @@ tau is alive. The tool answered: SHOUT HELLO TAU. (faux model — …)
 
 ## Releases
 
-See `CHANGELOG.md` for what's in each version. `scripts/validate.sh` proves the release candidate the way a first
-user meets it (demo, signing/trust chain, built-in provider against a
-loopback mock, wasm-provider consent gate) and restores the environment
+See `CHANGELOG.md` for what's in each version. `scripts/validate.sh`
+proves the release candidate the way a first user meets it (demo,
+built-in tools, signing/trust chain, built-in provider against a loopback
+mock, wasm-provider consent gate) and restores the environment
 afterwards. `scripts/release.sh` runs the full suite, rebuilds the wasm
 examples, builds the release binary (lto + strip), and assembles
 `dist/tau-<version>-<target>.zip` with the binary, README, LICENSE, docs/,
@@ -113,9 +122,10 @@ and prebuilt (unsigned) example components.
 | `crates/tau-openai` | OpenAI chat completions + Responses API providers |
 | `crates/tau-anthropic` | Anthropic Messages API provider |
 | `crates/tau-ext` | wasmtime component host (WASI open by default) |
+| `crates/tau-tools` | built-in native tools (read/write/edit/ls/grep/find/bash/powershell) |
 | `crates/tau-cli` | `tau` binary (print + interactive modes) |
 | `wit/tau.wit` | the extension contract, versioned |
-| `docs/` | architecture (the design doc), extensions (author guide), tutorial (hands-on walkthrough), probes, events, bridges, signing, oci, media, wasip3-streams, release, perf |
+| `docs/` | architecture (the design doc), extensions (author guide), tutorial (hands-on walkthrough), builtin-tools, probes, events, bridges, signing, oci, media, wasip3-streams, release, perf |
 | `examples/upper` | example wasm extension (tool) |
 | `examples/echo-provider` | example wasm provider (push-mode streaming) |
 | `examples/http-provider` | example wasm provider (consent-gated http) |

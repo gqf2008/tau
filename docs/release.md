@@ -1,9 +1,10 @@
 # Releasing tau to crates.io
 
-Five publishable crates, one workspace version (`[workspace.package]
+Six publishable crates, one workspace version (`[workspace.package]
 version` in the root `Cargo.toml`). Bump it once, then also bump the
 `version = "x.y.z"` pins on the inter-crate path deps in
-`crates/*/Cargo.toml` (tau-core/tau-openai/tau-anthropic/tau-ext edges) —
+`crates/*/Cargo.toml` (tau-core/tau-openai/tau-anthropic/tau-ext/
+tau-tools edges) —
 cargo refuses to resolve otherwise. `cargo check --workspace` then
 refreshes the lockfile.
 0.x semantics: any minor bump may break. The same commit renames
@@ -91,6 +92,7 @@ contents; noteworthy inclusions:
 ```bash
 cargo login                               # crates.io token, once
 cargo publish -p tau-core
+cargo publish -p tau-tools
 cargo publish -p tau-openai
 cargo publish -p tau-anthropic
 cargo publish -p tau-ext
@@ -129,10 +131,11 @@ uploads must go to the real registry, so append `--registry crates-io`
 to every publish command (and to the `--dry-run` checks). Installing
 through a mirror is fine; only publishing is.
 
-Name availability was checked 2026-09-26: all five names were free on
-crates.io. If one is taken by publish time, rename is a workspace-wide
-change (crate names appear in path deps and doc links) — do not publish
-a partial chain.
+Name availability was checked 2026-09-26: all five names then in the
+workspace were free on crates.io (`tau-tools`, added 2026-09-28, checked
+free the same day). If one is taken by publish time, rename is a
+workspace-wide change (crate names appear in path deps and doc links) —
+do not publish a partial chain.
 
 ## Not published
 

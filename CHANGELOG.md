@@ -2,6 +2,20 @@
 
 ## [Unreleased]
 
+### Added
+
+- **Built-in tools** (`crates/tau-tools`): `read`, `write`, `edit`, `ls`,
+  `grep`, `find`, `bash` and `powershell` are registered by default, so a
+  run works on a repository with no extension installed. Schemas,
+  descriptions, output shapes, error texts and limits are pi's; `grep`
+  and `find` search natively (`ignore` + `regex` + `globset`) instead of
+  requiring ripgrep or fd, and a `timeout:` kills the whole process tree.
+  Two new flags: `--tools <list>` replaces the selection — built-in and
+  component tools alike, an unknown name fails the run — and
+  `--no-builtin-tools` registers none. Every agent run now prints
+  `[tau] built-in tools: …`. The tools are host code, so `--deny-wasi`
+  does not apply to them; `docs/builtin-tools.md` is the reference.
+
 ### Changed
 
 - `--demo` scripts **the tool the run picked**, not the alphabetically
@@ -10,7 +24,10 @@
   by name against the request: a pick the request does not advertise
   scripts nothing (the old `first()` fallback is gone), and a tool can opt
   out of the demo entirely with a `None` tier. `docs/tutorial.md` and
-  `docs/bridges.md` carry the new rule.
+  `docs/bridges.md` carry the new rule. The eight built-ins use it: a
+  read-only one the user named with `--tools` may be scripted, and the
+  mutating four never are — `tau --tools bash --demo` registers bash and
+  runs nothing (`scripts/validate.sh` 1e).
 
 ### Fixed
 

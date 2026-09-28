@@ -323,6 +323,13 @@ Under deny the WASI interfaces still link, but nothing is granted: fs
 and network calls fail permission-denied, env and args come back empty,
 stdio goes nowhere.
 
+The same honesty applies to the tools tau ships itself. The eight
+built-in tools (`docs/builtin-tools.md`) are **host code, not
+components**: they read, write, and spawn with the permissions of the
+tau process, and `--deny-wasi` says nothing about them. They are not
+consent-gated either — turning them off is `--no-builtin-tools`, which
+is about what the model may call, not about what the sandbox allows.
+
 So do not mistake the gates for a sandbox. If a real boundary is what
 you need, that is an OS-level question about the process tau runs in.
 What does hold is the signing chain — fingerprint → trust → consent is

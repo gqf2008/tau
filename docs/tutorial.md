@@ -165,6 +165,7 @@ tau --allow-unsigned -e target/wasm32-wasip2/release/wordcount.wasm --demo \
 ```
 
 ```
+[tau] built-in tools: bash, edit, find, grep, ls, powershell, read, write
 [tau] loaded extension: wordcount
 [tau]   tool: wordcount
 
@@ -247,6 +248,7 @@ the wasm parser's variant, so it named a file it never opens.)
 Now the run from §3 works unchanged, without the escape hatch:
 
 ```
+[tau] built-in tools: bash, edit, find, grep, ls, powershell, read, write
 [tau] loaded extension: wordcount
 [tau]   tool: wordcount
 
@@ -303,6 +305,7 @@ into a content-addressed cache, verified against the digest, and then
 checked for signature and trust exactly as in §4:
 
 ```
+[tau] built-in tools: bash, edit, find, grep, ls, powershell, read, write
 [tau] oci: oci://127.0.0.1:8406/test/component:v1 -> sha256:ac210b76… (…\.tau\oci\blobs\sha256_ac210b76…)
 [tau] note: mutable tag — pin @sha256:ac210b76b27f855cdd3322a7fe2290e5fab28e67663b27fe5583fdc0f2a933ca for reproducible loads
 [tau] loaded extension: sha256_ac210b76b27f855cdd3322a7fe2290e5fab28e67663b27fe5583fdc0f2a933ca

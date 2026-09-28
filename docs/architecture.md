@@ -54,6 +54,10 @@ ABI 是已知的未来改进项，当前边界先行钉死。
 │ 实例生命周期（trap→revive）、签名/信任/同意存储、 │
 │ scoped 能力（process/http）的宿主实现、OCI 分发   │
 ├─────────────────────────────────────────────────┤
+│ tau-tools 内置工具：read/write/edit/ls/grep/find/ │
+│ bash/powershell。宿主代码（非 wasm），默认注册，   │
+│ 组件工具同名可覆盖                                │
+├─────────────────────────────────────────────────┤
 │ tau-core  域模型：session 树、agent 循环、Model/  │
 │ Tool/Probe 注册表、事件总线、控制通道、blob 存储、 │
 │ faux 模型（离线演示与测试）                       │
@@ -62,8 +66,9 @@ ABI 是已知的未来改进项，当前边界先行钉死。
 └─────────────────────────────────────────────────┘
 ```
 
-依赖方向严格向下：`tau-cli → tau-ext → tau-core`，`tau-openai/anthropic
-→ tau-core`。tau-core 不知道 wasm 的存在；tau-ext 不知道 CLI 的存在；
+依赖方向严格向下：`tau-cli → tau-ext → tau-core`，
+`tau-cli → tau-tools → tau-core`，`tau-openai/anthropic → tau-core`。
+tau-core 不知道 wasm 的存在；tau-ext 不知道 CLI 的存在；
 契约文件（WIT）不依赖任何 crate——组件作者 vendor 它即可。
 
 ## 3. 核心域模型（tau-core，简述)
@@ -288,6 +293,10 @@ digest）、blob 先验 sha256 再落盘、内容寻址缓存命中校验、腐�
 - **不发明沙箱**：能力边界就是 wasm 运行时 + world 划分 + scoped
   能力的宿主实现，没有额外的进程隔离层（被 spawn 的 MCP server 是
   用户自己选的风险，与原生 MCP 客户端相同）。
+- **内置工具在沙箱之外**：`read/write/edit/ls/grep/find/bash/
+  powershell` 是宿主代码，`--deny-wasi` 只管 wasm 组件、管不到它们，
+  也没有审批门；唯一的关断是启动时的 `--tools` / `--no-builtin-tools`
+  （`docs/builtin-tools.md`）。
 - **wasip3 流式 ABI**：当前边界是「字符串整体拷入 guest」，大 ABI
   改造是保留给未来的显式决策，不被动滑入。工具链现状已 spike
   钉死：guest 侧 stable 阻塞至 Rust 1.100（预计 2026-11），host
@@ -299,6 +308,7 @@ digest）、blob 先验 sha256 再落盘、内容寻址缓存命中校验、腐�
 |------|------|
 | `wit/tau.wit` | 扩展契约（先读这个） |
 | `docs/extensions.md` | 扩展作者指南：scaffold → 三 world → 签名 → OCI |
+| `docs/builtin-tools.md` | 内置工具：八个原生工具、两个旗标、沙箱诚实性 |
 | `docs/probes.md` | 九个探针点的载荷与 verdict 语义 |
 | `docs/events.md` | 事件总线 / 探针 / 控制通道的三通道模型 |
 | `docs/bridges.md` | 桥的能力模型与 MCP 参考实现 |
