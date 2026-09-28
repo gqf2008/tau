@@ -5,7 +5,8 @@ contract is `wit/tau.wit` (versioned — the `package` line there is the
 authority, currently `tau:extension@0.6.0`); this guide
 walks the three worlds — `extension` (tools + probes), `provider`
 (models), `bridge` (external protocols) — using the shipped examples as
-reference implementations.
+reference implementations. For the same path walked hands-on, with every
+command and its output, see `docs/tutorial.md`.
 
 ## Contract conventions
 

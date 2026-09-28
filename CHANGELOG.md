@@ -1,5 +1,17 @@
 # Changelog
 
+## [Unreleased]
+
+### Docs
+
+- `docs/tutorial.md`: the hands-on walkthrough of the path the author guide
+  describes — scaffold → sign → OCI with every command and its real output,
+  including the offline loopback-registry recipe `scripts/validate.sh` step 7
+  uses and the consumer-side `tau trust --from-component` onboarding.
+- `docs/release.md`: how to force a fresh clippy run for the non-workspace
+  example crates after a version-only cut — a cut does not move their
+  fingerprints, so the leg can be empty on a brand-new commit.
+
 ## [0.6.0] — 2026-09-28
 
 ### Breaking — contract `tau:extension@0.6.0`: `write-stdin` takes a budget and says how much it took (wit-review F12)
