@@ -16,6 +16,9 @@ async-trait.workspace = true
 # `~` expansion, the same crate tau-core/tau-ext already use (`dirs` on
 # Windows resolves the real profile dir, not $HOME — see docs/media.md).
 dirs = "6"
+# NFKC in the edit tool's fuzzy matcher, which folds full-width forms
+# (an IME artifact) to ASCII the way pi's `String.normalize("NFKC")` does.
+unicode-normalization = "0.1"
 
 [dev-dependencies]
 tempfile = "3"
