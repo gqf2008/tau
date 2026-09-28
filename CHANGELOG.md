@@ -15,6 +15,11 @@
   `--no-builtin-tools` registers none. Every agent run now prints
   `[tau] built-in tools: …`. The tools are host code, so `--deny-wasi`
   does not apply to them; `docs/builtin-tools.md` is the reference.
+- **`ToolRegistry` and `ProbeRegistry` are `Clone`** (tau-core), and a
+  clone shares its tools and handlers rather than copying them: one
+  instantiated component can serve more than one session, while
+  registering into a clone still affects only that clone. `register`
+  still takes a `Box`, so no call site changed.
 
 ### Changed
 
