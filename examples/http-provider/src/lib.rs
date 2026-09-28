@@ -20,9 +20,10 @@ use exports::tau::extension::models::{Guest, Info};
 use tau::extension::events::{self, ModelEvent, StopReason};
 use tau::extension::http;
 
-/// Idle budget for a body read: the gateway answers promptly, so this is
-/// generous already — it exists so a half-open connection fails loudly
-/// instead of hanging the call (wit-review F9).
+/// Idle budget for one network wait: the response headers, then each body
+/// read. The gateway answers promptly, so this is generous already — it
+/// exists so a half-open connection fails loudly instead of hanging the
+/// call (wit-review F9 for the body, F11 for the headers).
 const IDLE_MS: u32 = 30_000;
 
 struct HttpProvider;
@@ -96,7 +97,7 @@ fn fetch(request_json: &str) -> Result<String, String> {
     };
     let authed = !headers.is_empty();
 
-    let handle = http::request("GET", &url, &headers, &[])?;
+    let handle = http::request("GET", &url, &headers, &[], idle_ms)?;
     let status = http::status(handle)?;
     let mut body = String::new();
     loop {

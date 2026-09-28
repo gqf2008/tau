@@ -48,6 +48,13 @@ use tau::extension::{host, http, ingress};
 /// translation, not user configuration.
 const ROUTE: &str = "/im/whatsapp";
 
+/// Budget for one network wait: a reply POST's response headers, or a ws
+/// connect's handshake. The platform answers in seconds, so this is
+/// generous already — it exists so a peer that accepts the connection and
+/// then says nothing fails loudly instead of hanging the bridge
+/// (wit-review F11).
+const NET_MS: u32 = 30_000;
+
 struct Adapter {
     /// The chat an inbound message came from (echoed in the reply).
     chat_id: Option<String>,
@@ -143,6 +150,7 @@ impl Probes for WhatsAppBridge {
                     &url,
                     &[("content-type".to_string(), "application/json".to_string())],
                     &body.into_bytes(),
+                    NET_MS,
                 ) {
                     Ok(h) => {
                         let _ = http::status(h);

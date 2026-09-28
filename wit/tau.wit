@@ -1,4 +1,4 @@
-package tau:extension@0.4.0;
+package tau:extension@0.5.0;
 
 /// ---- Message trunk: tau owns this schema, so it is typed, not JSON ----
 ///
@@ -411,11 +411,27 @@ interface process {
     spawn: func(argv: list<string>) -> result<u64, string>;
 
     /// Append bytes to the child's stdin.
+    ///
+    /// The one blocking call here with no `timeout-ms`, and it cannot take
+    /// the same shape as the reads: a write that times out may already have
+    /// delivered part of the data, so the only safe retry would be to
+    /// resend the whole buffer — which silently replays half a message.
+    /// Bounding it means a partial-write return (bytes written, guest-held
+    /// offset): an interface change, not a parameter (wit-review F12). A
+    /// child that never reads its stdin can therefore still block the
+    /// caller.
     write-stdin: func(handle: u64, data: list<u8>) -> result<_, string>;
 
-    /// Read up to `max` bytes from the child's stdout. Blocks until at
-    /// least one byte is available or the stream closes (eof = true).
-    read-stdout: func(handle: u64, max: u32) -> result<tuple<list<u8>, bool>, string>;
+    /// Read up to `max` bytes from the child's stdout. Returns as soon as
+    /// at least one byte is available or the stream closes (eof = true).
+    /// The wait is bounded by `timeout-ms`: a child that hangs without
+    /// writing anything surfaces as an explicit error instead of parking
+    /// the host thread forever (wit-review F11 — the process half of the
+    /// invariant `read-body` and `ws.recv` already carry), and 0 is
+    /// rejected, because "block forever" is not a contract. A timeout
+    /// leaves the handle usable: retry with a longer budget, or kill the
+    /// child.
+    read-stdout: func(handle: u64, max: u32, timeout-ms: u32) -> result<tuple<list<u8>, bool>, string>;
 
     /// Terminate the child and close the handle. Returns a result since
     /// 0.2.0 — a kill failure is reported, not swallowed (wit-review F8).
@@ -433,8 +449,13 @@ interface http {
     /// Start a request. Fails if the url's origin is not in the consent
     /// allowlist. Returns a response handle. `method` is passed through
     /// verbatim — send uppercase ("GET", "POST"); servers are
-    /// case-sensitive about method names.
-    request: func(method: string, url: string, headers: list<tuple<string, string>>, body: list<u8>) -> result<u64, string>;
+    /// case-sensitive about method names. `timeout-ms` bounds the connect
+    /// and the wait for the response headers (0 rejected): a peer that
+    /// accepts the connection and then says nothing is indistinguishable
+    /// from a dead one, and used to park the host thread forever
+    /// (wit-review F11). The response BODY is deliberately not covered by
+    /// it — that pace belongs to `read-body`'s own budget.
+    request: func(method: string, url: string, headers: list<tuple<string, string>>, body: list<u8>, timeout-ms: u32) -> result<u64, string>;
 
     /// HTTP status code of a started response.
     status: func(handle: u64) -> result<u16, string>;
@@ -444,9 +465,8 @@ interface http {
 
     /// Read up to `max` bytes of the response body. Returns as soon as at
     /// least one byte is available or the stream ends (eof = true) — the
-    /// same incremental-consumption contract as process.read-stdout (which
-    /// carries no idle bound of its own yet — wit-review F11), so SSE
-    /// streams can be consumed incrementally and closed early. The wait is
+    /// same incremental-consumption contract as process.read-stdout, so
+    /// SSE streams can be consumed incrementally and closed early. The wait is
     /// bounded by `timeout-ms`: a quiet peer returns an explicit error
     /// instead of blocking the call forever (a silently hung SSE is
     /// indistinguishable from a dead connection — wit-review F9), and 0
@@ -472,8 +492,11 @@ interface ws {
 
     /// Connect to a ws(s) URL. The origin must be in the consent
     /// allowlist (same rule as http.request); a refusal names the
-    /// origin. Returns a handle.
-    connect: func(url: string) -> result<u64, string>;
+    /// origin. `timeout-ms` bounds the TCP/TLS connect and the upgrade
+    /// handshake (0 rejected): a peer that accepts the connection and then
+    /// stalls is indistinguishable from a dead one, and used to park the
+    /// host thread forever (wit-review F11). Returns a handle.
+    connect: func(url: string, timeout-ms: u32) -> result<u64, string>;
 
     /// Send one frame. Ok means the frame was WRITTEN to the socket
     /// (the connection actor confirms after writing), not merely

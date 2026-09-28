@@ -94,7 +94,13 @@ impl WsRegistry {
         crate::http::HttpRegistry::origin_of(&format!("{httpish}://{rest}"))
     }
 
-    pub(crate) fn connect(&mut self, url: &str) -> Result<u64, String> {
+    pub(crate) fn connect(&mut self, url: &str, timeout_ms: u32) -> Result<u64, String> {
+        if timeout_ms == 0 {
+            return Err(
+                "ws.connect: timeout-ms must be > 0 — a connect that can wait forever hides a dead peer (wit-review F11)"
+                    .into(),
+            );
+        }
         let origin =
             Self::origin_of(url).ok_or_else(|| format!("ws.connect: not a ws(s) URL: {url:?}"))?;
         if !self.origins.contains(&origin) {
@@ -103,8 +109,28 @@ impl WsRegistry {
                  like http origins — the host CLI passes them, e.g. --mcp-url)"
             ));
         }
+        // tungstenite::connect does TCP + TLS + the upgrade handshake in one
+        // blocking call with no bound of its own: a peer that accepts and then
+        // stalls would park the host thread forever (wit-review F11). Run it
+        // on a helper thread and bound the wait here; the abandoned socket
+        // dies with the peer or the OS connect timeout. The read tick is set
+        // only after the handshake, so it cannot bound this phase.
+        let (tx, rx) = mpsc::channel();
+        let target = url.to_string();
+        std::thread::spawn(move || {
+            let _ = tx.send(tungstenite::connect(target.as_str()));
+        });
         let (mut socket, _response) =
-            tungstenite::connect(url).map_err(|e| format!("ws.connect {origin}: {e}"))?;
+            match rx.recv_timeout(Duration::from_millis(u64::from(timeout_ms))) {
+                Ok(Ok(pair)) => pair,
+                Ok(Err(e)) => return Err(format!("ws.connect {origin}: {e}")),
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(format!("ws.connect: no handshake within {timeout_ms}ms"));
+                }
+                Err(mpsc::RecvTimeoutError::Disconnected) => {
+                    return Err(format!("ws.connect {origin}: the connect thread died"));
+                }
+            };
         set_read_tick(&mut socket);
         let (cmd_tx, cmd_rx) = mpsc::channel::<WsCommand>();
         let (frame_tx, frame_rx) = mpsc::channel();
@@ -302,10 +328,48 @@ mod tests {
     #[test]
     fn unconsented_origin_and_bad_url_fail_loud() {
         let mut registry = WsRegistry::new(1, HashSet::new());
-        let err = registry.connect("ws://127.0.0.1:9/").unwrap_err();
+        let err = registry.connect("ws://127.0.0.1:9/", 1_000).unwrap_err();
         assert!(err.contains("not consented"), "{err}");
-        let err = registry.connect("ftp://x.test/").unwrap_err();
+        let err = registry.connect("ftp://x.test/", 1_000).unwrap_err();
         assert!(err.contains("not a ws(s) URL"), "{err}");
+    }
+
+    #[test]
+    fn connect_rejects_zero_timeout() {
+        // 0 would mean "wait for the handshake forever" — refused before the
+        // URL is even parsed (wit-review F11).
+        let mut registry = WsRegistry::new(1, HashSet::new());
+        let err = registry.connect("ws://127.0.0.1:9/", 0).unwrap_err();
+        assert!(err.contains("must be > 0"), "{err}");
+        assert!(err.contains("wait forever"), "{err}");
+    }
+
+    #[test]
+    fn connect_times_out_when_the_peer_never_handshakes() {
+        // TCP accepts, the upgrade never comes. tungstenite's connect does
+        // transport + handshake in one unbounded blocking call, and the read
+        // tick is only set after it returns — so before F11 this shape parked
+        // the host thread until the peer or the OS gave up.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            // Hold the socket open, silent, far past the guest's budget.
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            drop(stream);
+        });
+        let origin = format!("http://127.0.0.1:{port}");
+        let mut registry = WsRegistry::new(1, [origin].into_iter().collect());
+        let started = std::time::Instant::now();
+        let err = registry
+            .connect(&format!("ws://127.0.0.1:{port}/x"), 300)
+            .unwrap_err();
+        assert!(err.contains("no handshake within 300ms"), "{err}");
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(1200),
+            "connect outlived its budget: {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]

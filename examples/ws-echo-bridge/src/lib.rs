@@ -1,5 +1,5 @@
 //! Example tau bridge exercising the `ws` capability
-//! (tau:extension@0.4.0, docs/im-channels.md): the `ws_echo` tool
+//! (tau:extension@0.5.0, docs/im-channels.md): the `ws_echo` tool
 //! connects to the consented endpoint (TAU_MCP_URL, a ws(s) URL), sends
 //! the argument as one text frame, waits for one frame back (explicit
 //! timeout — a recv that can block forever hides a dead connection,
@@ -72,7 +72,9 @@ impl Tools for WsEchoBridge {
 fn round_trip(text: &str) -> Result<String, String> {
     let url = std::env::var("TAU_MCP_URL")
         .map_err(|_| "no TAU_MCP_URL granted by host (--mcp-url ws://…)".to_string())?;
-    let handle = ws::connect(&url)?;
+    // The handshake is bounded too (0.5.0): a peer that accepts the TCP
+    // connection and then never upgrades must fail loudly, not hang.
+    let handle = ws::connect(&url, 5_000)?;
     let result = (|| {
         ws::send(handle, &Frame::Text(text.to_string()))?;
         // 5s is generous for a loopback echo and proves the timeout path

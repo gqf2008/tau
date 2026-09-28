@@ -1,4 +1,4 @@
-//! Example tau extension exercising the host channel (tau:extension@0.4.0).
+//! Example tau extension exercising the host channel (tau:extension@0.5.0).
 //!
 //! Tool `poke` does all three host calls in one shot, and its result
 //! reports each outcome — so the consent gate is observable in the tool

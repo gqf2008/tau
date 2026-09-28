@@ -147,6 +147,47 @@ impl ProcessRegistry {
             .get_mut(&handle)
             .ok_or_else(|| format!("unknown process handle {handle}"))
     }
+
+    /// The read bound lives here (not in the `process::Host` impl) so it can
+    /// be unit-tested without a wasm engine — the `spawn` shape.
+    fn read_stdout(
+        &mut self,
+        handle: u64,
+        max: u32,
+        timeout_ms: u32,
+    ) -> Result<(Vec<u8>, bool), String> {
+        if timeout_ms == 0 {
+            return Err(
+                "process.read-stdout: timeout-ms must be > 0 — a read that can block forever hides a dead child (wit-review F11)"
+                    .into(),
+            );
+        }
+        let child = self.get(handle)?;
+        let max = max.max(1) as usize;
+        // Block only until SOMETHING is available, then return immediately:
+        // waiting to fill `max` would deadlock any peer that sends a short
+        // message and then waits for a reply. The wait is bounded by
+        // `timeout_ms` (wit-review F11): a child that hangs without writing
+        // anything surfaces as an explicit error, and the handle survives it.
+        if child.pending.is_empty() && !child.eof {
+            match child
+                .rx
+                .recv_timeout(std::time::Duration::from_millis(u64::from(timeout_ms)))
+            {
+                Ok(Ok(chunk)) => child.pending.extend(chunk),
+                Ok(Err(e)) => return Err(format!("read-stdout: {e}")),
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
+                    return Err(format!(
+                        "process.read-stdout: no bytes within {timeout_ms}ms"
+                    ));
+                }
+                Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => child.eof = true,
+            }
+        }
+        let take = child.pending.len().min(max);
+        let bytes: Vec<u8> = child.pending.drain(..take).collect();
+        Ok((bytes, child.eof && child.pending.is_empty()))
+    }
 }
 
 impl Drop for ProcessRegistry {
@@ -194,8 +235,9 @@ impl bridge_bindings::tau::extension::http::Host for BridgeState {
         url: String,
         headers: Vec<(String, String)>,
         body: Vec<u8>,
+        timeout_ms: u32,
     ) -> Result<u64, String> {
-        self.http.request(&method, &url, &headers, &body)
+        self.http.request(&method, &url, &headers, &body, timeout_ms)
     }
 
     fn status(&mut self, handle: u64) -> Result<u16, String> {
@@ -216,8 +258,8 @@ impl bridge_bindings::tau::extension::http::Host for BridgeState {
 }
 
 impl bridge_bindings::tau::extension::ws::Host for BridgeState {
-    fn connect(&mut self, url: String) -> Result<u64, String> {
-        self.ws.connect(&url)
+    fn connect(&mut self, url: String, timeout_ms: u32) -> Result<u64, String> {
+        self.ws.connect(&url, timeout_ms)
     }
 
     fn send(
@@ -374,22 +416,13 @@ impl bridge_bindings::tau::extension::process::Host for BridgeState {
             .map_err(|e| format!("write-stdin: {e}"))
     }
 
-    fn read_stdout(&mut self, handle: u64, max: u32) -> Result<(Vec<u8>, bool), String> {
-        let child = self.processes.get(handle)?;
-        let max = max.max(1) as usize;
-        // Block only until SOMETHING is available, then return immediately:
-        // waiting to fill `max` would deadlock any peer that sends a short
-        // message and then waits for a reply.
-        if child.pending.is_empty() && !child.eof {
-            match child.rx.recv() {
-                Ok(Ok(chunk)) => child.pending.extend(chunk),
-                Ok(Err(e)) => return Err(format!("read-stdout: {e}")),
-                Err(_) => child.eof = true,
-            }
-        }
-        let take = child.pending.len().min(max);
-        let bytes: Vec<u8> = child.pending.drain(..take).collect();
-        Ok((bytes, child.eof && child.pending.is_empty()))
+    fn read_stdout(
+        &mut self,
+        handle: u64,
+        max: u32,
+        timeout_ms: u32,
+    ) -> Result<(Vec<u8>, bool), String> {
+        self.processes.read_stdout(handle, max, timeout_ms)
     }
 
     fn kill(&mut self, handle: u64) -> Result<(), String> {
@@ -546,7 +579,11 @@ impl ExtensionHost {
         let mut instance = factory.instantiate().map_err(|e| ExtError::Load {
             path: path.display().to_string(),
             reason: format!(
-                "bridge instantiation failed (the bridge world since 0.3.0 also imports the                  host channel and exports probes — rebuild against wit/tau.wit 0.3.0; a bridge                  with nothing to observe returns an empty points() list): {}",
+                "bridge instantiation failed (the bridge world since 0.3.0 also \
+                 imports the host channel and exports probes — rebuild against \
+                 wit/tau.wit {}; a bridge with nothing to observe returns an empty \
+                 points() list): {}",
+                crate::CONTRACT_VERSION,
                 crate::compact_wasm_error(&e)
             ),
         })?;
@@ -823,5 +860,103 @@ impl ProbeHandler for BridgeProbes {
             // A broken bridge degrades to Continue, never wedges the run.
             Ok(Err(_)) | Err(_) => Verdict::Continue,
         }
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A child that stays alive without writing a byte to stdout — the
+    /// blocked-on-nothing process that read-stdout has to bound. It has to
+    /// outlive the budget below; a command that exits early would close the
+    /// pipe instead and look like EOF.
+    fn quiet_child_argv() -> Vec<String> {
+        #[cfg(windows)]
+        {
+            // ping with its output discarded runs for ~5s.
+            vec!["cmd".into(), "/c".into(), "ping -n 6 127.0.0.1 >nul".into()]
+        }
+        #[cfg(not(windows))]
+        {
+            vec!["sleep".into(), "5".into()]
+        }
+    }
+
+    /// A child that says nothing for ~1s and then speaks: the retry case.
+    /// On Windows the redirection silences only the first command — the
+    /// `echo` after it writes to the pipe.
+    fn late_child_argv() -> Vec<String> {
+        #[cfg(windows)]
+        {
+            vec![
+                "cmd".into(),
+                "/c".into(),
+                "ping -n 2 127.0.0.1 >nul & echo late".into(),
+            ]
+        }
+        #[cfg(not(windows))]
+        {
+            vec!["sh".into(), "-c".into(), "sleep 1; echo late".into()]
+        }
+    }
+
+    #[test]
+    fn read_stdout_rejects_zero_timeout() {
+        // 0 would mean "block until the child says something" — refused
+        // before the handle is even looked up (the read-body shape).
+        let mut registry = ProcessRegistry::new(1);
+        let err = registry.read_stdout(7, 4096, 0).unwrap_err();
+        assert!(err.contains("must be > 0"), "unexpected error: {err}");
+        assert!(err.contains("block forever"), "reason missing: {err}");
+    }
+
+    #[test]
+    fn read_stdout_times_out_on_a_silent_child() {
+        // A live child that has not written yet is indistinguishable from a
+        // wedged one. Before F11 this call parked the host thread until the
+        // child exited.
+        let mut registry = ProcessRegistry::new(1);
+        let argv = quiet_child_argv();
+        let handle = registry.spawn(&argv).expect("spawn quiet child");
+        let started = std::time::Instant::now();
+        let err = registry.read_stdout(handle, 4096, 300).unwrap_err();
+        assert!(
+            err.contains("no bytes within 300ms"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(1200),
+            "read-stdout outlived its budget: {:?}",
+            started.elapsed()
+        );
+        // A timeout is neither EOF nor a dead handle: the same handle times
+        // out again rather than reporting a stale or unknown child. Dropping
+        // the registry reaps the child (ProcessRegistry::drop).
+        let err = registry.read_stdout(handle, 4096, 300).unwrap_err();
+        assert!(
+            err.contains("no bytes within 300ms"),
+            "handle lost after a timeout: {err}"
+        );
+    }
+
+    #[test]
+    fn read_stdout_returns_what_a_child_writes_after_a_timeout() {
+        // The other half of the contract: timing out does not eat the child's
+        // later output, exactly as read-body keeps reading after its own
+        // timeout.
+        let mut registry = ProcessRegistry::new(1);
+        let argv = late_child_argv();
+        let handle = registry.spawn(&argv).expect("spawn late child");
+        let err = registry.read_stdout(handle, 4096, 300).unwrap_err();
+        assert!(
+            err.contains("no bytes within 300ms"),
+            "unexpected error: {err}"
+        );
+        let (bytes, _eof) = registry.read_stdout(handle, 4096, 5000).expect("late read");
+        assert_eq!(
+            String::from_utf8_lossy(&bytes).trim(),
+            "late",
+            "the retry lost the bytes"
+        );
     }
 }

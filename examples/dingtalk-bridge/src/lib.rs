@@ -51,6 +51,13 @@ use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
 use tau::extension::types::{Content, Message, Role};
 use tau::extension::{host, http, ws};
 
+/// Budget for one network wait: a reply POST's response headers, or a ws
+/// connect's handshake. The platform answers in seconds, so this is
+/// generous already — it exists so a peer that accepts the connection and
+/// then says nothing fails loudly instead of hanging the bridge
+/// (wit-review F11).
+const NET_MS: u32 = 30_000;
+
 struct Adapter {
     /// Open ws handle to the platform (None until session_start).
     ws: Option<u64>,
@@ -235,6 +242,7 @@ fn post_reply(adapter: &mut Adapter, payload_json: &str) {
         &url,
         &[("content-type".to_string(), "application/json".to_string())],
         &body.into_bytes(),
+        NET_MS,
     ) {
         Ok(h) => {
             let _ = http::status(h);
@@ -274,7 +282,7 @@ impl Probes for DingtalkBridge {
                 // gateway handshake (endpoint+ticket exchange) only
                 // OBTAINS this URL — the loopback connects directly.
                 let url = std::env::var("TAU_MCP_URL").unwrap_or_default();
-                match ws::connect(&url) {
+                match ws::connect(&url, NET_MS) {
                     Ok(handle) => adapter.ws = Some(handle),
                     Err(e) => notify("error", format!("dingtalk: ws connect failed: {e}")),
                 }

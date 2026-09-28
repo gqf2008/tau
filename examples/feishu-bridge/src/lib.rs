@@ -52,6 +52,13 @@ struct ChannelConfig {
     users_allow: Vec<String>,
 }
 
+/// Budget for one network wait: a reply POST's response headers, or a ws
+/// connect's handshake. The platform answers in seconds, so this is
+/// generous already — it exists so a peer that accepts the connection and
+/// then says nothing fails loudly instead of hanging the bridge
+/// (wit-review F11).
+const NET_MS: u32 = 30_000;
+
 struct Adapter {
     /// Open ws handle to the platform (None until session_start).
     ws: Option<u64>,
@@ -267,6 +274,7 @@ fn post_reply(adapter: &mut Adapter, payload_json: &str) {
         &url,
         &[("content-type".to_string(), "application/json".to_string())],
         &body.into_bytes(),
+        NET_MS,
     );
     match result {
         Ok(h) => {
@@ -323,7 +331,7 @@ impl Probes for FeishuBridge {
                 if adapter.ws.is_none()
                     && let Ok(url) = std::env::var("TAU_MCP_URL")
                 {
-                    match ws::connect(&url) {
+                    match ws::connect(&url, NET_MS) {
                         Ok(handle) => adapter.ws = Some(handle),
                         Err(e) => {
                             let _ = host::notify(

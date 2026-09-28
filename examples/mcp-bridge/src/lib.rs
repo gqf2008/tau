@@ -32,11 +32,13 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 /// rather than muddle through with possibly-divergent semantics.
 const SUPPORTED_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
 const READ_CHUNK: u32 = 65536;
-/// Idle budget for one body read. A full minute of silence on a response
-/// the server owes us is already abnormal — the spec's SSE keepalives keep
-/// real long-running calls under this — and the bound is the point: a
-/// half-open connection must surface as an error, not a hung call
-/// (wit-review F9).
+/// Idle budget for one network wait: a request's response headers, a read
+/// of the server's stdout, or one body read. A full minute of silence on a
+/// response the server owes us is already abnormal — the spec's SSE
+/// keepalives keep real long-running calls under this — and the bound is
+/// the point: a half-open connection (or a server that never answers) must
+/// surface as an error, not a hung call (wit-review F9 for the body, F11
+/// for the headers and the stdout read).
 const IDLE_MS: u32 = 60_000;
 /// Cap on one JSON-RPC message (and one HTTP response body): a broken or
 /// hostile server flooding bytes without a newline would otherwise grow
@@ -312,7 +314,7 @@ impl StdioConnection {
                 return serde_json::from_str(line)
                     .map_err(|e| format!("bad json from server: {e}: {line}"));
             }
-            let (chunk, eof) = proc::read_stdout(self.handle, READ_CHUNK)?;
+            let (chunk, eof) = proc::read_stdout(self.handle, READ_CHUNK, IDLE_MS)?;
             if chunk.is_empty() && eof {
                 return Err("server closed stdout".to_string());
             }
@@ -346,6 +348,7 @@ impl HttpConnection {
             &self.url,
             &self.headers(),
             message.to_string().as_bytes(),
+            IDLE_MS,
         )
     }
 

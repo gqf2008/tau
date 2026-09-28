@@ -105,8 +105,9 @@ impl rt_http::Host for RealtimeState {
         url: String,
         headers: Vec<(String, String)>,
         body: Vec<u8>,
+        timeout_ms: u32,
     ) -> Result<u64, String> {
-        self.http.request(&method, &url, &headers, &body)
+        self.http.request(&method, &url, &headers, &body, timeout_ms)
     }
 
     fn status(&mut self, handle: u64) -> Result<u16, String> {

@@ -322,6 +322,11 @@ class HelloHandler(BaseHTTPRequestHandler):
             self.end_headers()
             time.sleep(3)
             return
+        if self.path.startswith("/mute"):
+            # Accepted, then silence before any header at all — the peer the
+            # request-headers budget exists for (wit-review F11).
+            time.sleep(3)
+            return
         if self.path.startswith("/redirect"):
             # A consent-escaping redirect: the client must NOT follow it.
             self.send_response(302)
@@ -409,6 +414,17 @@ OUT="$("$TAU" --allow-unsigned \
 echo "$OUT" | grep -q "no bytes within 300ms" \
     || fail "idle budget never fired — read-body blocked or swallowed it: $OUT"
 echo "ok — a quiet peer returns an explicit timeout instead of a hung call"
+
+# A peer that accepts the connection and then sends NOTHING — no headers,
+# no error, no FIN — must surface as an error too: the wait for response
+# headers carries its own bound, separate from the body's (wit-review F11).
+OUT="$("$TAU" --allow-unsigned \
+    --provider-wasm "$HTTP_PROVIDER" --model http \
+    --provider-origin http://127.0.0.1:8402 \
+    -p "http://127.0.0.1:8402/mute idle=300" 2>&1 || true)"
+echo "$OUT" | grep -q "no response headers within 300ms" \
+    || fail "headers budget never fired — request blocked or swallowed it: $OUT"
+echo "ok — a peer that never sends headers returns an explicit timeout"
 
 # Origin matching sees the same host the client dials: userinfo inside
 # the authority is stripped (flows), a backslash after the authority is
@@ -524,6 +540,35 @@ kill "$WS_MOCK_PID" 2> /dev/null || true
 # trip (echo: prefix = frame came back) and the payload's survival.
 echo "$OUT" | grep -qE "tool ← ws_echo: echo: .*frame-pipe-ok" || fail "ws echo did not close the loop: $OUT"
 echo "ok — frame crossed guest→host→ws→echo→back (consent-gated origin)"
+
+# A listener that accepts the TCP connection and never upgrades it: the
+# handshake wait is bounded in the host, so this must fail loudly rather
+# than park the run (wit-review F11 — tungstenite's connect does
+# transport + upgrade in one unbounded blocking call).
+python - <<'MUTE' > ws_mute.log 2>&1 &
+import socket, time
+srv = socket.socket()
+srv.bind(("127.0.0.1", 0))
+srv.listen(4)
+print("ws mute ready", srv.getsockname()[1], flush=True)
+while True:
+    conn, _ = srv.accept()
+    time.sleep(60)
+MUTE
+WS_MUTE_PID=$!
+for _ in $(seq 1 20); do
+    grep -q "ws mute ready" ws_mute.log 2> /dev/null && break
+    sleep 0.5
+done
+WS_MUTE_PORT=$(sed -n 's/^ws mute ready //p' ws_mute.log)
+[ -n "$WS_MUTE_PORT" ] || fail "ws mute listener did not start: $(cat ws_mute.log)"
+OUT="$("$TAU" --allow-unsigned --mcp-bridge "$WS_ECHO" \
+    --mcp-url "ws://127.0.0.1:$WS_MUTE_PORT/echo" --demo \
+    -p "never answers via ws_echo" 2>&1 || true)"
+kill "$WS_MUTE_PID" 2> /dev/null || true
+echo "$OUT" | grep -q "no handshake within 5000ms" \
+    || fail "ws handshake budget never fired: $OUT"
+echo "ok — a listener that never upgrades returns an explicit timeout"
 
 # --- step 5c: IM loopback (feishu-shaped adapter, docs/im-channels.md) -
 step "5c/11 IM loopback (ws inbound steer + after_response reply POST)"

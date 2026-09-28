@@ -516,8 +516,15 @@ impl WasiPolicy {
     }
 }
 
+/// The WIT contract version this host implements (`wit/tau.wit`). Single
+/// source for every load-time hint: hand-writing this string in three
+/// places is how a version hint silently goes wrong, so
+/// `contract_version_matches_wit` fails the build if it drifts from the
+/// vendored WIT.
+pub(crate) const CONTRACT_VERSION: &str = "0.5.0";
+
 /// If the component exports `tau:extension` interfaces of another
-/// contract version, say so — "missing export tau:extension/tools@0.4.0"
+/// contract version, say so — "missing export tau:extension/tools@0.5.0"
 /// alone leaves the user guessing what the component was built against
 /// (docs/host-channel.md 兼容性: load errors name the version mismatch).
 fn version_hint(component: &Component) -> String {
@@ -532,11 +539,12 @@ fn version_hint(component: &Component) -> String {
     }
     found.sort();
     found.dedup();
-    if found.is_empty() || found.iter().any(|v| v == "0.4.0") {
+    if found.is_empty() || found.iter().any(|v| v == CONTRACT_VERSION) {
         String::new()
     } else {
         format!(
-            " [component targets tau:extension@{}; this host requires @0.4.0 — rebuild it with the 0.4.0 bindings (wit/tau.wit), see CHANGELOG.md]",
+            " [component targets tau:extension@{}; this host requires @{CONTRACT_VERSION}; \
+             rebuild with the {CONTRACT_VERSION} bindings (wit/tau.wit), see CHANGELOG.md]",
             found.join(", ")
         )
     }
@@ -1143,8 +1151,9 @@ impl provider_bindings::tau::extension::http::Host for ProviderState {
         url: String,
         headers: Vec<(String, String)>,
         body: Vec<u8>,
+        timeout_ms: u32,
     ) -> Result<u64, String> {
-        self.http.request(&method, &url, &headers, &body)
+        self.http.request(&method, &url, &headers, &body, timeout_ms)
     }
 
     fn status(&mut self, handle: u64) -> Result<u16, String> {
@@ -1251,6 +1260,22 @@ mod wit_vendored {
             include_str!("../wit/tau.wit"),
             include_str!("../../../wit/tau.wit"),
             "crates/tau-ext/wit/tau.wit drifted from wit/tau.wit — sync the vendored copy"
+        );
+    }
+
+    /// The host's advertised contract version must be the one the WIT
+    /// declares, or every load error names the wrong upgrade target.
+    #[test]
+    fn contract_version_matches_wit() {
+        let declared = include_str!("../wit/tau.wit")
+            .lines()
+            .find_map(|line| line.strip_prefix("package tau:extension@"))
+            .and_then(|rest| rest.strip_suffix(';'))
+            .expect("wit/tau.wit declares `package tau:extension@X.Y.Z;`");
+        assert_eq!(
+            declared,
+            crate::CONTRACT_VERSION,
+            "the host advertises a contract version the WIT does not declare"
         );
     }
 }

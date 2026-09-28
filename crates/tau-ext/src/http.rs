@@ -69,7 +69,14 @@ impl HttpRegistry {
         url: &str,
         headers: &[(String, String)],
         body: &[u8],
+        timeout_ms: u32,
     ) -> Result<u64, String> {
+        if timeout_ms == 0 {
+            return Err(
+                "http.request: timeout-ms must be > 0 — a request that can wait forever hides a dead peer (wit-review F11)"
+                    .into(),
+            );
+        }
         let origin = Self::origin_of(url).ok_or_else(|| format!("bad url: {url}"))?;
         if !self.origins.contains(&origin) {
             return Err(format!(
@@ -81,6 +88,7 @@ impl HttpRegistry {
         // request to an origin the user did not consent to.
         let client = reqwest::blocking::Client::builder()
             .redirect(reqwest::redirect::Policy::none())
+            .connect_timeout(Duration::from_millis(u64::from(timeout_ms)))
             .build()
             .map_err(|e| format!("http client: {e}"))?;
         let method = reqwest::Method::from_bytes(method.as_bytes())
@@ -89,7 +97,29 @@ impl HttpRegistry {
         for (name, value) in headers {
             request = request.header(name, value);
         }
-        let mut response = request.send().map_err(|e| format!("http {url}: {e}"))?;
+        // The wait for the response HEADERS is bounded here, on a helper
+        // thread: a peer that accepts the connection and then says nothing is
+        // indistinguishable from a dead one (wit-review F11). The bound lives
+        // here rather than on the client because reqwest's blocking `timeout`
+        // runs until the response BODY has finished, which would cut long SSE
+        // streams short — the body's pace belongs to read-body's budget. The
+        // abandoned thread dies with the peer or the OS connect timeout.
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(request.send());
+        });
+        let mut response = match rx.recv_timeout(Duration::from_millis(u64::from(timeout_ms))) {
+            Ok(Ok(response)) => response,
+            Ok(Err(e)) => return Err(format!("http {url}: {e}")),
+            Err(RecvTimeoutError::Timeout) => {
+                return Err(format!(
+                    "http.request: no response headers within {timeout_ms}ms"
+                ));
+            }
+            Err(RecvTimeoutError::Disconnected) => {
+                return Err(format!("http.request: {url}: the request thread died"));
+            }
+        };
         let status = response.status().as_u16();
         let response_headers: Vec<(String, String)> = response
             .headers()
@@ -280,7 +310,7 @@ mod tests {
             "http://example.com:/",
             "http://example\t.com/",
         ] {
-            let err = registry.request("GET", url, &[], &[]).unwrap_err();
+            let err = registry.request("GET", url, &[], &[], REQUEST_BUDGET_MS).unwrap_err();
             assert!(
                 err.contains("not in consent allowlist"),
                 "normalized twin slipped the gate: {url} → {err}"
@@ -367,7 +397,7 @@ mod tests {
         // Consented origin passes the gate (the send itself fails —
         // nothing listens — but the error must not be the allowlist).
         let err = registry
-            .request("GET", "http://127.0.0.1:8402/", &[], &[])
+            .request("GET", "http://127.0.0.1:8402/", &[], &[], REQUEST_BUDGET_MS)
             .unwrap_err();
         assert!(
             !err.contains("not in consent allowlist"),
@@ -380,7 +410,7 @@ mod tests {
             "http://evil.test\\@127.0.0.1:8402/",
             "http://127.0.0.1:8402.evil.test/",
         ] {
-            let err = registry.request("GET", url, &[], &[]).unwrap_err();
+            let err = registry.request("GET", url, &[], &[], REQUEST_BUDGET_MS).unwrap_err();
             assert!(
                 err.contains("not in consent allowlist"),
                 "bypass slipped the gate: {url} → {err}"
@@ -410,7 +440,7 @@ mod tests {
         let origin = format!("http://127.0.0.1:{port}");
         let mut registry = HttpRegistry::new([origin.clone()].into_iter().collect());
         let handle = registry
-            .request("GET", &format!("{origin}/give-up-your-secrets"), &[], &[])
+            .request("GET", &format!("{origin}/give-up-your-secrets"), &[], &[], REQUEST_BUDGET_MS)
             .expect("consented request");
         assert_eq!(registry.status(handle), Ok(302), "redirect was followed");
         assert_eq!(
@@ -419,6 +449,56 @@ mod tests {
             "the guest must see where the redirect wanted to go"
         );
         registry.close(handle);
+    }
+
+    /// A budget generous enough for a loopback handshake: tests that
+    /// exercise the gate (not the clock) pass this and ignore it.
+    const REQUEST_BUDGET_MS: u32 = 5_000;
+
+    #[test]
+    fn request_rejects_zero_timeout() {
+        // 0 would mean "wait for headers forever" — refused before the URL is
+        // even parsed, with the reason in the message (the read-body shape).
+        let mut registry =
+            HttpRegistry::new(["http://127.0.0.1:8402".to_string()].into_iter().collect());
+        let err = registry
+            .request("GET", "http://127.0.0.1:8402/", &[], &[], 0)
+            .unwrap_err();
+        assert!(err.contains("must be > 0"), "unexpected error: {err}");
+        assert!(err.contains("wait forever"), "reason missing: {err}");
+    }
+
+    #[test]
+    fn request_times_out_when_the_peer_never_sends_headers() {
+        // The peer accepts the connection and then says nothing at all: no
+        // headers, no error, no FIN. Before F11 this call parked the host
+        // thread until the process exited — a stalled IM/MCP endpoint could
+        // wedge a whole run.
+        use std::io::Read as _;
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            // Hold the connection open, silent, far past the guest's budget.
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+        });
+        let origin = format!("http://127.0.0.1:{port}");
+        let mut registry = HttpRegistry::new([origin.clone()].into_iter().collect());
+        let started = std::time::Instant::now();
+        let err = registry
+            .request("GET", &format!("{origin}/silent"), &[], &[], 300)
+            .unwrap_err();
+        assert!(
+            err.contains("no response headers within 300ms"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(1200),
+            "request outlived its budget: {:?}",
+            started.elapsed()
+        );
     }
 
     #[test]
@@ -453,7 +533,7 @@ mod tests {
         let origin = format!("http://127.0.0.1:{port}");
         let mut registry = HttpRegistry::new([origin.clone()].into_iter().collect());
         let handle = registry
-            .request("GET", &format!("{origin}/quiet"), &[], &[])
+            .request("GET", &format!("{origin}/quiet"), &[], &[], REQUEST_BUDGET_MS)
             .expect("consented request");
         let started = std::time::Instant::now();
         let err = registry.read_body(handle, 8192, 200).unwrap_err();
