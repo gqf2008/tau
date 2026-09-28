@@ -41,6 +41,8 @@
   session, and dropped. Ending a stream now goes through
   `tau_core::sse::Closing`, which emits that fallback only when the
   provider never named a stop — a stream that spoke keeps its word.
+  `scripts/validate.sh` 3b is the leg that pins it down — and the
+  one that found it.
 - `tau sign` reported signing-key failures as `not a wasm binary`: a
   malformed `--key` fingerprint, an ambiguous keyring, and an unreadable key
   file all shared the module parser's error variant, so the message named a

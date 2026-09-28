@@ -178,5 +178,17 @@ Deliberate, and each one is in the tool's own module docs:
 `cargo test -p tau-tools` covers the crate — the pi edge cases
 (truncation notices, `offset` past the end, grep limits and context, the
 edit error wordings, CRLF/BOM round-trips, gitignore without a repo,
-timeouts that kill a grandchild) — and needs no API key. The CLI legs are
-`scripts/validate.sh` 1d and 1e.
+timeouts that kill a grandchild) — and needs no API key.
+
+`scripts/validate.sh` carries the CLI legs. 1d and 1e pin the flags:
+the default set is printed, a named read-only tool really runs, the off
+switch prints `none`, and a typo in `--tools` fails the run. 3b drives a
+whole tool call over the provider wire against the loopback mock — both
+the chat-completions and the Messages shape — and reads the captured
+request bodies back: the tools were advertised, the model's `tool_calls`
+answer reached the loop as `tool_use`, the call ran, and its result came
+back to the provider on the next request. That leg is what proves the
+eight are not merely registered but closed-loop; it is also the leg that
+found a provider-side defect, a fallback `stop` that overwrote
+`finish_reason: "tool_calls"` and left the call assembled, persisted and
+never executed.

@@ -3,7 +3,8 @@
 # who just installed tau, in eleven steps — demo, the built-in tools
 # (default set, off switch, no shell through --demo), the signing/trust
 # chain (incl. tamper rejection), all three built-in providers against a
-# loopback mock, the wasm provider consent gate, the MCP bridge spawn
+# loopback mock (and a real tool-call round trip on that wire), the wasm
+# provider consent gate, the MCP bridge spawn
 # gate, the remembered-consent lifecycle, OCI distribution, blob GC,
 # compaction, probe verdicts, and the interactive REPL over a real pty
 # (skipped with a note when pywinpty is not installed).
@@ -301,6 +302,7 @@ echo "ok — --allow-unsigned still refuses a corrupted signature"
 # --- step 3: built-in provider against a loopback SSE mock -------------
 step "3/11 built-in providers (loopback SSE mock)"
 cat > mock.py << 'PYEOF'
+import json
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
@@ -330,10 +332,71 @@ ANTHROPIC_SSE_BODY = (
 )
 
 
+# Step 3b: the request that does not carry a tool result yet is answered
+# with an `ls` call split across two deltas (so the partial-JSON
+# assembler is exercised); the request that does carry one is answered
+# with plain text. json.dumps builds the payloads, so the nested
+# escaping is the encoder's problem rather than the reader's.
+def _chunk(obj):
+    return "data: " + json.dumps(obj) + "\n\n"
+
+
+TOOLCALL_SSE_BODY = (
+    _chunk({"choices": [{"delta": {"tool_calls": [{"index": 0, "id": "call_ls_1", "function": {"name": "ls", "arguments": ""}}]}}]})
+    + _chunk({"choices": [{"delta": {"tool_calls": [{"index": 0, "function": {"arguments": '{"path":"."}'}}]}}]})
+    + _chunk({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]})
+    + "data: [DONE]\n\n"
+)
+
+
+TOOLCALL_FINAL_SSE_BODY = (
+    _chunk({"choices": [{"delta": {"content": "listed "}}]})
+    + _chunk({"choices": [{"delta": {"content": "ok"}, "finish_reason": "stop"}]})
+    + "data: [DONE]\n\n"
+)
+
+
+# The same round trip on the Anthropic wire, whose tool results ride back
+# as a `tool_result` block in a user message rather than a `tool` role.
+TOOLCALL_ANTHROPIC_SSE_BODY = (
+    _chunk({"type": "message_start", "message": {"id": "m1", "role": "assistant"}})
+    + _chunk({"type": "content_block_start", "index": 0, "content_block": {"type": "tool_use", "id": "toolu_ls_1", "name": "ls"}})
+    + _chunk({"type": "content_block_delta", "index": 0, "delta": {"type": "input_json_delta", "partial_json": '{"path":"."}'}})
+    + _chunk({"type": "content_block_stop", "index": 0})
+    + _chunk({"type": "message_delta", "delta": {"stop_reason": "tool_use"}})
+    + "data: [DONE]\n\n"
+)
+
+
+TOOLCALL_ANTHROPIC_FINAL_SSE_BODY = (
+    _chunk({"type": "message_start", "message": {"id": "m2", "role": "assistant"}})
+    + _chunk({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
+    + _chunk({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "listed ok"}})
+    + _chunk({"type": "message_delta", "delta": {"stop_reason": "end_turn"}})
+    + "data: [DONE]\n\n"
+)
+
+
 class ChatHandler(BaseHTTPRequestHandler):
     def do_POST(self):
-        self.rfile.read(int(self.headers.get("content-length", 0)))
-        if self.path.endswith("/responses"):
+        raw = self.rfile.read(int(self.headers.get("content-length", 0)))
+        if "/toolcall" in self.path:
+            # Side channel for step 3b: every provider request body, one
+            # JSON document per line — the leg asserts on what the model
+            # was advertised and what came back to it.
+            with open("toolcall_requests.jsonl", "ab") as f:
+                f.write(raw + b"\n")
+            if "/toolcall-anthropic" in self.path:
+                body = (
+                    TOOLCALL_ANTHROPIC_FINAL_SSE_BODY
+                    if b'"type":"tool_result"' in raw
+                    else TOOLCALL_ANTHROPIC_SSE_BODY
+                ).encode()
+            else:
+                body = (
+                    TOOLCALL_FINAL_SSE_BODY if b'"role":"tool"' in raw else TOOLCALL_SSE_BODY
+                ).encode()
+        elif self.path.endswith("/responses"):
             body = RESPONSES_SSE_BODY.encode()
         elif self.path.endswith("/messages"):
             body = ANTHROPIC_SSE_BODY.encode()
@@ -418,6 +481,66 @@ OUT=$(ANTHROPIC_API_KEY=dummy ANTHROPIC_BASE_URL=http://127.0.0.1:8401 TAU_MODEL
     "$TAU" --provider anthropic -p "say something" 2>&1) || fail "anthropic provider: $OUT"
 echo "$OUT" | grep -q "mock anthropic ok" || fail "Anthropic SSE stream did not land: $OUT"
 echo "ok — Anthropic Messages SSE streamed end to end"
+
+# --- step 3b: built-in tools reach the provider wire ------------------
+step "3b/11 built-in tools on the provider wire (tool call round trip)"
+# 1d proves the registry; this proves the wire. The request the agent
+# builds advertises every built-in it registered, and a tool call the
+# model asks for really runs and really comes back as a tool message —
+# the one leg where the model is not the faux one. The expected set is
+# 1d's EXPECTED_TOOLS: the startup line and the wire must agree.
+TOOLCALL_DIR="$WORK/toolcall"
+rm -rf "$TOOLCALL_DIR" && mkdir -p "$TOOLCALL_DIR"
+touch "$TOOLCALL_DIR/tau-3b-marker.txt"
+rm -f toolcall_requests.jsonl
+# `--provider` is explicit on both legs: the assertions below are
+# wire-shaped (chat-completions advertises `tools`; Messages shapes it
+# differently), so the leg must not inherit an ambient key's inference.
+OUT="$(cd "$TOOLCALL_DIR" && OPENAI_API_KEY=dummy \
+    OPENAI_BASE_URL=http://127.0.0.1:8401/v1/toolcall TAU_MODEL=mock-model \
+    "$TAU" --provider openai -p "list the files here" 2>&1)" || fail "tool call round trip: $OUT"
+echo "$OUT" | grep -q "listed ok" || fail "the final answer never landed: $OUT"
+[ -f toolcall_requests.jsonl ] || fail "the mock captured no provider request"
+REQS="$(grep -c . toolcall_requests.jsonl || true)"
+[ "$REQS" -eq 2 ] || fail "expected two provider requests (the call, then its result), saw $REQS"
+FIRST="$(sed -n '1p' toolcall_requests.jsonl)"
+SECOND="$(sed -n '2p' toolcall_requests.jsonl)"
+echo "$FIRST" | grep -qF '"tools":[' || fail "the request advertises no tools: $FIRST"
+for name in $(echo "$EXPECTED_TOOLS" | tr -d ','); do
+    echo "$FIRST" | grep -qF '"name":"'"$name"'"' \
+        || fail "$name is registered but was never advertised to the provider"
+done
+echo "$SECOND" | grep -qF '"role":"tool"' || fail "the tool result never reached the provider: $SECOND"
+echo "$SECOND" | grep -qF 'tau-3b-marker.txt' || fail "the ls output is missing from the tool result: $SECOND"
+echo "$SECOND" | grep -qF '"id":"call_ls_1"' || fail "the tool call id did not round-trip: $SECOND"
+echo "ok — every built-in is advertised, and a model-asked ls call closed the loop"
+
+# The Anthropic wire closes the same loop through a different shape: the
+# result rides back as a `tool_result` block in a user message, and the
+# stop that ends the first turn is `tool_use` rather than a finish_reason.
+# Both wires had the same defect — a trailing fallback `stop` overwrote
+# the provider's own word, so the call was assembled, persisted and never
+# executed — and this leg is what caught it.
+rm -f toolcall_requests.jsonl
+OUT="$(cd "$TOOLCALL_DIR" && ANTHROPIC_API_KEY=dummy \
+    ANTHROPIC_BASE_URL=http://127.0.0.1:8401/v1/toolcall-anthropic TAU_MODEL=mock-model \
+    "$TAU" --provider anthropic -p "list the files here" 2>&1)" \
+    || fail "anthropic tool call round trip: $OUT"
+echo "$OUT" | grep -q "listed ok" || fail "the anthropic final answer never landed: $OUT"
+REQS="$(grep -c . toolcall_requests.jsonl || true)"
+[ "$REQS" -eq 2 ] || fail "expected two anthropic requests, saw $REQS"
+FIRST="$(sed -n '1p' toolcall_requests.jsonl)"
+SECOND="$(sed -n '2p' toolcall_requests.jsonl)"
+for name in $(echo "$EXPECTED_TOOLS" | tr -d ','); do
+    echo "$FIRST" | grep -qF '"name":"'"$name"'"' \
+        || fail "$name was never advertised to the anthropic provider"
+done
+echo "$SECOND" | grep -qF '"type":"tool_result"' \
+    || fail "the anthropic tool result never reached the provider: $SECOND"
+echo "$SECOND" | grep -qF '"tool_use_id":"toolu_ls_1"' || fail "the anthropic tool_use id did not round-trip: $SECOND"
+echo "$SECOND" | grep -qF 'tau-3b-marker.txt' \
+    || fail "the ls output is missing from the anthropic tool result: $SECOND"
+echo "ok — the Anthropic wire closes the same loop"
 
 # --- step 4: wasm provider consent gate --------------------------------
 step "4/11 wasm provider consent gate"
