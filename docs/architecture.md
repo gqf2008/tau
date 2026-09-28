@@ -27,7 +27,11 @@ tau 是一个最小 agent harness，设计沿袭 pi（MIT, earendil-works/pi）�
 - **单一可分发生产物**：一个 `.wasm` 文件，可内嵌签名、可推 OCI
   registry——「扔一个 .wasm 进去就能扩展」。
 - **能力边界**：组件能做什么由它 import 什么 + 宿主授予什么决定，
-  沙箱是 wasm 运行时的本性，不需要宿主额外发明。
+  沙箱是 wasm 运行时的本性，不需要宿主额外发明。**但默认策略下这句话
+  要打折**：ambient WASI 默认全开（全宿主 FS 读写 + 网络 + env/argv），
+  scoped 的 http/process 门可被 guest 直接用 `wasi:sockets` /
+  `wasi:filesystem` 绕开——门是意图声明，不是墙。细节与收紧开关见
+  `docs/extensions.md` §7（wit-review F1 裁定 A，2026-09-28）。
 
 代价也明确：所有跨边界数据必须序列化（tau 选择了 JSON-over-string 的
 朴素线形），跨边界调用是同步的，大载荷要整体拷入 guest 线性内存
@@ -175,6 +179,10 @@ path/oci:// → read_verified（签名+信任策略，先于编译）
 |----|------|------|----------|
 | **ambient WASI** | fs/env/stdio/args/network | AllowAll（继承宿主环境） | `--deny-wasi`（可按指纹记忆） |
 | **scoped 能力** | `process`（按 argv）、`http`（按 origin）、凭证投递 | 空 | 只有显式同意才授予 |
+
+这张表说的是机制，不是边界：scoped 的门只对愿意走门的组件成立，ambient
+层的实际可达面是整个宿主进程级的东西（全宿主 FS 读写 + 网络 + env/argv），
+且可被 guest 绕开。诚实表述与收紧开关见 `docs/extensions.md` §7。
 
 scoped 能力的一组共同语义，是整套安全设计的骨架：
 

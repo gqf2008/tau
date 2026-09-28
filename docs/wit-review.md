@@ -16,7 +16,7 @@
 
 ## Findings（按严重度）
 
-### F1 [高·安全模型] Ambient WASI 默认放开网络+全文件系统，consent 门有侧门
+### F1 [高·安全模型] Ambient WASI 默认放开网络+全文件系统，consent 门有侧门 —— 已裁定（A，2026-09-28）
 
 证据：`crates/tau-ext/src/lib.rs:207-232`——`WasiPolicy::AllowAll`
 （**默认**）对每个组件 `inherit_network().allow_ip_name_lookup(true)`
@@ -38,6 +38,18 @@ import 什么 + 宿主授予什么决定」（architecture.md）在默认策略�
   ambient 网络+fs**，普通 extension world 保持默认开——能力门对其
   针对的组件闭合，usability 损失最小（推荐）；
 - C. 全局翻转默认为 deny（最严，破坏性最大）。
+
+**裁定（owner，2026-09-28）：A —— 维持默认放开。** 绕过路径与两个真正的
+收紧开关写进了作者指南 `docs/extensions.md` §7「WASI: ambient by default
+— and why the gates are not a wall」，那一节是此事的**唯一权威表述**（本
+finding 不复述细节，避免两处漂移）；`docs/architecture.md` 的「能力边界」
+一条与 §4.5 表下各补了一句诚实注解并指回该节。证据在代码层复核过：
+`wasmtime_wasi::p2::add_to_linker_sync` 对四个组件种类一律挂全量 p2
+（含 `sockets::tcp/udp/ip-name-lookup` 与 `filesystem`），配合默认
+`inherit_network()` + 全盘 preopen，绕行是结构性的而非推测。B/C 保留为
+后续可选项：若将来要把能力门从「意图声明」升级成「墙」，B（按 world
+精准闭合）是首选路径，代价是 bridge/provider 既有的 ambient 用法要重新
+征得同意。
 
 ### F2 [高·双向机制] extension world 只有半条双向通道 —— 已全部落地（0.2.0 + 0.3.0）
 

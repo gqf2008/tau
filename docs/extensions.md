@@ -281,13 +281,50 @@ Reference: `examples/mcp-bridge` (MCP stdio + streamable HTTP, with
 protocol-version negotiation). `docs/bridges.md` has the capability
 model and the walgit worked example.
 
-## 7. WASI: ambient by default
+## 7. WASI: ambient by default — and why the gates are not a wall
 
 Components run with ambient WASI — fs/env/stdio/args/network — unless
 the user passes `--deny-wasi` (or remembered it for your fingerprint).
 Design for both: read env vars defensively, treat filesystem access as
 a bonus not a requirement. `examples/echo-provider`'s `env NAME`
 prompt demos the difference live.
+
+Be precise about what "ambient" hands over, because it is more than the
+word suggests. Under the default policy (`WasiPolicy::AllowAll`) every
+component — extension, bridge, provider, realtime alike — gets:
+
+- stdio, the **whole host environment**, and the host's argv;
+- network access and DNS resolution;
+- the **entire host filesystem preopened read-write** (`/` on unix; on
+  Windows every existing drive, as `/c`, `/d`, …).
+
+One consequence deserves to be stated outright rather than discovered:
+
+> **The consent gates on `http` and `process` are not a security
+> boundary.** A component that imports `wasi:sockets` or
+> `wasi:filesystem` directly goes around them: what the user never
+> granted is refused on the gated interface and simply not enforced on
+> the ambient one. The gates are a declaration of intent — they make a
+> component's reach auditable in one place, and they stop honest
+> mistakes — not a wall against code that means to get out.
+
+What actually closes ambient WASI is host-side and all-or-nothing per
+component (there is no per-capability ambient subset):
+
+- `--deny-wasi` — this run, every component;
+- `--deny-wasi --remember` — sticky for that signing fingerprint; only
+  `tau consent --revoke` lifts it.
+
+Under deny the WASI interfaces still link, but nothing is granted: fs
+and network calls fail permission-denied, env and args come back empty,
+stdio goes nowhere.
+
+So do not mistake the gates for a sandbox. If a real boundary is what
+you need, that is an OS-level question about the process tau runs in.
+What does hold is the signing chain — fingerprint → trust → consent is
+what makes "this component, and not another one" answerable at all. The
+gates record what the user agreed to; they do not enforce it against a
+component that routes around them.
 
 ## 8. Sign and distribute
 

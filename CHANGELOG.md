@@ -1,5 +1,21 @@
 # Changelog
 
+## [Unreleased]
+
+### Docs — the capability gates are documented as intent, not a sandbox (wit-review F1, 裁定 A)
+
+- F1 decision (owner, 2026-09-28): keep ambient WASI open by default.
+  `docs/extensions.md` §7 now states exactly what the default hands
+  every component — stdio, the whole host env and argv, network + DNS,
+  and the entire host filesystem preopened read-write — and that the
+  `http`/`process` consent gates can be routed around by importing
+  `wasi:sockets`/`wasi:filesystem` directly. The two real closers
+  (`--deny-wasi`, sticky per fingerprint with `--remember`, lifted by
+  `tau consent --revoke`) and the deny semantics are spelled out there
+  as the single authoritative copy; `docs/wit-review.md` F1 records the
+  decision, `docs/architecture.md` and `docs/bridges.md` point at it.
+  No behavior change.
+
 ## [0.3.0] — 2026-09-28
 
 ### Added — `ingress` capability (webhook IM platforms, docs/im-channels.md)

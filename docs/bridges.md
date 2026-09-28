@@ -81,7 +81,10 @@ did not consent to. Both capabilities are always linked but granted empty by
 default, so an unconsented bridge loads fine and fails at call time, not
 instantiation time. (This is about the custom `process`/`http` capabilities;
 ambient WASI — fs/env/stdio/network — is granted by default and can be
-withdrawn with `--deny-wasi`.)
+withdrawn with `--deny-wasi`. Which also means this allowlist is a
+declaration of intent rather than a boundary: `docs/extensions.md` §7
+says exactly what ambient WASI hands a component and how one routes
+around the gates.)
 
 ## Provider credential delivery
 
