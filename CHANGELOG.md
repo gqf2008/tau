@@ -26,6 +26,9 @@
   artifact, so that leg failed as a version mismatch instead of naming the
   broken tool. `docs/release.md` records the ordering rule the bump
   exposed: build the fixtures (validate.sh) before the suites (cargo test).
+  Its pre-flight list now also runs clippy *before* the suites, because a
+  clippy pass after `cargo test` shares the check-profile fingerprints and
+  can be a pure cache replay — green, ~0.5s, and no `Checking <crate>` line.
 - Recorded, deliberately not in scope: `process.read-stdout` still has no
   idle bound (wit-review F11).
 
