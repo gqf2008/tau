@@ -1,9 +1,10 @@
-# 音视频双向实时交互：设计草案
+# 音视频双向实时交互：设计与实施记录
 
-> **状态：设计草案，未落地。** 代码不得先行于本文。
-> Phase 0/1 无契约依赖可先行；Phase 2 是契约 0.3.0 主菜之一，
-> 与 `docs/host-channel.md` 同批设计；Phase 3 排期见
-> `docs/wasip3-streams.md`（Rust 1.100 解锁）。
+> **状态：Phase 0/1/2a/2b 已落地**（2026-09-28；Phase 2b 随契约
+> `tau:extension@0.3.0` 封印，`world realtime` + `examples/realtime-echo`
+> + validate.sh 11b/11c/11d 三腿）。**仅 Phase 3（wasip3 流 ABI）未落地**，
+> 排期见 `docs/wasip3-streams.md`（Rust 1.100 解锁）。
+> **代码不得先行于本文**：已落地部分同样以本文为准，改行为先改本文。
 
 ## 现状家底（代码实证，2026-09-27）
 
