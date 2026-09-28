@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.5.0] — 2026-09-28
 
 ### Breaking — contract `tau:extension@0.5.0`: every wait on a peer gets a budget (wit-review F11)
 

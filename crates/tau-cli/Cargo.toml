@@ -14,10 +14,10 @@ name = "tau"
 path = "src/main.rs"
 
 [dependencies]
-tau-core = { path = "../tau-core", version = "0.4.0" }
-tau-openai = { path = "../tau-openai", version = "0.4.0" }
-tau-anthropic = { path = "../tau-anthropic", version = "0.4.0" }
-tau-ext = { path = "../tau-ext", version = "0.4.0" }
+tau-core = { path = "../tau-core", version = "0.5.0" }
+tau-openai = { path = "../tau-openai", version = "0.5.0" }
+tau-anthropic = { path = "../tau-anthropic", version = "0.5.0" }
+tau-ext = { path = "../tau-ext", version = "0.5.0" }
 serde_json = "1"
 anyhow.workspace = true
 tokio.workspace = true
@@ -31,7 +31,7 @@ hound = "3.5"
 futures.workspace = true
 
 [dev-dependencies]
-tau-core = { path = "../tau-core", version = "0.4.0" }
+tau-core = { path = "../tau-core", version = "0.5.0" }
 async-stream = "0.3"
 async-trait.workspace = true
 tempfile = "3"
