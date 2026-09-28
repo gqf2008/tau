@@ -17,8 +17,61 @@ class unexpected {
 template <class E>
 unexpected(E) -> unexpected<E>;
 
+// Value form. The 0.3.0 host channel made the generated bindings instantiate
+// it for real: host.subscribe -> expected<uint64_t, string> and host.poll ->
+// expected<vector<stream-event>, string>. The example never calls them, so
+// these bodies only have to compile and link -- but they are written to work
+// anyway (value/unexpected construction, moves, has_value/value/error).
 template <class T, class E>
-class expected; // primary form unused by the generated code
+class expected {
+    bool ok;
+    alignas(T) unsigned char vbuf[sizeof(T)];
+    alignas(E) unsigned char ebuf[sizeof(E)];
+    T* v() { return reinterpret_cast<T*>(vbuf); }
+    E* e() { return reinterpret_cast<E*>(ebuf); }
+
+  public:
+    expected(const T& val) : ok(true) { new (vbuf) T(val); }
+    expected(T&& val) : ok(true) { new (vbuf) T(move(val)); }
+    template <class G>
+    expected(const unexpected<G>& u) : ok(false) {
+        new (ebuf) E(u.err);
+    }
+    template <class G>
+    expected(unexpected<G>&& u) : ok(false) {
+        new (ebuf) E(move(u.err));
+    }
+    expected(expected&& o) : ok(o.ok) {
+        if (ok)
+            new (vbuf) T(move(*o.v()));
+        else
+            new (ebuf) E(move(*o.e()));
+    }
+    expected& operator=(expected&& o) {
+        if (ok)
+            v()->~T();
+        else
+            e()->~E();
+        ok = o.ok;
+        if (ok)
+            new (vbuf) T(move(*o.v()));
+        else
+            new (ebuf) E(move(*o.e()));
+        return *this;
+    }
+    ~expected() {
+        if (ok)
+            v()->~T();
+        else
+            e()->~E();
+    }
+    bool has_value() const { return ok; }
+    explicit operator bool() const { return ok; }
+    T& value() & { return *v(); }
+    T&& value() && { return move(*v()); }
+    E& error() & { return *e(); }
+    const E& error() const& { return *e(); }
+};
 
 template <class E>
 class expected<void, E> {

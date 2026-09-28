@@ -5,10 +5,12 @@
 ——工具名 `upper`，把入参 `text` 转大写——用七种主流语言各写一个最小
 扩展，并用同一条验收命令**真加载**验证。
 
-契约版本 `tau:extension@0.3.0`（0.1.0 → 0.2.0：`hooks` 接口正名
+契约版本 `tau:extension@0.4.0`（0.1.0 → 0.2.0：`hooks` 接口正名
 `probes`，extension world 新增 `host` import；0.2.0 → 0.3.0：
 `tool-result.content` 从 `string` 改为 `list<result-block>`——
-工具可返回媒体块，见 docs/tool-media.md）。旧契约产物会被宿主
+工具可返回媒体块，见 docs/tool-media.md；0.3.0 → 0.4.0：
+`http.read-body` 增加 `timeout-ms` idle 预算，见 docs/bridges.md）。
+旧契约产物会被宿主
 点名拒载（版本错配写进 load 错误），重建即迁移。各语言的
 result-block 构造：C 填 tag+union，C++ 用 variant 转换构造
 （cxxshim 已补），Python `ResultBlock_Text(...)`，
@@ -34,16 +36,25 @@ transcript 必须同时出现：
 
 | 语言 | 工具链 / 版本 | 产物 | 构建命令 | tau 加载 | 断点或依据 |
 |---|---|---|---|---|---|
-| C | wit-bindgen 0.62（c）+ clang 22.1.8 + wasm-tools 1.259 | `c_upper.wasm` 7.0 KB | `bash examples/c-upper/build.sh` | ✅ 跑通 | — |
-| C++ | wit-bindgen 0.62（cpp）+ clang++ 22.1.8 + wasm-tools 1.259 | `cpp_upper.wasm` 7.3 KB | `bash examples/cpp-upper/build.sh` | ✅ 跑通 | 0.2.0 需 -std=c++23 + 新增 expected/variant 垫片，见下文 |
-| Python | componentize-py 0.25.1（pip） | `py_upper.wasm` 18 MB | `bash examples/python-upper/build.sh` | ✅ 跑通 | 实现类命名坑，见下文 |
-| JavaScript | jco 1.35.0（npx，node 22.14） | `js_upper.wasm` 12.5 MB | `bash examples/js-upper/build.sh` | ✅ 跑通 | 必须 `--disable http fetch-event` |
-| TypeScript | jco 1.35.0（npx，node 22.14） | `ts_upper.wasm` 12.5 MB | `bash examples/ts-upper/build.sh` | ✅ 跑通 | 同上 |
-| Go | TinyGo 0.42 + go 1.25.7 + wit-bindgen 0.62（go）+ Binaryen 133 + preview1 reactor adapter 48.0.3 | `go_upper.wasm` 3.3 MB | `bash examples/go-upper/build.sh`（需 env，见下文） | ✅ 跑通 | 四处补丁 + reactor 构建模式，见下文；0.2.0 实现包改名 `export_tau_extension_probes` |
+| C | wit-bindgen 0.62（c）+ clang 22.1.8 + wasm-tools 1.259 | `c_upper.wasm` 7.8 KB | `bash examples/c-upper/build.sh` | ✅ 跑通 | — |
+| C++ | wit-bindgen 0.62（cpp）+ clang++ 22.1.8 + wasm-tools 1.259 | `cpp_upper.wasm` 8.4 KB | `bash examples/cpp-upper/build.sh` | ✅ 跑通 | 0.2.0 需 -std=c++23 + 新增 expected/variant 垫片；0.3.0 起生成代码实例化**值形态** `expected<T, E>`，垫片到 0.4.0 复验才补齐（该格此前已失真，见下文） |
+| Python | componentize-py 0.25.1（pip） | `py_upper.wasm` 18.4 MB | `bash examples/python-upper/build.sh` | ✅ 跑通 | 实现类命名坑，见下文 |
+| JavaScript | jco 1.35.0（npx，node 22.14） | `js_upper.wasm` 12.8 MB | `bash examples/js-upper/build.sh` | ✅ 跑通 | 必须 `--disable http fetch-event` |
+| TypeScript | jco 1.35.0（npx，node 22.14） | `ts_upper.wasm` 12.8 MB | `bash examples/ts-upper/build.sh` | ✅ 跑通 | 同上 |
+| Go | TinyGo 0.42 + go 1.25.7 + wit-bindgen 0.62（go）+ Binaryen 133 + preview1 reactor adapter 48.0.3 | `go_upper.wasm` 3.3 MB | `bash examples/go-upper/build.sh`（需 env，见下文） | ✅ 跑通 | 四处补丁 + reactor 构建模式，见下文；0.2.0 实现包改名 `export_tau_extension_probes`；0.4.0 复验重建通过（须显式给 `TINYGO`/`WASMOPT`/`ADAPTER`） |
 | Java | — | — | — | ❌ 无可用路径 | 权威依据见下文 |
 
 Rust 本体（`examples/upper` 等 5 个既有示例）不在本轮范围内，由
 `scripts/validate.sh` 覆盖。
+
+**0.4.0 复验（2026-09-28）**：六格全部重新构建并跑上面的验收命令，
+六格的 transcript 都出现了本文要求的两行。C / Python / JS / TS 一次
+通过；C++ 编译失败——0.3.0 的 `host.subscribe/poll` 让生成绑定开始
+实例化值形态 `std::expected<T, E>`，而垫片只有 `expected<void, E>`，
+即**该格的 ✅ 自 0.3.0 起就失真**（0.3.0 轮只改了本文的版本行，没重建
+产物）。垫片补齐后重建通过。Go 按本节三个 env 重建通过（工具链沿用
+上一轮的安装；`tinygo`/`wasm-opt` 都不在 PATH 上，必须显式给）。
+产物尺寸为 0.4.0 实测。
 
 ## C —— 零依赖 freestanding 路线
 
@@ -67,6 +78,16 @@ libc++，这两头必须手写垫片（只覆盖生成代码实际用到的 API 
 `optional`/`span` 垫片也要补 `emplace`/`data`/`const value`）。
 垫片只服务编译与链接：本示例不调用 host 接口，垫片代码路径不执行。
 
+**0.4.0 复验发现的缺口**：0.3.0 的 `host.subscribe/poll` 返回
+`result<u64, string>` / `result<list<stream-event>, string>`，生成代码因此
+开始**实例化值形态** `std::expected<T, E>`（`expected<uint64_t, …>` 与
+`expected<wit::vector<StreamEvent>, …>`），而垫片只有 `expected<void, E>`
+⇒ `clang++` 报 `implicit instantiation of undefined template`。已补值形态
+（值/unexpected 构造、移动、`has_value`/`value`/`error`），重建与验收
+重新通过。同族教训见
+`LESSON_契约版本升级后示例夹具须先重建再跑测试_版本拒绝报错点名修复`：
+**矩阵里的 ✅ 只在被重建的那一轮才成立**。
+
 ## Python —— componentize-py 的类命名契约
 
 ```bash
@@ -80,7 +101,7 @@ app 模块里必须定义名字恰为 `Tools` / `Hooks` 的类，分别继承
 把 mixin 名 import 进模块作用域会让查找抓到抽象基类，报
 "Can't instantiate abstract class Tools"。绑定时由 runtime 注入到
 `/world/wit_world`，`-p src` 一个路径即可，不需要本地预生成绑定。
-产物 18 MB（内嵌 CPython 运行时）。
+产物 18.4 MB（内嵌 CPython 运行时）。
 
 ## JavaScript / TypeScript —— jco（StarlingMonkey）
 
@@ -95,7 +116,7 @@ kebab-case → camelCase（`parametersJson`、`isError`），action enum →
 
 **必须 `--disable http fetch-event`**：否则 StarlingMonkey 默认链接
 `wasi:http/types@0.2.10`，tau 的 ambient-WASI linker 不提供该接口，
-实例化直接失败。产物 12.5 MB（内嵌 SpiderMonkey）。
+实例化直接失败。产物 12.8 MB（内嵌 SpiderMonkey）。
 
 ## Go —— TinyGo core-module 路线（四处补丁 + reactor 构建模式）
 
