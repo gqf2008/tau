@@ -67,7 +67,7 @@ impl Connection {
             .expect("spawn tau --acp");
         let stdin = child.stdin.take().expect("piped stdin");
         let stdout = child.stdout.take().expect("piped stdout");
-        let mut err = child.stderr.take().expect("piped stderr");
+        let err = child.stderr.take().expect("piped stderr");
 
         let (tx, lines) = channel();
         std::thread::spawn(move || {
@@ -87,9 +87,16 @@ impl Connection {
         let stderr = Arc::new(Mutex::new(String::new()));
         let sink = Arc::clone(&stderr);
         std::thread::spawn(move || {
-            let mut collected = String::new();
-            let _ = err.read_to_string(&mut collected);
-            sink.lock().expect("stderr buffer").push_str(&collected);
+            // A line at a time, not read_to_string: a buffer that only
+            // fills at EOF cannot answer "what did tau say while it was
+            // running", which is the whole question for a handshake
+            // diagnostic.
+            for line in BufReader::new(err).lines() {
+                let Ok(line) = line else { return };
+                let mut buffer = sink.lock().expect("stderr buffer");
+                buffer.push_str(&line);
+                buffer.push('\n');
+            }
         });
 
         Connection {
@@ -251,6 +258,16 @@ fn handshake_reports_what_tau_can_do() {
     );
     assert_eq!(result["agentInfo"]["name"], json!("tau"), "{answer}");
 
+    // The client also advertised fs read/write, which tau does not take
+    // up: it does its file work with its own built-in tools and never
+    // asks the client to do either. Saying so once is what keeps a host
+    // from wondering why its delegation is ignored (docs/acp.md).
+    assert!(
+        wait_for_stderr(&agent, "does not delegate"),
+        "the handshake should say the delegation is not taken up; stderr: {}",
+        agent.diagnostics()
+    );
+
     let status = agent.shut_down();
     assert_eq!(status.code(), Some(0), "clean EOF on stdin is a normal end");
 }
@@ -410,6 +427,22 @@ fn chunk_text(update: &Value) -> &str {
     update["content"]["text"]
         .as_str()
         .unwrap_or_else(|| panic!("expected a text chunk: {update}"))
+}
+
+/// Wait for a line to appear on tau's stderr.
+///
+/// stderr is drained on its own thread, so a line written while a leg ran
+/// may not have been collected yet when the leg ends; polling beats
+/// sleeping a fixed amount and hoping.
+fn wait_for_stderr(agent: &Connection, fragment: &str) -> bool {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while Instant::now() < deadline {
+        if agent.diagnostics().contains(fragment) {
+            return true;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    false
 }
 
 /// `tau tree` over one session file: the file is the session, so this is

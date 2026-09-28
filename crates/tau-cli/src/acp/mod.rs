@@ -78,6 +78,19 @@ pub async fn serve(cli: &Cli) -> anyhow::Result<()> {
                         request.protocol_version.as_u16()
                     );
                 }
+                // The client's own capabilities are read, not used: tau
+                // does its file and terminal work with its built-in tools
+                // in its own working directory, and never asks the client
+                // to do either (docs/acp.md). Saying so once, here, is
+                // what keeps a host from wondering why the delegation it
+                // advertises is ignored.
+                let offered = &request.client_capabilities;
+                if offered.fs.read_text_file || offered.fs.write_text_file || offered.terminal {
+                    eprintln!(
+                        "[tau] acp: the client offers fs (read: {}, write: {}) and terminal: {}; tau does not delegate, its built-in tools work in its own directory",
+                        offered.fs.read_text_file, offered.fs.write_text_file, offered.terminal
+                    );
+                }
                 responder.respond(
                     InitializeResponse::new(ProtocolVersion::V1)
                         .agent_capabilities(
