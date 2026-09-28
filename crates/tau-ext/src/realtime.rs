@@ -117,8 +117,8 @@ impl rt_http::Host for RealtimeState {
         self.http.header(handle, &name)
     }
 
-    fn read_body(&mut self, handle: u64, max: u32) -> Result<(Vec<u8>, bool), String> {
-        self.http.read_body(handle, max)
+    fn read_body(&mut self, handle: u64, max: u32, timeout_ms: u32) -> Result<(Vec<u8>, bool), String> {
+        self.http.read_body(handle, max, timeout_ms)
     }
 
     fn close(&mut self, handle: u64) {

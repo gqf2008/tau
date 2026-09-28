@@ -1,5 +1,5 @@
 //! Example tau bridge exercising the `ws` capability
-//! (tau:extension@0.3.0, docs/im-channels.md): the `ws_echo` tool
+//! (tau:extension@0.4.0, docs/im-channels.md): the `ws_echo` tool
 //! connects to the consented endpoint (TAU_MCP_URL, a ws(s) URL), sends
 //! the argument as one text frame, waits for one frame back (explicit
 //! timeout — a recv that can block forever hides a dead connection,

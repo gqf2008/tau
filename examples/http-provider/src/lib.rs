@@ -20,6 +20,11 @@ use exports::tau::extension::models::{Guest, Info};
 use tau::extension::events::{self, ModelEvent, StopReason};
 use tau::extension::http;
 
+/// Idle budget for a body read: the gateway answers promptly, so this is
+/// generous already — it exists so a half-open connection fails loudly
+/// instead of hanging the call (wit-review F9).
+const IDLE_MS: u32 = 30_000;
+
 struct HttpProvider;
 
 impl Guest for HttpProvider {
@@ -68,6 +73,21 @@ fn fetch(request_json: &str) -> Result<String, String> {
         .trim()
         .to_string();
 
+    // Test hook (same spirit as `crash` above): a trailing "idle=<ms>"
+    // token overrides the idle budget, so the validation gate can exercise
+    // a short one instead of waiting out the production value.
+    let idle_override = url
+        .rsplit_once("idle=")
+        .and_then(|(head, digits)| {
+            digits
+                .trim()
+                .parse::<u32>()
+                .ok()
+                .map(|ms| (head.trim().to_string(), ms))
+        })
+        .filter(|(head, _)| !head.is_empty());
+    let (url, idle_ms) = idle_override.unwrap_or((url, IDLE_MS));
+
     // The host injects a consented bearer token as {"auth": {"bearer": …}};
     // forward it as the Authorization header.
     let headers: Vec<(String, String)> = match parsed["auth"]["bearer"].as_str() {
@@ -80,7 +100,7 @@ fn fetch(request_json: &str) -> Result<String, String> {
     let status = http::status(handle)?;
     let mut body = String::new();
     loop {
-        let (chunk, eof) = http::read_body(handle, 8192)?;
+        let (chunk, eof) = http::read_body(handle, 8192, idle_ms)?;
         body.push_str(&String::from_utf8_lossy(&chunk));
         if eof {
             break;

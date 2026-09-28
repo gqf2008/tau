@@ -260,6 +260,7 @@ echo "ok — --allow-unsigned still refuses a corrupted signature"
 step "3/11 built-in providers (loopback SSE mock)"
 cat > mock.py << 'PYEOF'
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 SSE_BODY = (
@@ -312,6 +313,15 @@ class HelloHandler(BaseHTTPRequestHandler):
         # so the credential-delivery step can prove what the origin saw.
         with open("auth_capture.log", "a") as f:
             f.write(str(self.headers.get("authorization")) + "\n")
+        if self.path.startswith("/quiet"):
+            # Headers, then silence, connection held open: the half-open
+            # peer the idle budget exists for (wit-review F9).
+            self.send_response(200)
+            self.send_header("content-type", "text/plain")
+            self.send_header("content-length", "100")
+            self.end_headers()
+            time.sleep(3)
+            return
         if self.path.startswith("/redirect"):
             # A consent-escaping redirect: the client must NOT follow it.
             self.send_response(302)
@@ -388,6 +398,17 @@ OUT="$("$TAU" --allow-unsigned \
 echo "$OUT" | grep -q "STATUS 302" \
     || fail "redirect was followed — consent escaped: $OUT"
 echo "ok — consented origin's 302 is shown, never followed"
+
+# A peer that sends headers and then goes quiet must surface as an error,
+# not a hang: the guest's read-body carries a bounded idle budget
+# (wit-review F9 — before this, the host thread blocked until exit).
+OUT="$("$TAU" --allow-unsigned \
+    --provider-wasm "$HTTP_PROVIDER" --model http \
+    --provider-origin http://127.0.0.1:8402 \
+    -p "http://127.0.0.1:8402/quiet idle=300" 2>&1 || true)"
+echo "$OUT" | grep -q "no bytes within 300ms" \
+    || fail "idle budget never fired — read-body blocked or swallowed it: $OUT"
+echo "ok — a quiet peer returns an explicit timeout instead of a hung call"
 
 # Origin matching sees the same host the client dials: userinfo inside
 # the authority is stripped (flows), a backslash after the authority is
@@ -1045,9 +1066,13 @@ fi
 # A component declaring an invalid parameters-json is refused at load,
 # naming the broken tool (wit-review F5 — never degrade to an open schema).
 BAD_SCHEMA="$ROOT/examples/bad-schema/target/wasm32-wasip2/release/bad_schema.wasm"
-if [ ! -f "$BAD_SCHEMA" ]; then
-    cargo build --manifest-path "$ROOT/examples/bad-schema/Cargo.toml"         --target wasm32-wasip2 --release --quiet
-fi
+# bad-schema is deliberately NOT in EXAMPLES (a broken component must never
+# ship), so the pre-flight does not rebuild it — and an existence check here
+# would silently reuse the previous contract's artifact, failing this leg
+# with a version mismatch instead of the schema error it asserts
+# (LESSON_契约版本升级后示例夹具须先重建再跑测试). Always build: it is tiny,
+# and the unit test reads the same file.
+cargo build --manifest-path "$ROOT/examples/bad-schema/Cargo.toml"         --target wasm32-wasip2 --release --quiet
 OUT="$("$TAU" --allow-unsigned -e "$BAD_SCHEMA" --demo -p "hi" 2>&1)" &&     fail "bad-schema component loaded: $OUT"
 echo "$OUT" | grep -q "tool 'bad_schema'" || fail "broken tool not named: $OUT"
 echo "$OUT" | grep -q "invalid parameters-json" || fail "reason not named: $OUT"

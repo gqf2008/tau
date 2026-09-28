@@ -8,6 +8,8 @@
 
 use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::Read;
+use std::sync::mpsc::RecvTimeoutError;
+use std::time::Duration;
 
 /// One in-flight HTTP response: headers already received, body drained by
 /// a reader thread into a channel — same shape as bridge ChildProcess, so
@@ -154,15 +156,38 @@ impl HttpRegistry {
 
     /// Block only until SOMETHING is available, then return immediately:
     /// waiting to fill `max` would deadlock any peer that sends a short
-    /// message and then waits for a reply (SSE streams included).
-    pub(crate) fn read_body(&mut self, handle: u64, max: u32) -> Result<(Vec<u8>, bool), String> {
+    /// message and then waits for a reply (SSE streams included). The wait
+    /// is bounded by `timeout_ms`: a quiet peer surfaces as an explicit
+    /// error instead of a hung call (wit-review F9 — a silently hung SSE
+    /// is indistinguishable from a dead connection). A timeout leaves the
+    /// handle usable: retry, or close it. Zero is rejected, because
+    /// "block forever" is not a contract.
+    pub(crate) fn read_body(
+        &mut self,
+        handle: u64,
+        max: u32,
+        timeout_ms: u32,
+    ) -> Result<(Vec<u8>, bool), String> {
+        if timeout_ms == 0 {
+            return Err(
+                "http.read-body: timeout-ms must be > 0 — a read that can block forever \
+                 hides a dead connection (wit-review F9)"
+                    .into(),
+            );
+        }
         let response = self.get(handle)?;
         let max = max.max(1) as usize;
         if response.pending.is_empty() && !response.eof {
-            match response.rx.recv() {
+            match response
+                .rx
+                .recv_timeout(Duration::from_millis(u64::from(timeout_ms)))
+            {
                 Ok(Ok(chunk)) => response.pending.extend(chunk),
                 Ok(Err(e)) => return Err(e),
-                Err(_) => response.eof = true,
+                Err(RecvTimeoutError::Timeout) => {
+                    return Err(format!("http.read-body: no bytes within {timeout_ms}ms"));
+                }
+                Err(RecvTimeoutError::Disconnected) => response.eof = true,
             }
         }
         let take = response.pending.len().min(max);
@@ -393,6 +418,58 @@ mod tests {
             Ok(Some("http://evil.test/loot".into())),
             "the guest must see where the redirect wanted to go"
         );
+        registry.close(handle);
+    }
+
+    #[test]
+    fn read_body_rejects_zero_timeout() {
+        // 0 would mean "block forever" — refused before the handle is even
+        // looked up, with the reason in the message (the ws.recv shape).
+        let mut registry = HttpRegistry::default();
+        let err = registry.read_body(7, 8192, 0).unwrap_err();
+        assert!(err.contains("must be > 0"), "unexpected error: {err}");
+        assert!(err.contains("block forever"), "reason missing: {err}");
+    }
+
+    #[test]
+    fn read_body_times_out_on_a_quiet_peer_instead_of_hanging() {
+        // Headers arrive, the body never does, the connection stays open:
+        // the silent-SSE / half-open-TCP case. Before F9 this call blocked
+        // the host thread until process exit.
+        use std::io::{Read as _, Write as _};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut buf = [0u8; 1024];
+            let _ = stream.read(&mut buf);
+            stream
+                .write_all(b"HTTP/1.1 200 OK\r\ncontent-length: 100\r\nconnection: keep-alive\r\n\r\n")
+                .unwrap();
+            // Quiet far past the guest's budget, then a late byte.
+            std::thread::sleep(std::time::Duration::from_millis(1500));
+            let _ = stream.write_all(b"late");
+        });
+        let origin = format!("http://127.0.0.1:{port}");
+        let mut registry = HttpRegistry::new([origin.clone()].into_iter().collect());
+        let handle = registry
+            .request("GET", &format!("{origin}/quiet"), &[], &[])
+            .expect("consented request");
+        let started = std::time::Instant::now();
+        let err = registry.read_body(handle, 8192, 200).unwrap_err();
+        assert!(
+            err.contains("no bytes within 200ms"),
+            "unexpected error: {err}"
+        );
+        assert!(
+            started.elapsed() < std::time::Duration::from_millis(1200),
+            "read-body outlived its budget: {:?}",
+            started.elapsed()
+        );
+        // The handle survives a timeout: the late byte is still readable.
+        let (bytes, eof) = registry.read_body(handle, 8192, 2000).unwrap();
+        assert_eq!(bytes, b"late", "retry after timeout lost the data");
+        assert!(!eof);
         registry.close(handle);
     }
 }

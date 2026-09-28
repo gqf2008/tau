@@ -32,6 +32,12 @@ const PROTOCOL_VERSION: &str = "2025-06-18";
 /// rather than muddle through with possibly-divergent semantics.
 const SUPPORTED_VERSIONS: &[&str] = &["2024-11-05", "2025-03-26", "2025-06-18"];
 const READ_CHUNK: u32 = 65536;
+/// Idle budget for one body read. A full minute of silence on a response
+/// the server owes us is already abnormal — the spec's SSE keepalives keep
+/// real long-running calls under this — and the bound is the point: a
+/// half-open connection must surface as an error, not a hung call
+/// (wit-review F9).
+const IDLE_MS: u32 = 60_000;
 /// Cap on one JSON-RPC message (and one HTTP response body): a broken or
 /// hostile server flooding bytes without a newline would otherwise grow
 /// linear memory until the allocator traps the whole component.
@@ -391,7 +397,7 @@ impl HttpConnection {
                         return Ok(message);
                     }
                 }
-                let (chunk, eof) = http::read_body(handle, READ_CHUNK)?;
+                let (chunk, eof) = http::read_body(handle, READ_CHUNK, IDLE_MS)?;
                 if chunk.is_empty() && eof {
                     return Err("sse stream ended without our response".into());
                 }
@@ -416,7 +422,7 @@ impl HttpConnection {
 fn read_all(handle: u64) -> Result<Vec<u8>, String> {
     let mut body = Vec::new();
     loop {
-        let (chunk, eof) = http::read_body(handle, READ_CHUNK)?;
+        let (chunk, eof) = http::read_body(handle, READ_CHUNK, IDLE_MS)?;
         body.extend_from_slice(&chunk);
         if body.len() > MAX_MESSAGE {
             return Err("response body exceeds 16 MiB".into());

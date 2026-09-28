@@ -90,7 +90,7 @@ tau-core——核心模型保持全模态，只有厂商线格式收窄。
 ## 验收清单（实现轮逐项打勾）
 
 - [x] WIT 0.3.0；vendored 副本同步；0.2.0 组件拒载报错名版本
-      （load 错误点名 "this host requires @0.3.0"）
+      （load 错误点名 "this host requires @0.4.0"）
 - [x] convert.rs 往返测试含媒体 tool-result（bytes/blob/url 各一）
 - [x] 旧 session 文件（string content）**读兼容**测试：不迁移、可继续
       （`string_or_blocks` untagged 反序列化；写永远只写块数组）

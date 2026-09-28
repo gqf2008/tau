@@ -27,6 +27,18 @@ SKIP_TESTS=1 scripts/release.sh           # dist zip assembles; smoke the
                                           # packaged binary + examples once
 ```
 
+**Contract bumps: build the fixtures before the suites.** The tau-ext unit
+tests load example artifacts (`echo-provider`, `upper`, `guard`, …) straight
+from `examples/*/target/wasm32-wasip2/release`. After a WIT version bump a
+stale artifact fails the test as a version mismatch ("this host requires
+@x.y.z") — which reads like a code defect but is just an old fixture.
+`scripts/validate.sh` builds them all — its pre-flight covers the shipped
+examples, and `bad-schema` (deliberately not shippable) is rebuilt
+unconditionally at its own step, because an existence guard there used to
+reuse the previous contract's artifact. So on a contract bump run
+validate.sh first and `cargo test` second; the 0.4.0 bump hit exactly this
+with `echo-provider` and `bad-schema`.
+
 ## Package checks
 
 `cargo package -p tau-core` must pass with the verify build. **Before the

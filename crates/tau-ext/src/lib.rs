@@ -517,7 +517,7 @@ impl WasiPolicy {
 }
 
 /// If the component exports `tau:extension` interfaces of another
-/// contract version, say so — "missing export tau:extension/tools@0.3.0"
+/// contract version, say so — "missing export tau:extension/tools@0.4.0"
 /// alone leaves the user guessing what the component was built against
 /// (docs/host-channel.md 兼容性: load errors name the version mismatch).
 fn version_hint(component: &Component) -> String {
@@ -532,11 +532,11 @@ fn version_hint(component: &Component) -> String {
     }
     found.sort();
     found.dedup();
-    if found.is_empty() || found.iter().any(|v| v == "0.3.0") {
+    if found.is_empty() || found.iter().any(|v| v == "0.4.0") {
         String::new()
     } else {
         format!(
-            " [component targets tau:extension@{}; this host requires @0.3.0 — rebuild it with the 0.3.0 bindings, see docs/tool-media.md]",
+            " [component targets tau:extension@{}; this host requires @0.4.0 — rebuild it with the 0.4.0 bindings (wit/tau.wit), see CHANGELOG.md]",
             found.join(", ")
         )
     }
@@ -1155,8 +1155,8 @@ impl provider_bindings::tau::extension::http::Host for ProviderState {
         self.http.header(handle, &name)
     }
 
-    fn read_body(&mut self, handle: u64, max: u32) -> Result<(Vec<u8>, bool), String> {
-        self.http.read_body(handle, max)
+    fn read_body(&mut self, handle: u64, max: u32, timeout_ms: u32) -> Result<(Vec<u8>, bool), String> {
+        self.http.read_body(handle, max, timeout_ms)
     }
 
     fn close(&mut self, handle: u64) {

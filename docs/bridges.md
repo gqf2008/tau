@@ -73,6 +73,11 @@ world also imports `tau:extension/http`: a plain-data, handle-based interface
 same shape as `process` rather than `wasi:http` — the guest never touches
 pollables, and SSE responses are consumed incrementally and closed early once
 the JSON-RPC response arrives (the server may legally hold the stream open).
+Each `read-body` call carries its own idle budget (`timeout-ms`, 0 refused):
+a peer that goes quiet returns an explicit error instead of parking the host
+thread until exit, and the guest picks the budget — a long-poll that honestly
+waits longer passes a larger one, while a server holding a stream open must
+keep it fed (progress events or SSE keepalives) — wit-review F9.
 
 The host enforces the consent: an origin allowlist (`scheme://host[:port]`).
 Every request's origin is checked before sending; **redirects are never

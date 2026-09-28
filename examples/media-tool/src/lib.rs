@@ -1,5 +1,5 @@
 //! Example tau extension exercising tool media results
-//! (tau:extension@0.3.0, docs/tool-media.md): the `dot_png` tool returns
+//! (tau:extension@0.4.0, docs/tool-media.md): the `dot_png` tool returns
 //! a text block plus a real image block — a 1x1 transparent PNG. Media
 //! bytes cross the ABI raw; the host persists them (inline base64 under
 //! the blob threshold) and materializes them at the provider edge.

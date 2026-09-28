@@ -1,5 +1,5 @@
 //! Example tau extension exercising the high-frequency stream
-//! subscription (tau:extension@0.3.0, docs/stream-subscribe.md — F2's
+//! subscription (tau:extension@0.4.0, docs/stream-subscribe.md — F2's
 //! high-frequency observation leg): at `session_start` it subscribes to
 //! `text-delta`; at `before_run_end` it polls the backlog and notifies
 //! what it saw. The guest pulls — the host never calls into the

@@ -122,28 +122,31 @@ consent 文件全部 fail-closed，唯独这里 fail-open）。
 负面夹具 `examples/bad-schema`（永不发布）+ 单元测试 +
 validate.sh 断言三重验收。
 
-### F6 [低·一致性] `events.emit` 无返回 vs 0.2.0 设计全 result
+### F6 [低·一致性] `events.emit` 无返回 vs 0.2.0 设计全 result —— 已落地（0.2.0）
 
 0.2.0 把 `events.emit` 与 `host.*` 统一为 `result<_, string>`
 （provider world breaking，0.x 语义允许）。并入 F2 反馈腿。
 
-### F7 [低·命名] `hooks` 接口 vs probes 术语漂移
+### F7 [低·命名] `hooks` 接口 vs probes 术语漂移 —— 已落地（0.2.0，接口名即 `probes`）
 
 WIT 接口叫 `hooks`，代码/文档/CLI（`tau probes`）全叫 probes。
 0.2.0 是正名窗口（`hooks` → `probes`），改名成本随采用度增长。
 
-### F8 [低] `process.kill` 无返回；u64 句柄无代数
+### F8 [低] `process.kill` 无返回；u64 句柄无代数 —— 已落地（0.2.0）
 
 kill 失败静默；句柄 close 后复用理论上有 ABA 风险。0.2.0 一并补。
 
-### F9 [中] ws 能力确认必要；http 能力缺超时/取消控制 —— 设计已补
+### F9 [中] ws 能力确认必要；http 能力缺超时/取消控制 —— 已落地（ws 0.3.0，http 0.4.0）
 
 评审确认 im-channels.md 的 `ws` 能力设计必要（飞书/钉钉 stream
 模式是 WebSocket 帧协议，现有 `http.read-body` 的增量读只覆盖
 SSE/长轮询）。补充要求已进设计（2026-09-27，im-channels.md `ws`
 节）：`ws` 宿主 ping 保活 + pong 超时判死 + `recv` idle 超时显式
 error（永不永阻）；`http` 增量读带 idle 超时，连接级 keepalive 归
-宿主 HTTP 栈。实现仍排 im-channels 落地批次。
+宿主 HTTP 栈。**实现已落地**：`ws` 随 0.3.0；`http.read-body` 的
+idle 超时随 `tau:extension@0.4.0`（2026-09-28，owner 已裁定 A 的同一
+轮）——签名加 `timeout-ms`（0 拒绝、超时显式 error，与 `ws.recv`
+同形），宿主两条单测 + validate.sh 静默对端腿，见 docs/bridges.md。
 
 ### F10 [信息] 评审通过项（无需动作）
 
@@ -159,6 +162,14 @@ error（永不永阻）；`http` 增量读带 idle 超时，连接级 keepalive 
   consent-escaping 302 实测；
 - 签名/信任全链 fail-closed（51 条断言覆盖）。
 
+### F11 [低·一致性] `process.read-stdout` 无 idle 超时（F9 同类面，本轮如实不扩范围）
+
+`http.read-body` 与 `ws.recv` 现在都有界，`process.read-stdout` 仍是
+「Blocks until at least one byte is available or the stream closes」——
+子进程挂死且不写 stdout 时，宿主线程同样会永久阻塞。F9 的设计文字只
+点名了 http，本轮按范围纪律不顺手改它。若要把「永不永阻」做成全能力
+不变量，下一批按同一形状补 `timeout-ms`（契约 0.5.0）。
+
 ## 0.2.0 契约动作清单（从 findings 汇总）
 
 1. F2/F6：`host` 接口 + `events.emit` 全部返回 `result`（0.2.0）；
@@ -166,11 +177,14 @@ error（永不永阻）；`http` 增量读带 idle 超时，连接级 keepalive 
    `host.subscribe/poll/unsubscribe`（0.3.0，docs/stream-subscribe.md）。
 2. F3：probes.md/events.md 的未实现段落已标注；实现并入观测腿。
 3. ~~F5~~：parameters-json 坏 schema 拒载并点名工具（已落地）。
-4. F7/F8：hooks→probes 正名、kill 返回 result、句柄代数，随 0.2.0。
-5. F1：ambient 侧门处置（A/B/C）留用户拍板，0.3.0 决策项。
+4. ~~F7/F8~~：hooks→probes 正名、kill 返回 result、句柄代数——已落地
+   （0.2.0；句柄高位代数在 bridge.rs 的进程/HTTP 句柄上统一校验）。
+5. ~~F1~~：ambient 侧门处置——owner 2026-09-28 裁定 A（见上文裁定段）。
 6. ~~F4~~：工具媒体结果——已落地（0.3.0：`tool-result.content` 收
    `list<result-block>`，非递归变体绕开 wasmtime bindgen 的递归类型
    拒编；provider 边非 image 媒体降级为占位符；旧 session 读兼容）。
+7. F9：ws 随 0.3.0、http idle 超时随 0.4.0 落地；遗留 F11
+   （process.read-stdout）如实登记。
 
 ## 修订记录
 

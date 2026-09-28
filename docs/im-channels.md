@@ -78,7 +78,10 @@ IM 平台                    tau
    - `http`：每个 `read-body` 增量读带 idle 超时（无字节即超时 error），
      连接级 keepalive 由宿主 HTTP 栈负责；组件可用「提前关」主动
      断流。SSE 长连接同样适用 idle 超时——静默挂起的 SSE 与断线
-     不可区分。
+     不可区分。**已落地（2026-09-28，`tau:extension@0.4.0`）**：
+     `read-body(handle, max, timeout-ms)` 与 `ws.recv` 同形（0 拒绝、
+     超时显式 error），宿主两条单测（0 拒绝；静默对端在预算内返回且
+     句柄可续读）+ validate.sh 静默路由腿。
 2. **`ingress` 能力**（webhook 平台：WhatsApp/企微）：consent-gated
    端口监听，宿主按路由把请求体喂给对应组件（UX 明示
    「该组件要监听 :8080/im/whatsapp」）。宿主依然不懂任何 IM 协议。
@@ -206,7 +209,7 @@ media 工具能力，或交给 provider 侧（realtime API 多直接吃 PCM）�
 ## 落地顺序
 
 1. **前置契约**：host-channel（steer/follow-up/notify/emit + consent）
-   + `ws` 能力 → 随 `tau:extension@0.3.0`（0.2.0 未赶上，0.3.0 未发布，同班列车）。
+   + `ws` 能力 → 随 `tau:extension@0.3.0` 落地（0.2.0 未赶上，同班列车）。
 2. **飞书先行**：长连接无需公网；一个适配器同时验证入站注入、出站
    观测、thread 会话映射、媒体入 blob 四件事。
 3. **钉钉**：模式复制（同属 stream），差异在卡片/富文本映射。
