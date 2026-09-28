@@ -1,6 +1,33 @@
 # Changelog
 
-## [Unreleased]
+## [0.4.0] — 2026-09-28
+
+### Breaking — contract `tau:extension@0.4.0`: `http.read-body` gains an idle budget (wit-review F9)
+
+- `http.read-body(handle, max)` → `read-body(handle, max, timeout-ms)`, the
+  same shape as `ws.recv` (whose half of F9 landed in 0.3.0). A peer that
+  sends headers and then goes quiet — a silently hung SSE, a half-open TCP
+  connection — used to park the host thread until process exit; the read
+  now returns `err("http.read-body: no bytes within Nms")`, and 0 is
+  refused outright, because "block forever" is not a contract. The handle
+  survives a timeout: retry with a longer budget, or close it.
+- The guest picks the budget, because only it knows its protocol:
+  `examples/http-provider` passes 30s, `examples/mcp-bridge` 60s (the
+  spec's SSE keepalives keep real long-running calls under it). The demo
+  provider also accepts a trailing `idle=<ms>` prompt token so the gate can
+  exercise a short budget instead of waiting out the production one.
+- Landed with: host unit tests (zero refused; a quiet loopback peer returns
+  at its budget instead of blocking, and the byte that arrives late is
+  still readable afterwards) and a validate.sh leg against a silent route.
+  Stale components are refused at load with the version named — rebuild
+  against `wit/tau.wit`.
+- Gate hygiene: `scripts/validate.sh` rebuilds the `bad-schema` fixture
+  unconditionally — an existence guard was reusing the previous contract's
+  artifact, so that leg failed as a version mismatch instead of naming the
+  broken tool. `docs/release.md` records the ordering rule the bump
+  exposed: build the fixtures (validate.sh) before the suites (cargo test).
+- Recorded, deliberately not in scope: `process.read-stdout` still has no
+  idle bound (wit-review F11).
 
 ### Docs — the capability gates are documented as intent, not a sandbox (wit-review F1, 裁定 A)
 
@@ -15,6 +42,14 @@
   as the single authoritative copy; `docs/wit-review.md` F1 records the
   decision, `docs/architecture.md` and `docs/bridges.md` point at it.
   No behavior change.
+- Status honesty: `docs/realtime-av.md`'s banner no longer says "design
+  draft, not landed" — Phases 0/1/2a/2b are landed (its own inventory
+  table already said so); only Phase 3 (wasip3 stream ABI) is pending.
+- The six-language matrix (docs/wasm-languages.md) was rebuilt end to end
+  and re-accepted at 0.4.0. C++ needed the value-form `std::expected` that
+  0.3.0's host channel made the generated bindings instantiate — its ✅ had
+  been stale since 0.3.0 — and the Go rebuild needs `TINYGO` / `WASMOPT` /
+  `ADAPTER` given explicitly (neither is on PATH). Sizes re-measured.
 
 ## [0.3.0] — 2026-09-28
 
