@@ -11,8 +11,9 @@ use tau_core::probe::ProbePoint;
 use tau_core::session::{EntryKind, JsonlStore, SessionEntry, new_id};
 use tau_core::{Agent, Message};
 
-use setup::{Harness, resolve_component};
+use setup::{Harness, SharedModel, resolve_component};
 
+mod acp;
 mod audio;
 mod live;
 mod repl;
@@ -47,9 +48,17 @@ struct Cli {
     #[arg(long, conflicts_with = "continue")]
     continue_from: Option<String>,
 
-    /// Session file (JSONL). Created if missing.
-    #[arg(long, default_value = ".tau/session.jsonl")]
-    session: PathBuf,
+    /// Speak the Agent Client Protocol on stdin/stdout instead of running
+    /// a prompt: the editor-attached mode (docs/acp.md). stdout then
+    /// carries nothing but JSON-RPC; every diagnostic goes to stderr. One
+    /// process serves any number of sessions.
+    #[arg(long, conflicts_with_all = ["print", "compact", "continue", "continue_from"])]
+    acp: bool,
+
+    /// Session file (JSONL); with --acp, the directory the per-session
+    /// files go in, one per ACP session. Created if missing.
+    #[arg(long)]
+    session: Option<PathBuf>,
 
     /// Wasm extension to load; repeatable.
     #[arg(short = 'e', long = "extension")]
@@ -170,6 +179,24 @@ struct Cli {
     /// the flags. Secrets are never persisted, only grants.
     #[arg(long)]
     remember: bool,
+}
+
+impl Cli {
+    /// The session file for the modes that run one session: print, the
+    /// REPL, and the subcommands that take a file.
+    fn session_file(&self) -> PathBuf {
+        self.session
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(".tau/session.jsonl"))
+    }
+
+    /// With `--acp` the same flag names a directory instead: one JSONL per
+    /// ACP session, named after the session id.
+    fn session_dir(&self) -> PathBuf {
+        self.session
+            .clone()
+            .unwrap_or_else(|| PathBuf::from(".tau/sessions"))
+    }
 }
 
 #[derive(clap::Subcommand)]
@@ -456,6 +483,11 @@ async fn main() -> Result<()> {
     if let Some(sub) = cli.command {
         return run_sub(sub).await;
     }
+    // Before the prompt/stdin check below, not after: under an editor
+    // stdin IS a pipe, and that check exits 2 on exactly that.
+    if cli.acp {
+        return acp::serve(&cli).await;
+    }
     let interactive = match &cli.print {
         Some(_) => false,
         // --compact without -p is itself the action: never error out for a
@@ -483,8 +515,9 @@ async fn main() -> Result<()> {
         mic_consent,
     } = setup::build(&cli).await?;
 
-    let mut store = JsonlStore::open(&cli.session)
-        .with_context(|| format!("opening {}", cli.session.display()))?
+    let session_path = cli.session_file();
+    let mut store = JsonlStore::open(&session_path)
+        .with_context(|| format!("opening {}", session_path.display()))?
         .with_blobs(tau_core::BlobStore::new(tau_core::BlobStore::default_dir()));
     warn_torn_tail(&store);
     let mut history = if cli.r#continue {
@@ -496,7 +529,7 @@ async fn main() -> Result<()> {
         Vec::new()
     };
 
-    let mut agent = Agent::new(model, tools)
+    let mut agent = Agent::new(Box::new(SharedModel(model)), tools)
         .probes(probes)
         .blobs(tau_core::BlobStore::new(tau_core::BlobStore::default_dir()));
 
@@ -519,7 +552,7 @@ async fn main() -> Result<()> {
     // the agent exists so every loaded extension sees them. Verdicts are
     // ignored by contract (observe-only).
     let session_payload = serde_json::json!({
-        "session": cli.session.display().to_string(),
+        "session": session_path.display().to_string(),
         "cwd": cwd.display().to_string(),
         "model": model_label,
     });
@@ -548,7 +581,7 @@ async fn main() -> Result<()> {
                     kind: EntryKind::Compaction { summary },
                 };
                 store.append(entry)?;
-                eprintln!("[tau] compacted session: {}", cli.session.display());
+                eprintln!("[tau] compacted session: {}", session_path.display());
                 // Whatever follows — a -p prompt or the REPL — runs on
                 // the compacted branch, whether or not --continue was
                 // given: compacting and then ignoring the summary would
@@ -721,7 +754,7 @@ async fn main() -> Result<()> {
         parent = Some(entry.id.clone());
         store.append(entry)?;
     }
-    eprintln!("[tau] session: {}", cli.session.display());
+    eprintln!("[tau] session: {}", session_path.display());
     agent.observe(ProbePoint::SessionEnd, session_payload).await;
     Ok(())
 }
@@ -732,7 +765,7 @@ async fn main() -> Result<()> {
 /// is O(n). Walking the parent chain per entry is O(n^2) and hung
 /// `tau tree` for ~21s on a 20k chain.
 /// Surface a discarded crash-torn tail once, where the user can see it.
-fn warn_torn_tail(store: &JsonlStore) {
+pub(crate) fn warn_torn_tail(store: &JsonlStore) {
     if let Some(torn) = store.torn_tail() {
         eprintln!(
             "[tau] discarded a torn tail at line {} ({} bytes) — likely a crash mid-append; continuing from the last intact entry",

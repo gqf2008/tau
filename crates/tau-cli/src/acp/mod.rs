@@ -1,0 +1,121 @@
+//! The editor-attached mode (`--acp`): tau as an ACP agent on stdio.
+//!
+//! The client — Zed, or anything else speaking the Agent Client Protocol —
+//! spawns `tau --acp` and then talks JSON-RPC over our stdin and stdout.
+//! stdout carries that protocol and nothing else; every diagnostic tau
+//! prints goes to stderr, which is where the client will show it.
+//!
+//! # The invariant that keeps this alive
+//!
+//! A handler registered below runs *inside* the SDK's dispatch loop: while
+//! one runs, no other incoming message is processed. Awaiting anything that
+//! itself needs that loop — a request of ours, another message — deadlocks
+//! the connection, runtime threads and all. So a handler parses and hands
+//! the work to a spawned task; the task is where work is awaited, and it
+//! always answers for itself (a spawned task that returns an error takes
+//! the whole connection down with it).
+//!
+//! # What one process serves
+//!
+//! Any number of ACP sessions. Each gets its own JSONL under the directory
+//! `--session` names (`<dir>/<session-id>.jsonl`) and its own agent; the
+//! tools, the probes, the component host and the model are process-scoped
+//! and shared — built once by [`crate::setup::build`], which is why the
+//! registries are `Clone`. A JSONL written here is an ordinary tau session:
+//! `tau tree --session <file>` reads it, `--continue` resumes it.
+
+mod session;
+
+use std::sync::Arc;
+
+use agent_client_protocol::schema::v1::{
+    AgentCapabilities, Error, Implementation, InitializeRequest, InitializeResponse,
+    NewSessionRequest, NewSessionResponse, PromptCapabilities,
+};
+use agent_client_protocol::schema::ProtocolVersion;
+use agent_client_protocol::{Agent, Stdio, on_receive_request};
+
+use crate::Cli;
+use session::Sessions;
+
+/// Serve ACP on stdio until the client closes it.
+///
+/// Clean EOF on stdin is the normal end of a session — the editor exited or
+/// closed the pipe — so it returns `Ok`, exactly as the SDK's reactive
+/// `connect_to` reports it.
+pub async fn serve(cli: &Cli) -> anyhow::Result<()> {
+    let harness = crate::setup::build(cli).await?;
+    let sessions = Arc::new(Sessions::new(harness, cli.session_dir(), cli.system.clone()));
+
+    let created = Arc::clone(&sessions);
+    let closed = Arc::clone(&sessions);
+
+    Agent
+        .builder()
+        .name("tau")
+        .on_receive_request(
+            async move |request: InitializeRequest, responder, _connection| {
+                // v1 only. A client that asked for something else is told
+                // which version it is actually talking to and left to
+                // decide — the spec has the client disconnect on a version
+                // it cannot speak.
+                if request.protocol_version != ProtocolVersion::V1 {
+                    eprintln!(
+                        "[tau] acp: client offered protocol version {}, answering 1",
+                        request.protocol_version.as_u16()
+                    );
+                }
+                responder.respond(
+                    InitializeResponse::new(ProtocolVersion::V1)
+                        .agent_capabilities(
+                            AgentCapabilities::new()
+                                // Not a maybe: session/load is not implemented.
+                                // The file that would back it is already on
+                                // disk, but replaying it as updates is not
+                                // written, and claiming it would make an
+                                // editor offer a history it cannot show.
+                                .load_session(false)
+                                .prompt_capabilities(PromptCapabilities::new().image(true)),
+                        )
+                        // No auth methods: credentials come from the
+                        // environment the client spawned us with, so
+                        // `authenticate` stays unimplemented and the SDK
+                        // answers method-not-found for it.
+                        .agent_info(Implementation::new("tau", env!("CARGO_PKG_VERSION"))),
+                )
+            },
+            on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: NewSessionRequest, responder, connection| {
+                let sessions = Arc::clone(&created);
+                // Off the dispatch loop: opening the store and firing
+                // session_start at the loaded components both take real
+                // time, and the connection may not process anything else
+                // while a handler runs.
+                connection.spawn(async move {
+                    match sessions.create(&request).await {
+                        Ok(id) => {
+                            let _ = responder.respond(NewSessionResponse::new(id));
+                        }
+                        Err(error) => {
+                            eprintln!("[tau] acp: session/new failed: {error:#}");
+                            let _ = responder.respond_with_error(
+                                Error::internal_error()
+                                    .data(serde_json::json!(format!("{error:#}"))),
+                            );
+                        }
+                    }
+                    Ok(())
+                })
+            },
+            on_receive_request!(),
+        )
+        .on_close(async move |_connection| {
+            closed.end_all().await;
+            Ok(())
+        })
+        .connect_to(Stdio::new())
+        .await
+        .map_err(|error| anyhow::anyhow!("acp: the connection ended: {error}"))
+}

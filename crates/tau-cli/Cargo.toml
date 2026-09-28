@@ -21,9 +21,15 @@ tau-ext = { path = "../tau-ext", version = "0.6.0" }
 tau-tools = { path = "../tau-tools", version = "0.6.0" }
 serde_json = "1"
 anyhow.workspace = true
+# The shared-model adapter implements tau-core's async trait.
+async-trait.workspace = true
 tokio.workspace = true
 clap = { version = "4", features = ["derive"] }
 rustyline = "18.0.1"
+# The editor-attached mode (`--acp`) speaks the Agent Client Protocol
+# over stdio directly — Zed's SDK, no adapter process in between.
+# Default features only: the `unstable_*` set is draft protocol.
+agent-client-protocol = "2.2.0"
 # Phase 0 realtime-av (docs/realtime-av.md): host-side capture/playback
 # (the architecture red line keeps audio I/O out of wasm guests).
 cpal = "0.17"

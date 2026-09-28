@@ -8,6 +8,7 @@
 
 use std::collections::BTreeSet;
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use tau_core::faux::FauxModel;
@@ -25,7 +26,9 @@ pub struct Harness {
     pub host: tau_ext::ExtensionHost,
     pub tools: ToolRegistry,
     pub probes: ProbeRegistry,
-    pub model: Box<dyn Model>,
+    /// The model, shared: a process serving several sessions builds one
+    /// and hands every session a [`SharedModel`] over it.
+    pub model: Arc<dyn Model>,
     pub model_label: String,
     /// The CLI holds the user's authority on an explicit command, so the
     /// native paths answer `true`; a wasm provider needs a grant.
@@ -322,10 +325,36 @@ pub async fn build(cli: &Cli) -> Result<Harness> {
         host,
         tools,
         probes,
-        model,
+        model: Arc::from(model),
         model_label,
         mic_consent,
     })
+}
+
+/// A [`Model`] that hands every caller the one shared instance.
+///
+/// [`Agent::new`](tau_core::Agent::new) takes its model by value, and a
+/// process serving several sessions creates an agent per session — so
+/// without this the model could not be shared at all. Sharing is safe by
+/// the trait's own contract: [`Model::stream`] takes `&self`, and a
+/// provider that holds state does so behind its own locks.
+pub struct SharedModel(pub Arc<dyn Model>);
+
+#[async_trait::async_trait]
+impl Model for SharedModel {
+    async fn stream(
+        &self,
+        req: &tau_core::Request,
+    ) -> futures::stream::BoxStream<'static, tau_core::ModelEvent> {
+        self.0.stream(req).await
+    }
+
+    fn realtime(
+        &self,
+        config: tau_core::RealtimeConfig,
+    ) -> Option<Box<dyn tau_core::RealtimeSession>> {
+        self.0.realtime(config)
+    }
 }
 
 fn default_model() -> String {

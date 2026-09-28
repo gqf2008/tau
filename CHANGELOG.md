@@ -33,6 +33,16 @@
   read-only one the user named with `--tools` may be scripted, and the
   mutating four never are — `tau --tools bash --demo` registers bash and
   runs nothing (`scripts/validate.sh` 1e).
+- **`serde_json` keeps insertion order now.** `agent-client-protocol`
+  depends on it with `preserve_order` and `raw_value`, and Cargo unifies
+  features per crate across a workspace build, so the effect is global:
+  `serde_json::Map`, and with it every `serde_json::Value` tau holds,
+  preserves the order keys were written in instead of sorting them.
+  Nothing becomes non-deterministic — a `json!` literal has one order —
+  but two outputs change visibly: `tau probes --json` lists its keys in
+  the order the source writes them (`name`, `wired`, `payload`,
+  `verdicts`), and tool-call arguments stored in a session keep the
+  provider's order instead of an alphabetical one.
 
 ### Fixed
 
