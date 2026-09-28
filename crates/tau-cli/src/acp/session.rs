@@ -22,6 +22,7 @@ use tau_core::{Agent, Control, Message, Model, ProbeRegistry, ToolRegistry};
 
 use crate::setup::{Harness, SharedModel};
 
+use super::permission::PermissionGate;
 use super::turn;
 
 /// One ACP session.
@@ -41,8 +42,9 @@ pub struct Session {
     /// How many turns have started here, counting from one. Only ever
     /// incremented, and it rides the id a client sees, so a provider that
     /// reuses tool-call ids across turns cannot make a client draw two
-    /// calls as one.
-    pub turns: AtomicU64,
+    /// calls as one. Shared with the permission gate, whose question has to
+    /// name the same call the client was already shown.
+    pub turns: Arc<AtomicU64>,
     /// Whether a turn is running.
     ///
     /// `session/cancel` is honored only while this is set. An abort sent
@@ -106,7 +108,11 @@ impl Sessions {
     /// Open a session: a fresh JSONL in the session directory, an agent
     /// over the shared tools, and the session_start observation the loaded
     /// components expect.
-    pub async fn create(&self, request: &NewSessionRequest) -> Result<SessionId> {
+    pub async fn create(
+        &self,
+        request: &NewSessionRequest,
+        connection: &ConnectionTo<Client>,
+    ) -> Result<SessionId> {
         // tau has one working directory per process, and the built-in
         // tools resolve against it. A client that asks for a different one
         // still gets a session — it just gets one rooted here, and is told
@@ -147,11 +153,24 @@ impl Sessions {
             JsonlStore::open(&path).with_context(|| format!("opening {}", path.display()))?;
         crate::warn_torn_tail(&store);
 
+        let turns = Arc::new(AtomicU64::new(0));
+        // The shared probes, plus this session's gate — and the gate goes
+        // last on purpose: an extension's `replace` has already rewritten
+        // the arguments by the time the user is asked, so what they approve
+        // is what will run, and its `block` has already stopped the call,
+        // so nobody is asked about something that will not happen.
+        let mut probes = self.probes.clone();
+        probes.register(Box::new(PermissionGate::new(
+            SessionId::new(id.clone()),
+            Arc::clone(&turns),
+            Box::new(connection.clone()),
+        )));
+
         let mut agent = Agent::new(
             Box::new(SharedModel(Arc::clone(&self.model))),
             self.tools.clone(),
         )
-        .probes(self.probes.clone())
+        .probes(probes)
         .blobs(tau_core::BlobStore::new(tau_core::BlobStore::default_dir()));
         if let Some(system) = &self.system {
             agent = agent.system(system.clone());
@@ -178,7 +197,7 @@ impl Sessions {
                 id: SessionId::new(id.clone()),
                 path,
                 agent,
-                turns: AtomicU64::new(0),
+                turns,
                 in_flight: AtomicBool::new(false),
                 payload,
             }),

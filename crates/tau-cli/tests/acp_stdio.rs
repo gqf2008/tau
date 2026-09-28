@@ -9,6 +9,7 @@
 //! a unit test cannot see: what reaches the wire, and in what order.
 
 use std::io::{BufRead, BufReader, Read, Write};
+use std::net::{TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::{Child, ChildStdin, Command, Stdio};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, channel};
@@ -775,6 +776,286 @@ fn a_prompt_for_a_session_this_process_does_not_serve_is_an_error() {
         answer["result"]["stopReason"],
         json!("end_turn"),
         "{answer}"
+    );
+
+    agent.shut_down();
+}
+
+/// A provider this test controls: a loopback HTTP server that answers the
+/// first request of a run with a `bash` tool call and the second with
+/// final text.
+///
+/// The other legs use `--demo`, whose script cannot call a gated tool by
+/// design (a scripted model must never be able to write to the machine).
+/// So reaching the permission gate with a model in the loop takes a model
+/// that is not the faux one — and a provider the test owns is the only
+/// kind available offline.
+struct MockProvider {
+    /// What `OPENAI_BASE_URL` should be pointed at.
+    base: String,
+    /// Every request body the provider was sent, in order.
+    requests: Arc<Mutex<Vec<String>>>,
+}
+
+impl MockProvider {
+    fn start() -> MockProvider {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("bind a loopback port");
+        let port = listener.local_addr().expect("a bound port").port();
+        let requests = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::clone(&requests);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let Ok(mut stream) = stream else { return };
+                let raw = read_request(&mut stream);
+                seen.lock().expect("request log").push(raw.clone());
+                // The second request of a run carries the tool result. The
+                // answer is chosen from the request itself rather than from
+                // a counter, so the mock says which round it thinks it is
+                // in and a stray retry cannot silently shift the script.
+                let body = if raw.contains(r#""role":"tool""#) {
+                    final_body()
+                } else {
+                    tool_call_body()
+                };
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/event-stream\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = stream.write_all(response.as_bytes());
+                let _ = stream.flush();
+            }
+        });
+        MockProvider {
+            base: format!("http://127.0.0.1:{port}/v1"),
+            requests,
+        }
+    }
+}
+
+/// One SSE event.
+fn chunk(value: serde_json::Value) -> String {
+    format!("data: {value}\n\n")
+}
+
+/// The name and arguments of the call this mock asks for.
+const COMMAND: &str = "touch marker.txt";
+
+/// The first round: a `bash` call, split across two deltas so the
+/// provider's partial-JSON assembler is exercised (the id and name arrive
+/// before the arguments do).
+fn tool_call_body() -> String {
+    let mut body = String::new();
+    body.push_str(&chunk(serde_json::json!({"choices": [{"delta": {"tool_calls": [
+        {"index": 0, "id": "call_bash_1", "function": {"name": "bash", "arguments": ""}}
+    ]}}]})));
+    body.push_str(&chunk(serde_json::json!({"choices": [{"delta": {"tool_calls": [
+        {"index": 0, "function": {"arguments": serde_json::json!({"command": COMMAND}).to_string()}}
+    ]}}]})));
+    body.push_str(&chunk(
+        serde_json::json!({"choices": [{"delta": {}, "finish_reason": "tool_calls"}]}),
+    ));
+    body.push_str("data: [DONE]\n\n");
+    body
+}
+
+/// The second round: the answer, once the tool has reported back.
+fn final_body() -> String {
+    let mut body = String::new();
+    body.push_str(&chunk(
+        serde_json::json!({"choices": [{"delta": {"content": "marker "}}]}),
+    ));
+    body.push_str(&chunk(
+        serde_json::json!({"choices": [{"delta": {"content": "handled"}, "finish_reason": "stop"}]}),
+    ));
+    body.push_str("data: [DONE]\n\n");
+    body
+}
+
+/// Read one HTTP request: its head, then exactly as many body bytes as the
+/// head announces. Byte at a time — a test reads a few hundred of them.
+fn read_request(stream: &mut TcpStream) -> String {
+    let mut head = Vec::new();
+    let mut byte = [0u8; 1];
+    while !head.ends_with(b"\r\n\r\n") {
+        match stream.read(&mut byte) {
+            Ok(1) => head.push(byte[0]),
+            _ => return String::new(),
+        }
+    }
+    let head = String::from_utf8_lossy(&head).to_string();
+    let length: usize = head
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("content-length")
+                .then(|| value.trim().parse().ok())?
+        })
+        .unwrap_or(0);
+    let mut body = vec![0u8; length];
+    let mut filled = 0;
+    while filled < length {
+        match stream.read(&mut body[filled..]) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => filled += n,
+        }
+    }
+    String::from_utf8_lossy(&body).to_string()
+}
+
+impl Connection {
+    /// Read until the answer with this id, answering any permission
+    /// request along the way with `option` and collecting the questions
+    /// asked into `asked`.
+    fn answer_asking(
+        &mut self,
+        id: u64,
+        option: &str,
+        notes: &mut Vec<Value>,
+        asked: &mut Vec<Value>,
+    ) -> Value {
+        loop {
+            let line = self.next();
+            if let Some(method) = line["method"].as_str() {
+                if line["id"].is_null() {
+                    notes.push(line);
+                    continue;
+                }
+                assert_eq!(method, "session/request_permission", "{line}");
+                asked.push(line["params"].clone());
+                let request_id = line["id"].clone();
+                self.send(json!({
+                    "jsonrpc": "2.0",
+                    "id": request_id,
+                    "result": {"outcome": {"outcome": "selected", "optionId": option}},
+                }));
+                continue;
+            }
+            assert_eq!(line["id"], json!(id), "the answer to request {id}: {line}");
+            return line;
+        }
+    }
+}
+
+#[test]
+fn a_gated_call_asks_the_client_and_the_answer_decides() {
+    let dir = scratch("permission");
+    let provider = MockProvider::start();
+    let sessions = dir.join("sessions");
+    let mut agent = Connection::spawn_with(
+        &dir,
+        &[
+            "--provider",
+            "openai",
+            "--tools",
+            "bash",
+            "--session",
+            sessions.to_str().expect("utf-8 scratch path"),
+        ],
+        &[
+            ("OPENAI_API_KEY", "dummy"),
+            ("OPENAI_BASE_URL", &provider.base),
+            ("TAU_MODEL", "mock-model"),
+        ],
+    );
+    agent.initialize(1);
+    let session = agent.new_session(2, &dir);
+
+    // Allowed: the question is asked, the answer is honored, and the
+    // command runs. The file it writes is the proof.
+    agent.prompt(3, &session, "write the marker");
+    let mut notes = Vec::new();
+    let mut asked = Vec::new();
+    let answer = agent.answer_asking(3, "allow_once", &mut notes, &mut asked);
+    assert_eq!(answer["result"]["stopReason"], json!("end_turn"), "{answer}");
+    assert_eq!(asked.len(), 1, "one gated call, one question: {asked:?}");
+
+    // The question is about the call the client was already shown: same
+    // session, same turn-namespaced id, and the arguments the user is
+    // being asked to approve.
+    let question = &asked[0];
+    assert_eq!(question["sessionId"], json!(session), "{question}");
+    assert_eq!(
+        question["toolCall"]["toolCallId"],
+        json!("1:call_bash_1"),
+        "{question}"
+    );
+    assert_eq!(question["toolCall"]["title"], json!("bash"), "{question}");
+    assert_eq!(question["toolCall"]["kind"], json!("execute"), "{question}");
+    assert_eq!(
+        question["toolCall"]["rawInput"]["command"],
+        json!(COMMAND),
+        "{question}"
+    );
+    let offered: Vec<&str> = question["options"]
+        .as_array()
+        .expect("options")
+        .iter()
+        .filter_map(|option| option["optionId"].as_str())
+        .collect();
+    assert_eq!(
+        offered,
+        vec!["allow_once", "allow_always", "reject_once", "reject_always"]
+    );
+    assert!(dir.join("marker.txt").exists(), "the allowed command ran");
+
+    let streamed = updates(&notes, &session);
+    assert_eq!(
+        kinds(&streamed),
+        vec![
+            "tool_call",
+            "tool_call_update",
+            "agent_message_chunk",
+            "agent_message_chunk",
+        ],
+        "{streamed:?}"
+    );
+    assert_eq!(streamed[1]["status"], json!("completed"), "{streamed:?}");
+    let text: String = streamed[2..].iter().map(chunk_text).collect();
+    assert_eq!(text, "marker handled", "the model saw the tool's output");
+    assert!(
+        provider.requests.lock().expect("request log").len() >= 2,
+        "the run took two rounds: the call, then its result"
+    );
+
+    // Refused: a new session, so the gate has nothing remembered, and the
+    // same command is asked about again — and this time not run. The
+    // marker is removed first: "it was not created" is only evidence if it
+    // was not there to begin with.
+    std::fs::remove_file(dir.join("marker.txt")).expect("remove the marker");
+    let second = agent.new_session(4, &dir);
+    agent.prompt(5, &second, "write the marker");
+    let mut notes = Vec::new();
+    let mut asked = Vec::new();
+    let answer = agent.answer_asking(5, "reject_once", &mut notes, &mut asked);
+    assert_eq!(answer["result"]["stopReason"], json!("end_turn"), "{answer}");
+    assert_eq!(asked.len(), 1, "a new session asks again: {asked:?}");
+    assert_eq!(
+        asked[0]["toolCall"]["toolCallId"],
+        json!("1:call_bash_1"),
+        "its own session's turn 1: {}",
+        asked[0]
+    );
+    assert!(
+        !dir.join("marker.txt").exists(),
+        "a refused command must not run"
+    );
+
+    let streamed = updates(&notes, &second);
+    assert_eq!(streamed[1]["status"], json!("failed"), "{streamed:?}");
+    let preview = streamed[1]["content"][0]["content"]["text"]
+        .as_str()
+        .unwrap_or_default();
+    assert!(preview.contains("rejected"), "{streamed:?}");
+
+    // And the model is told why — the refusal is in the request the
+    // second round was built from, where a model would read it.
+    let requests = provider.requests.lock().expect("request log");
+    let last = requests.last().expect("the last request").clone();
+    drop(requests);
+    assert!(
+        last.contains("blocked: the user rejected bash once"),
+        "the refusal never reached the model: {last}"
     );
 
     agent.shut_down();

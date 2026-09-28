@@ -29,6 +29,7 @@
 //! `tau tree --session <file>` reads it, `--continue` resumes it.
 
 mod map;
+mod permission;
 mod session;
 mod turn;
 
@@ -101,12 +102,15 @@ pub async fn serve(cli: &Cli) -> anyhow::Result<()> {
         .on_receive_request(
             async move |request: NewSessionRequest, responder, connection| {
                 let sessions = Arc::clone(&created);
+                // The session's permission gate asks through this same
+                // connection, so it keeps a handle.
+                let asking = connection.clone();
                 // Off the dispatch loop: opening the store and firing
                 // session_start at the loaded components both take real
                 // time, and the connection may not process anything else
                 // while a handler runs.
                 connection.spawn(async move {
-                    match sessions.create(&request).await {
+                    match sessions.create(&request, &asking).await {
                         Ok(id) => {
                             let _ = responder.respond(NewSessionResponse::new(id));
                         }
