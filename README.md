@@ -48,6 +48,14 @@ extensible — but extensions are **wasm components**, not in-process scripts.
   flag). Messages are
   multimodal: text, image, audio, video, and file blocks, mapped per API
   (or degraded to placeholders where the API has no equivalent block).
+- **Realtime voice**: providers can additionally export the `realtime`
+  world (full-duplex sessions: streamed audio in/out, VAD, barge-in) —
+  try the REPL's `/live N [sine]` against `examples/realtime-echo` or the
+  built-in demo provider. Downlink audio plays live through a lazy
+  playback sink (text-only sessions never touch the audio device); a
+  real microphone uplink behind a wasm provider requires the
+  `--microphone` consent (remembered with `--remember`), the synthetic
+  `sine` uplink needs no grant. See `docs/realtime-av.md`.
 
 ## Try it
 
@@ -120,7 +128,9 @@ keep typing. Mid-run input is the control plane — plain text queues as a
 follow-up, `!text` steers after the current turn, Ctrl-C aborts, `/quit`
 exits. Idle commands: `/compact` (summarize history into a compaction
 entry), `/fork [id|#index]` (rewind to an earlier entry and branch from
-there), `/help`. `tau -p "..."` stays one-shot print mode.
+there), `/live N [sine]` (N-second full-duplex voice session against a
+realtime-capable provider; Ctrl-C during it is a barge-in interrupt, not
+an abort), `/help`. `tau -p "..."` stays one-shot print mode.
 
 ## Testing
 
