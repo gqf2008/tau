@@ -2707,6 +2707,7 @@ dependencies = [
  "dirs",
  "globset",
  "ignore",
+ "libc",
  "regex",
  "serde_json",
  "tau-core",

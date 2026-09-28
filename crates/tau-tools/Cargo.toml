@@ -13,6 +13,8 @@ description = "Built-in native tools for the tau agent harness (read/write/edit/
 tau-core = { path = "../tau-core", version = "0.6.0" }
 serde_json.workspace = true
 async-trait.workspace = true
+# The shell tools wait on a child process with `spawn_blocking`.
+tokio.workspace = true
 # `~` expansion, the same crate tau-core/tau-ext already use (`dirs` on
 # Windows resolves the real profile dir, not $HOME — see docs/media.md).
 dirs = "6"
@@ -26,6 +28,11 @@ unicode-normalization = "0.1"
 ignore = "0.4"
 globset = "0.4"
 regex = "1"
+
+[target.'cfg(unix)'.dependencies]
+# Killing a timed-out command's process group (see src/shell.rs); Windows
+# uses taskkill.exe, which needs no crate.
+libc = "0.2"
 
 [dev-dependencies]
 tempfile = "3"

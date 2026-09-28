@@ -1,6 +1,6 @@
-//! Built-in tools: native `read`/`ls` (and, as they land, write, edit, grep,
-//! find, bash, powershell) so tau can work on a repository without a wasm
-//! extension installed first.
+//! Built-in tools — `read`, `write`, `edit`, `ls`, `grep`, `find`, `bash`,
+//! `powershell` — so tau can work on a repository without a wasm extension
+//! installed first.
 //!
 //! They are ordinary [`tau_core::Tool`]s registered into the same
 //! [`ToolRegistry`] that `-e` components fill; registration is last-wins, so
@@ -30,6 +30,7 @@ use tau_core::tool::{DEMO_USER_NAMED, Tool};
 
 pub mod truncate;
 
+mod accumulate;
 mod edit;
 mod edit_match;
 mod find;
@@ -38,6 +39,7 @@ mod ls;
 mod mime;
 mod paths;
 mod read;
+mod shell;
 mod walk;
 mod write;
 
@@ -46,12 +48,24 @@ pub use find::FindTool;
 pub use grep::GrepTool;
 pub use ls::LsTool;
 pub use read::ReadTool;
+pub use shell::{
+    BASH_PATH_VAR, POWERSHELL_PATH_VAR, Shell, ShellKind, ShellTool, find_bash, find_powershell,
+};
 pub use write::WriteTool;
 
 /// Every built-in this build implements, on this platform. The single source
 /// of truth for [`names`] and [`register`]; a name here without a match arm
 /// in [`build`] fails the tests.
-const IMPLEMENTED: [&str; 6] = ["edit", "find", "grep", "ls", "read", "write"];
+const IMPLEMENTED: [&str; 8] = [
+    "bash",
+    "edit",
+    "find",
+    "grep",
+    "ls",
+    "powershell",
+    "read",
+    "write",
+];
 
 /// Built-ins whose output cannot change the user's machine: the only ones
 /// `--demo` may script, and only when `--tools` named them.
@@ -164,10 +178,12 @@ fn tier(name: &str, named: bool) -> Option<u8> {
 /// platform has no such tool).
 fn build(name: &str, cwd: &Path, tier: Option<u8>) -> Option<Box<dyn Tool>> {
     match name {
+        "bash" => Some(Box::new(shell::ShellTool::bash(cwd, tier))),
         "edit" => Some(Box::new(edit::EditTool::new(cwd, tier))),
         "find" => Some(Box::new(find::FindTool::new(cwd, tier))),
         "grep" => Some(Box::new(grep::GrepTool::new(cwd, tier))),
         "ls" => Some(Box::new(ls::LsTool::new(cwd, tier))),
+        "powershell" => Some(Box::new(shell::ShellTool::powershell(cwd, tier))),
         "read" => Some(Box::new(read::ReadTool::new(cwd, tier))),
         "write" => Some(Box::new(write::WriteTool::new(cwd, tier))),
         _ => None,
@@ -287,8 +303,8 @@ mod tests {
 
     #[test]
     fn the_mutating_four_are_never_scripted_even_when_named() {
-        // The policy table, asserted before those tools even exist so the
-        // guarantee cannot be lost while they are added one by one.
+        // `--tools bash --demo` must not run a shell, however the user asks
+        // (validate.sh 1e).
         for name in ["bash", "edit", "powershell", "write"] {
             assert_eq!(tier(name, true), None, "{name} must not be scriptable");
             assert_eq!(tier(name, false), None, "{name} must not be scriptable");
