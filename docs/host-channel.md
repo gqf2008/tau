@@ -1,7 +1,8 @@
 # Host 回调通道：extension world 的 guest→host 主动通道
 
-> **状态：已落地（本仓 main，契约 `tau:extension@0.2.0`），随下个
-> tau 版本发布。** 本文是设计记录；实施事实见 CHANGELOG [Unreleased]。
+> **状态：已落地（契约 `tau:extension@0.2.0`，随 tau 0.2.0 发布；
+> 0.3.0 起 bridge world 也 import host，见下）。** 本文是设计记录；
+> 实施事实见 CHANGELOG 的 0.2.0 / 0.3.0 段。
 > 是 `docs/im-channels.md` 与 `docs/realtime-av.md` 的契约前置。
 >
 > **0.3.0 追加**：bridge world 也 `import host`（docs/im-channels.md
@@ -26,6 +27,9 @@ v1 是 JSON 信封版；v2 按「参考 pi 的简约设计——简约在机制�
 tool-call / tool-result——image/audio/video 本质同为 raw 数据，
 MIME 主类型即语义（image/* audio/* video/*，其余=file），不另立
 kind 枚举。
+
+下文片段记的是当时（0.2.0）的形状；现行契约以 `wit/tau.wit` 的
+`package` 行为准（当前 `tau:extension@0.4.0`）。
 
 ```wit
 package tau:extension@0.2.0;
