@@ -31,6 +31,16 @@
 
 ### Fixed
 
+- **A tool call from a real provider was assembled and never run.** Both
+  the chat-completions and the Messages streams ended by yielding a
+  `ModelEvent::Done { stop: Stop }` of their own, on top of whatever the
+  provider had already said. The agent loop keeps the last stop it sees
+  and executes tools only on `StopReason::ToolUse`, so a provider's
+  `finish_reason: "tool_calls"` (or `stop_reason: "tool_use"`) was
+  overwritten on the way out: the call was parsed, persisted to the
+  session, and dropped. Ending a stream now goes through
+  `tau_core::sse::Closing`, which emits that fallback only when the
+  provider never named a stop — a stream that spoke keeps its word.
 - `tau sign` reported signing-key failures as `not a wasm binary`: a
   malformed `--key` fingerprint, an ambiguous keyring, and an unreadable key
   file all shared the module parser's error variant, so the message named a

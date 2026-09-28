@@ -356,6 +356,33 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_call_stream_closes_as_tool_use() {
+        // The exact chunk sequence a provider sends for a tool call, run
+        // through the same mapping the stream uses: the deltas, then the
+        // `finish_reason`, then the end of the byte stream. The last stop
+        // the agent loop sees must be `ToolUse` — a trailing fallback
+        // `stop` here is the difference between the call running and the
+        // call being persisted and dropped.
+        let mut closing = tau_core::sse::Closing::default();
+        let mut last = None;
+        for payload in [
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"id":"call_1","function":{"name":"ls","arguments":""}}]}}]}"#,
+            r#"{"choices":[{"delta":{"tool_calls":[{"index":0,"function":{"arguments":"{\"path\":\".\"}"}}]}}]}"#,
+            r#"{"choices":[{"delta":{},"finish_reason":"tool_calls"}]}"#,
+        ] {
+            for event in closing.observe(chunk_events(payload)) {
+                if let ModelEvent::Done { stop } = event {
+                    last = Some(stop);
+                }
+            }
+        }
+        if let Some(ModelEvent::Done { stop }) = closing.fallback() {
+            last = Some(stop);
+        }
+        assert_eq!(last, Some(StopReason::ToolUse));
+    }
+
+    #[test]
     fn malformed_chunk_is_skipped() {
         assert!(chunk_events("not json").is_empty());
     }

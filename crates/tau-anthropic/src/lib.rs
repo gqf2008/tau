@@ -122,10 +122,11 @@ impl Model for AnthropicModel {
         let mut events = sse::parse(byte_stream);
 
         stream! {
+            let mut closing = tau_core::sse::Closing::default();
             while let Some(chunk) = events.next().await {
                 match chunk {
                     Ok(data) => {
-                        for event in wire::chunk_events(&data) {
+                        for event in closing.observe(wire::chunk_events(&data)) {
                             yield event;
                         }
                     }
@@ -136,7 +137,12 @@ impl Model for AnthropicModel {
                     }
                 }
             }
-            yield ModelEvent::Done { stop: StopReason::Stop };
+            // A `message_delta` naming the stop_reason is the provider's
+            // word and survives the stream's end; `end_turn` vs `tool_use`
+            // is exactly what the loop dispatches on (`tau_core::sse::Closing`).
+            if let Some(event) = closing.fallback() {
+                yield event;
+            }
         }
         .boxed()
     }

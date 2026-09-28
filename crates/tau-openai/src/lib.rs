@@ -122,6 +122,7 @@ impl Model for OpenAiModel {
 
         stream! {
             let mut mapper = responses::ChunkMapper::new();
+            let mut closing = sse::Closing::default();
             while let Some(chunk) = events.next().await {
                 match chunk {
                     Ok(data) => {
@@ -129,7 +130,7 @@ impl Model for OpenAiModel {
                             Api::ChatCompletions => wire::chunk_events(&data),
                             Api::Responses => mapper.events(&data),
                         };
-                        for event in produced {
+                        for event in closing.observe(produced) {
                             yield event;
                         }
                     }
@@ -140,9 +141,13 @@ impl Model for OpenAiModel {
                     }
                 }
             }
-            // Stream ended without an explicit error; if no finish_reason was
-            // seen, chunk_events emitted nothing for it — close out cleanly.
-            yield ModelEvent::Done { stop: StopReason::Stop };
+            // The stream ended without an error. A provider that named its
+            // stop keeps it — `finish_reason: "tool_calls"` must reach the
+            // loop as `ToolUse` — so only a stream that said nothing gets
+            // the fallback (`sse::Closing`).
+            if let Some(event) = closing.fallback() {
+                yield event;
+            }
         }
         .boxed()
     }

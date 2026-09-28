@@ -4,6 +4,8 @@
 use futures::StreamExt;
 use futures::stream::{BoxStream, Stream};
 
+use crate::model::{ModelEvent, StopReason};
+
 /// Parse a byte stream into parsed SSE payloads (the part after `data: `).
 pub fn parse<S, B, E>(bytes: S) -> BoxStream<'static, Result<String, String>>
 where
@@ -52,6 +54,62 @@ where
     stream.boxed()
 }
 
+/// The last word on why a provider stream ended.
+///
+/// A provider appends a fallback [`ModelEvent::Done`] when its byte stream
+/// runs out, so a stream that simply stops still closes. What that fallback
+/// must never do is overwrite a stop the provider already reported: the
+/// chat-completions wire says `finish_reason: "tool_calls"` in its last
+/// chunk and then `[DONE]`, and a trailing `stop` on top of it reads to the
+/// agent loop as "the model was done talking" (it executes tool calls only
+/// on `ToolUse`) — the call the model asked for is assembled, persisted, and
+/// never run.
+///
+/// So the fallback is emitted by the streams that never spoke, and only by
+/// them:
+///
+/// ```
+/// use tau_core::model::{ModelEvent, StopReason};
+/// use tau_core::sse::Closing;
+///
+/// let mut closing = Closing::default();
+/// assert_eq!(
+///     closing.observe(vec![ModelEvent::Done {
+///         stop: StopReason::ToolUse
+///     }]),
+///     vec![ModelEvent::Done {
+///         stop: StopReason::ToolUse
+///     }]
+/// );
+/// assert!(closing.fallback().is_none());
+/// ```
+#[derive(Default)]
+pub struct Closing {
+    spoke: bool,
+}
+
+impl Closing {
+    /// Note one chunk's events. They pass through unchanged; this only
+    /// remembers whether the stream has said why it stopped.
+    pub fn observe(&mut self, events: Vec<ModelEvent>) -> Vec<ModelEvent> {
+        if events
+            .iter()
+            .any(|event| matches!(event, ModelEvent::Done { .. }))
+        {
+            self.spoke = true;
+        }
+        events
+    }
+
+    /// The closing event a stream that ended without a word still owes its
+    /// reader, or `None` when the provider already named the stop.
+    pub fn fallback(&self) -> Option<ModelEvent> {
+        (!self.spoke).then_some(ModelEvent::Done {
+            stop: StopReason::Stop,
+        })
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -86,5 +144,47 @@ mod tests {
     fn joins_multiline_data() {
         let events = feed(&["data: one\ndata: two\n\n"]);
         assert_eq!(events, vec![Ok("one\ntwo".to_string())]);
+    }
+
+    #[test]
+    fn a_reported_stop_survives_the_end_of_the_stream() {
+        // The bug this type exists for: `finish_reason: "tool_calls"` is
+        // followed by `[DONE]`, the byte stream ends, and a trailing `stop`
+        // used to overwrite the `tool_use` — silently discarding the call.
+        let mut closing = Closing::default();
+        closing.observe(vec![ModelEvent::ToolCallDelta {
+            index: 0,
+            id: Some("call_1".into()),
+            name: Some("ls".into()),
+            arguments_delta: "{}".into(),
+        }]);
+        closing.observe(vec![ModelEvent::Done {
+            stop: StopReason::ToolUse,
+        }]);
+        assert!(closing.fallback().is_none());
+    }
+
+    #[test]
+    fn a_silent_stream_still_closes() {
+        let mut closing = Closing::default();
+        closing.observe(vec![ModelEvent::TextDelta { text: "hi".into() }]);
+        assert_eq!(
+            closing.fallback(),
+            Some(ModelEvent::Done {
+                stop: StopReason::Stop
+            })
+        );
+    }
+
+    #[test]
+    fn observe_passes_events_through_unchanged() {
+        let mut closing = Closing::default();
+        let events = vec![
+            ModelEvent::TextDelta { text: "a".into() },
+            ModelEvent::Done {
+                stop: StopReason::Length,
+            },
+        ];
+        assert_eq!(closing.observe(events.clone()), events);
     }
 }
