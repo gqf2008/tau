@@ -2623,6 +2623,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "tau-tools"
+version = "0.6.0"
+dependencies = [
+ "async-trait",
+ "dirs",
+ "serde_json",
+ "tau-core",
+ "tempfile",
+ "tokio",
+]
+
+[[package]]
 name = "tempfile"
 version = "3.27.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

@@ -5,6 +5,7 @@ members = [
     "crates/tau-openai",
     "crates/tau-anthropic",
     "crates/tau-ext",
+    "crates/tau-tools",
     "crates/tau-cli",
 ]
 exclude = ["examples/upper"]
