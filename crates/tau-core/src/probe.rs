@@ -1,6 +1,8 @@
 //! Probes: lifecycle points where extensions observe and influence a run.
 //! See docs/probes.md for the full map. All nine points are wired.
 
+use std::sync::Arc;
+
 use async_trait::async_trait;
 use serde_json::Value as Json;
 
@@ -126,8 +128,14 @@ pub trait ProbeHandler: Send + Sync {
 /// first block wins; a panicking/failing handler degrades to `Continue`
 /// (a broken extension must not wedge the harness).
 /// The agent's probe set. See the fold semantics note above.
+///
+/// Cloning shares the handlers, exactly as [`ToolRegistry`] does — see
+/// the note there.
+///
+/// [`ToolRegistry`]: crate::tool::ToolRegistry
+#[derive(Clone)]
 pub struct ProbeRegistry {
-    handlers: Vec<Box<dyn ProbeHandler>>,
+    handlers: Vec<Arc<dyn ProbeHandler>>,
 }
 
 impl Default for ProbeRegistry {
@@ -144,9 +152,10 @@ impl ProbeRegistry {
         }
     }
 
-    /// Add a handler; firing order is registration order.
+    /// Add a handler; firing order is registration order. The registry
+    /// takes ownership of the box and shares it with every existing clone.
     pub fn register(&mut self, handler: Box<dyn ProbeHandler>) {
-        self.handlers.push(handler);
+        self.handlers.push(Arc::from(handler));
     }
 
     /// True when no handlers are registered.
@@ -348,5 +357,65 @@ mod catalog_tests {
             );
             assert_eq!(point.observe_only(), expected, "{point:?}");
         }
+    }
+}
+
+#[cfg(test)]
+mod registry_tests {
+    use super::*;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    struct Counting {
+        point: ProbePoint,
+        /// Shared with the test, so the handler's identity is observable
+        /// from outside: a clone that copies handlers duplicates this
+        /// count, a clone that shares them does not.
+        seen: std::sync::Arc<AtomicUsize>,
+    }
+
+    #[async_trait]
+    impl ProbeHandler for Counting {
+        fn points(&self) -> &[ProbePoint] {
+            std::slice::from_ref(&self.point)
+        }
+        async fn probe(&self, _point: ProbePoint, payload: Json) -> Verdict {
+            self.seen.fetch_add(1, Ordering::SeqCst);
+            Verdict::Replace(payload)
+        }
+    }
+
+    #[test]
+    fn a_clone_shares_the_handlers_instead_of_copying_them() {
+        let seen = std::sync::Arc::new(AtomicUsize::new(0));
+        let mut probes = ProbeRegistry::new();
+        probes.register(Box::new(Counting {
+            point: ProbePoint::SessionStart,
+            seen: seen.clone(),
+        }));
+        assert_eq!(std::sync::Arc::strong_count(&seen), 2);
+
+        let handed_out = probes.clone();
+        assert_eq!(
+            std::sync::Arc::strong_count(&seen),
+            2,
+            "the clone built its own handler instead of sharing the registered one"
+        );
+
+        // The clone routes to that same handler.
+        let verdict = futures::executor::block_on(
+            handed_out.probe(ProbePoint::SessionStart, Json::Null),
+        );
+        assert_eq!(verdict, Verdict::Replace(Json::Null));
+        assert_eq!(seen.load(Ordering::SeqCst), 1);
+
+        // Registration is still per-registry: the clone's handler set is
+        // not the original's.
+        let mut other = handed_out.clone();
+        other.register(Box::new(Counting {
+            point: ProbePoint::SessionEnd,
+            seen: seen.clone(),
+        }));
+        assert!(!other.is_empty() && !probes.is_empty());
+        assert_eq!(std::sync::Arc::strong_count(&seen), 3);
     }
 }

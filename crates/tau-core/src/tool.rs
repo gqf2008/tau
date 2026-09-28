@@ -1,6 +1,7 @@
 //! The tool boundary: definitions the model sees, outputs the loop records.
 
 use std::collections::HashMap;
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use serde_json::Value as Json;
@@ -100,9 +101,15 @@ pub trait Tool: Send + Sync {
 }
 
 /// The agent's tool set, keyed by name.
-#[derive(Default)]
+///
+/// Cloning a registry is cheap and *shares* the tools: a clone holds the
+/// same instances, so one process can serve more than one session without
+/// instantiating a component twice. Sharing is safe because a tool is
+/// `Send + Sync` — a wasm-backed tool pays for it once, behind whatever
+/// lock its host already keeps.
+#[derive(Clone, Default)]
 pub struct ToolRegistry {
-    tools: HashMap<String, Box<dyn Tool>>,
+    tools: HashMap<String, Arc<dyn Tool>>,
 }
 
 impl ToolRegistry {
@@ -111,9 +118,10 @@ impl ToolRegistry {
         Self::default()
     }
 
-    /// Add a tool; a same-named tool is replaced.
+    /// Add a tool; a same-named tool is replaced. The registry takes
+    /// ownership of the box and shares it with every existing clone.
     pub fn register(&mut self, tool: Box<dyn Tool>) {
-        self.tools.insert(tool.def().name.clone(), tool);
+        self.tools.insert(tool.def().name.clone(), Arc::from(tool));
     }
 
     /// Look a tool up by name.
@@ -218,5 +226,45 @@ mod tests {
     #[test]
     fn an_empty_registry_scripts_nothing() {
         assert_eq!(ToolRegistry::new().demo_pick(), None);
+    }
+
+    #[test]
+    fn a_clone_shares_the_tools_instead_of_copying_them() {
+        // What `Clone` is for here: however many registries hand a tool
+        // out, there is one instance behind them. A session that clones
+        // the process's registry reaches the tool the process built — the
+        // same wasm instance — rather than instantiating a second one.
+        let tools = registry(vec![Stub {
+            name: "shared",
+            tier: None,
+        }]);
+        let handed_out = tools.clone();
+        let from_original = tools.get("shared").unwrap();
+        let from_clone = handed_out.get("shared").unwrap();
+        assert!(
+            std::ptr::eq(from_original, from_clone),
+            "the clone built its own instance instead of sharing the registered one"
+        );
+        // The assertion has teeth: two registries that each built their
+        // own tool of the same name do *not* compare equal.
+        let independent = registry(vec![Stub {
+            name: "shared",
+            tier: None,
+        }]);
+        assert!(!std::ptr::eq(
+            from_original,
+            independent.get("shared").unwrap()
+        ));
+
+        // The maps stay separate even though the tools are shared:
+        // registering into one registry is invisible to the others.
+        let mut other = handed_out.clone();
+        other.register(Box::new(Stub {
+            name: "later",
+            tier: None,
+        }));
+        assert!(other.get("later").is_some());
+        assert!(handed_out.get("later").is_none());
+        assert!(tools.get("later").is_none());
     }
 }
