@@ -32,13 +32,18 @@ pub mod truncate;
 
 mod edit;
 mod edit_match;
+mod find;
+mod grep;
 mod ls;
 mod mime;
 mod paths;
 mod read;
+mod walk;
 mod write;
 
 pub use edit::EditTool;
+pub use find::FindTool;
+pub use grep::GrepTool;
 pub use ls::LsTool;
 pub use read::ReadTool;
 pub use write::WriteTool;
@@ -46,7 +51,7 @@ pub use write::WriteTool;
 /// Every built-in this build implements, on this platform. The single source
 /// of truth for [`names`] and [`register`]; a name here without a match arm
 /// in [`build`] fails the tests.
-const IMPLEMENTED: [&str; 4] = ["edit", "ls", "read", "write"];
+const IMPLEMENTED: [&str; 6] = ["edit", "find", "grep", "ls", "read", "write"];
 
 /// Built-ins whose output cannot change the user's machine: the only ones
 /// `--demo` may script, and only when `--tools` named them.
@@ -160,6 +165,8 @@ fn tier(name: &str, named: bool) -> Option<u8> {
 fn build(name: &str, cwd: &Path, tier: Option<u8>) -> Option<Box<dyn Tool>> {
     match name {
         "edit" => Some(Box::new(edit::EditTool::new(cwd, tier))),
+        "find" => Some(Box::new(find::FindTool::new(cwd, tier))),
+        "grep" => Some(Box::new(grep::GrepTool::new(cwd, tier))),
         "ls" => Some(Box::new(ls::LsTool::new(cwd, tier))),
         "read" => Some(Box::new(read::ReadTool::new(cwd, tier))),
         "write" => Some(Box::new(write::WriteTool::new(cwd, tier))),

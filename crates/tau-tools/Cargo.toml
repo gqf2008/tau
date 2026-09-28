@@ -19,6 +19,13 @@ dirs = "6"
 # NFKC in the edit tool's fuzzy matcher, which folds full-width forms
 # (an IME artifact) to ASCII the way pi's `String.normalize("NFKC")` does.
 unicode-normalization = "0.1"
+# grep/find search natively instead of shelling out to ripgrep and fd: `regex`
+# is the engine ripgrep itself uses, `ignore` its walker (gitignore, hidden
+# files, `.git`), and `globset` its `--glob` semantics. Being on by default,
+# these tools cannot require an external binary.
+ignore = "0.4"
+globset = "0.4"
+regex = "1"
 
 [dev-dependencies]
 tempfile = "3"
