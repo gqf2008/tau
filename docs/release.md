@@ -27,6 +27,22 @@ SKIP_TESTS=1 scripts/release.sh           # dist zip assembles; smoke the
                                           # packaged binary + examples once
 ```
 
+**A clippy run after `cargo test` can be a cache replay.** `cargo clippy`
+shares the check-profile fingerprints with `cargo check` / `cargo test`, so
+when the suites ran first a clippy pass may print only `Finished` — no
+`Checking <crate>` lines — and report no lints for code it never re-linted.
+That green proves nothing. Force the rebuild and watch for the lines:
+
+```bash
+touch crates/*/src/lib.rs            # or use a separate CARGO_TARGET_DIR
+cargo clippy --workspace --all-targets   # expect Checking <crate> per member
+```
+
+The examples are not workspace members: the ones with code changes need their
+own run (`cargo clippy --manifest-path examples/<ex>/Cargo.toml
+--target wasm32-wasip2`), and they cache the same way. Hit on the 0.4.0 cut:
+two consecutive clippy runs finished in ~0.5s with zero `Checking` lines.
+
 **Contract bumps: build the fixtures before the suites.** The tau-ext unit
 tests load example artifacts (`echo-provider`, `upper`, `guard`, …) straight
 from `examples/*/target/wasm32-wasip2/release`. After a WIT version bump a
