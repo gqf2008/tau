@@ -17,9 +17,9 @@ tau-core → tau-openai, tau-anthropic → tau-ext → tau-cli
 ## Pre-flight
 
 ```bash
-cargo test                                # all suites green
-cargo clippy --all-targets                # 0 warnings
+cargo clippy --all-targets                # 0 warnings (see the replay note)
 cargo clippy --manifest-path examples/mcp-bridge/Cargo.toml --target wasm32-wasip2
+cargo test                                # all suites green
 cargo build --manifest-path examples/<each>/Cargo.toml --target wasm32-wasip2 --release
 git status                                # clean tree
 scripts/validate.sh                       # first-user validation, 11 steps
@@ -31,7 +31,7 @@ SKIP_TESTS=1 scripts/release.sh           # dist zip assembles; smoke the
 shares the check-profile fingerprints with `cargo check` / `cargo test`, so
 when the suites ran first a clippy pass may print only `Finished` — no
 `Checking <crate>` lines — and report no lints for code it never re-linted.
-That green proves nothing. Force the rebuild and watch for the lines:
+That green proves nothing. The pre-flight list above therefore runs clippy *before* the suites; whenever you run it later anyway, force the rebuild and watch for the lines:
 
 ```bash
 touch crates/*/src/lib.rs            # or use a separate CARGO_TARGET_DIR
