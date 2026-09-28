@@ -1,9 +1,12 @@
 //! ACP over stdio, end to end: the binary is spawned the way an editor
 //! spawns it and driven with JSON-RPC over pipes.
 //!
-//! These are the handshake legs — `initialize`, `session/new`, what that
-//! leaves on disk, and how the connection ends. The legs that run a turn
-//! live next to the machinery they exercise.
+//! Two halves: the handshake (`initialize`, `session/new`, what that
+//! leaves on disk, how the connection ends) and the turn (`session/prompt`
+//! and its `session/update` stream, `session/cancel`). Both are driven the
+//! way a client drives them — write a line, read a line, assert on what
+//! came back — because the things worth pinning here are exactly the ones
+//! a unit test cannot see: what reaches the wire, and in what order.
 
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
@@ -43,10 +46,19 @@ struct Connection {
 
 impl Connection {
     fn spawn(dir: &Path, extra: &[&str]) -> Connection {
-        let mut child = tau()
-            .arg("--acp")
-            .args(extra)
-            .current_dir(dir)
+        Connection::spawn_with(dir, extra, &[])
+    }
+
+    /// [`Connection::spawn`], with environment: the legs here need
+    /// `TAU_ACP_STALL_MS`, and a client that configures its agent through
+    /// the spawn environment is the documented way to run this mode.
+    fn spawn_with(dir: &Path, extra: &[&str], env: &[(&str, &str)]) -> Connection {
+        let mut command = tau();
+        command.arg("--acp").args(extra).current_dir(dir);
+        for (key, value) in env {
+            command.env(key, value);
+        }
+        let mut child = command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -145,6 +157,42 @@ impl Connection {
                 "clientInfo": {"name": "tau-acp-test", "version": "0"},
             }),
         )
+    }
+
+    /// `session/new` in `dir`, returning the id the client will use.
+    fn new_session(&mut self, id: u64, dir: &Path) -> String {
+        let answer = self.call(
+            id,
+            "session/new",
+            json!({"cwd": dir.to_str().expect("utf-8 scratch path"), "mcpServers": []}),
+        );
+        answer["result"]["sessionId"]
+            .as_str()
+            .unwrap_or_else(|| panic!("session/new answered without an id: {answer}"))
+            .to_string()
+    }
+
+    fn prompt(&mut self, id: u64, session: &str, text: &str) {
+        self.send(json!({
+            "jsonrpc": "2.0",
+            "id": id,
+            "method": "session/prompt",
+            "params": {"sessionId": session, "prompt": [{"type": "text", "text": text}]},
+        }));
+    }
+
+    /// Read until the message carrying this id, collecting the
+    /// notifications that arrive first: they interleave with the answer,
+    /// and which ones arrived is what most of these legs are about.
+    fn answer(&mut self, id: u64, notes: &mut Vec<Value>) -> Value {
+        loop {
+            let line = self.next();
+            if line.get("id").is_some() {
+                assert_eq!(line["id"], json!(id), "the answer to request {id}: {line}");
+                return line;
+            }
+            notes.push(line);
+        }
     }
 
     /// Close stdin — what an editor does on quit — and wait for the exit.
@@ -319,14 +367,415 @@ fn what_tau_does_not_implement_it_says_so() {
 
 #[test]
 fn acp_refuses_to_share_the_run_with_a_prompt() {
-    let out = tau()
-        .args(["--acp", "-p", "hi"])
-        .output()
-        .expect("run tau");
+    let out = tau().args(["--acp", "-p", "hi"]).output().expect("run tau");
     assert_eq!(
         out.status.code(),
         Some(2),
         "a prompt and ACP are two ways to run; clap refuses the pair: {}",
         String::from_utf8_lossy(&out.stderr)
     );
+}
+
+/// The `update` object of every `session/update` notification, in arrival
+/// order — and the assertion that nothing else arrived, and that it all
+/// belonged to this session. A leg that says which updates came also says
+/// nothing else did.
+fn updates(notes: &[Value], session: &str) -> Vec<Value> {
+    notes
+        .iter()
+        .map(|note| {
+            assert_eq!(note["method"], json!("session/update"), "{note}");
+            assert_eq!(note["params"]["sessionId"], json!(session), "{note}");
+            note["params"]["update"].clone()
+        })
+        .collect()
+}
+
+/// The `sessionUpdate` tag of each update, in arrival order.
+fn kinds(updates: &[Value]) -> Vec<String> {
+    updates
+        .iter()
+        .map(|update| {
+            update["sessionUpdate"]
+                .as_str()
+                .unwrap_or_else(|| panic!("an update without a tag: {update}"))
+                .to_string()
+        })
+        .collect()
+}
+
+/// The text an agent message chunk carries.
+fn chunk_text(update: &Value) -> &str {
+    update["content"]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("expected a text chunk: {update}"))
+}
+
+/// `tau tree` over one session file: the file is the session, so this is
+/// how a leg checks what a turn left behind.
+fn tree_of(file: &Path) -> String {
+    let tree = tau()
+        .args(["tree", "--session"])
+        .arg(file)
+        .output()
+        .expect("run tau tree");
+    assert!(
+        tree.status.success(),
+        "tau tree refused {}: {}",
+        file.display(),
+        String::from_utf8_lossy(&tree.stderr)
+    );
+    String::from_utf8_lossy(&tree.stdout).to_string()
+}
+
+#[test]
+fn a_prompt_streams_the_answer_and_writes_the_session() {
+    let dir = scratch("prompt");
+    let sessions = dir.join("sessions");
+    let mut agent = Connection::spawn(
+        &dir,
+        &[
+            "--demo",
+            "--no-builtin-tools",
+            "--session",
+            sessions.to_str().expect("utf-8 scratch path"),
+        ],
+    );
+    agent.initialize(1);
+    let session = agent.new_session(2, &dir);
+
+    agent.prompt(3, &session, "hello");
+    let mut notes = Vec::new();
+    let answer = agent.answer(3, &mut notes);
+    assert_eq!(
+        answer["result"]["stopReason"],
+        json!("end_turn"),
+        "{answer}"
+    );
+
+    // The answer arrives as chunks, and the demo model streams three of
+    // them (one of which is empty — a delta is passed through as it
+    // comes, not quietly dropped).
+    let streamed = updates(&notes, &session);
+    assert_eq!(
+        kinds(&streamed),
+        vec!["agent_message_chunk"; 3],
+        "{streamed:?}"
+    );
+    let text: String = streamed.iter().map(chunk_text).collect();
+    assert_eq!(
+        text, "tau is alive. (faux model — set ANTHROPIC_API_KEY or OPENAI_API_KEY for a real one)",
+        "{streamed:?}"
+    );
+
+    // The file is the record: the prompt and the answer, nothing else.
+    let file = sessions.join(format!("{session}.jsonl"));
+    let tree = tree_of(&file);
+    assert!(tree.contains("hello"), "{tree}");
+    assert!(tree.contains("tau is alive."), "{tree}");
+    assert_eq!(tree.lines().count(), 2, "one prompt, one answer: {tree}");
+
+    // A second turn runs on what the first one wrote — the history is the
+    // file, not anything this process kept in memory.
+    agent.prompt(4, &session, "again");
+    let mut notes = Vec::new();
+    let answer = agent.answer(4, &mut notes);
+    assert_eq!(
+        answer["result"]["stopReason"],
+        json!("end_turn"),
+        "{answer}"
+    );
+    let tree = tree_of(&file);
+    assert_eq!(tree.lines().count(), 4, "the second turn appended: {tree}");
+
+    let status = agent.shut_down();
+    assert_eq!(status.code(), Some(0));
+}
+
+#[test]
+fn a_built_in_tool_runs_and_reports_over_the_wire() {
+    let dir = scratch("tool");
+    let sessions = dir.join("sessions");
+    // `--tools ls` names one read-only built-in, and the demo script only
+    // calls a tool the user put in the run: the model asks for `ls`, the
+    // loop runs it for real, and the answer quotes what it printed. A
+    // whole tool round trip with no wasm component anywhere in it.
+    let mut agent = Connection::spawn(
+        &dir,
+        &[
+            "--demo",
+            "--tools",
+            "ls",
+            "--session",
+            sessions.to_str().expect("utf-8 scratch path"),
+        ],
+    );
+    agent.initialize(1);
+    let session = agent.new_session(2, &dir);
+
+    agent.prompt(3, &session, "list it");
+    let mut notes = Vec::new();
+    let answer = agent.answer(3, &mut notes);
+    assert_eq!(
+        answer["result"]["stopReason"],
+        json!("end_turn"),
+        "{answer}"
+    );
+
+    let streamed = updates(&notes, &session);
+    assert_eq!(
+        kinds(&streamed),
+        vec![
+            "tool_call",
+            "tool_call_update",
+            "agent_message_chunk",
+            "agent_message_chunk",
+            "agent_message_chunk",
+        ],
+        "{streamed:?}"
+    );
+
+    // Announced before its result, so an editor has something to draw the
+    // update on: the call carries the tool's name as its title, the kind
+    // it is drawn by, and an id namespaced to this turn — the loop's own
+    // ids come from the provider and repeat across turns.
+    let call = &streamed[0];
+    assert_eq!(call["toolCallId"], json!("1:demo-call-1"), "{call}");
+    assert_eq!(call["title"], json!("ls"), "{call}");
+    assert_eq!(call["kind"], json!("read"), "{call}");
+    assert_eq!(call["status"], json!("in_progress"), "{call}");
+
+    // Closed by the update, carrying a preview of what the tool printed:
+    // the scratch directory holds the session directory and nothing else.
+    let done = &streamed[1];
+    assert_eq!(done["status"], json!("completed"), "{done}");
+    let preview = done["content"][0]["content"]["text"]
+        .as_str()
+        .unwrap_or_else(|| panic!("the update carries the output: {done}"));
+    assert!(preview.contains("sessions/"), "{done}");
+
+    // And the model saw it: the second round answers with what the tool
+    // returned, which is the loop closing rather than the call firing.
+    let text: String = streamed[2..].iter().map(chunk_text).collect();
+    assert!(text.contains("The tool answered: sessions/"), "{text}");
+
+    // The session file keeps the provider's own id and the tool result.
+    let file = sessions.join(format!("{session}.jsonl"));
+    let tree = tree_of(&file);
+    assert!(tree.contains("[tool call: ls]"), "{tree}");
+    assert!(tree.contains("[tool result]"), "{tree}");
+
+    // The next turn runs on what the first one wrote. The demo script
+    // calls the picked tool only while the request has no tool result in
+    // it, so a second call here — or an answer that does not quote the
+    // first one's output — would mean the turn had started from an empty
+    // history instead of from the file.
+    agent.prompt(4, &session, "list it again");
+    let mut notes = Vec::new();
+    let answer = agent.answer(4, &mut notes);
+    assert_eq!(
+        answer["result"]["stopReason"],
+        json!("end_turn"),
+        "{answer}"
+    );
+    let streamed = updates(&notes, &session);
+    assert_eq!(
+        kinds(&streamed),
+        vec!["agent_message_chunk"; 3],
+        "the second turn already has the tool result: {streamed:?}"
+    );
+    assert!(
+        streamed
+            .iter()
+            .map(chunk_text)
+            .collect::<String>()
+            .contains("The tool answered: sessions/"),
+        "the second turn remembered the first one's result: {streamed:?}"
+    );
+    // The file is not rewritten: it still holds the provider's own id.
+    assert!(tree_of(&file).contains("[tool call: ls]"), "{file:?}");
+
+    agent.shut_down();
+}
+
+#[test]
+fn a_cancel_stops_the_turn_and_leaves_the_session_usable() {
+    let dir = scratch("cancel");
+    let sessions = dir.join("sessions");
+    // The stall knob holds a turn between its claim and its run: the only
+    // window a scripted model — which answers in microseconds — leaves
+    // open for a cancel to land inside.
+    let mut agent = Connection::spawn_with(
+        &dir,
+        &[
+            "--demo",
+            "--no-builtin-tools",
+            "--session",
+            sessions.to_str().expect("utf-8 scratch path"),
+        ],
+        &[("TAU_ACP_STALL_MS", "2000")],
+    );
+    agent.initialize(1);
+    let session = agent.new_session(2, &dir);
+
+    agent.prompt(3, &session, "hello");
+    std::thread::sleep(Duration::from_millis(300));
+    agent.send(json!({
+        "jsonrpc": "2.0",
+        "method": "session/cancel",
+        "params": {"sessionId": session},
+    }));
+
+    let mut notes = Vec::new();
+    let answer = agent.answer(3, &mut notes);
+    assert_eq!(
+        answer["result"]["stopReason"],
+        json!("cancelled"),
+        "the cancel reached the turn: {answer}"
+    );
+    // Nothing was streamed: the run stopped before its first token, so
+    // the client gets a stop reason and no half-answer.
+    assert!(updates(&notes, &session).is_empty(), "{notes:?}");
+
+    // The cancel is not poison: the session runs the next turn normally.
+    agent.prompt(4, &session, "again");
+    let mut notes = Vec::new();
+    let answer = agent.answer(4, &mut notes);
+    assert_eq!(
+        answer["result"]["stopReason"],
+        json!("end_turn"),
+        "{answer}"
+    );
+    assert!(!updates(&notes, &session).is_empty(), "{notes:?}");
+
+    // The prompt of the cancelled turn is still in the file — a turn that
+    // ran and stopped is part of the record, not a transaction to unwind.
+    let tree = tree_of(&sessions.join(format!("{session}.jsonl")));
+    assert!(tree.contains("hello"), "{tree}");
+
+    agent.shut_down();
+}
+
+#[test]
+fn a_cancel_with_no_turn_running_is_ignored() {
+    let dir = scratch("cancel-at-rest");
+    let sessions = dir.join("sessions");
+    let mut agent = Connection::spawn(
+        &dir,
+        &[
+            "--demo",
+            "--no-builtin-tools",
+            "--session",
+            sessions.to_str().expect("utf-8 scratch path"),
+        ],
+    );
+    agent.initialize(1);
+    let session = agent.new_session(2, &dir);
+
+    // Nothing is running. The abort would sit in the control channel and
+    // be taken by the *next* run, which would then stop before its first
+    // token on behalf of a client that asked to cancel a finished turn.
+    // So it has to be dropped here, and the turn below is the proof.
+    agent.send(json!({
+        "jsonrpc": "2.0",
+        "method": "session/cancel",
+        "params": {"sessionId": session},
+    }));
+    agent.prompt(3, &session, "hello");
+    let mut notes = Vec::new();
+    let answer = agent.answer(3, &mut notes);
+    assert_eq!(
+        answer["result"]["stopReason"],
+        json!("end_turn"),
+        "a cancel sent at rest must not reach the next turn: {answer}"
+    );
+    assert!(!updates(&notes, &session).is_empty(), "{notes:?}");
+
+    agent.shut_down();
+}
+
+#[test]
+fn a_second_prompt_while_one_runs_is_an_error() {
+    let dir = scratch("concurrent");
+    let sessions = dir.join("sessions");
+    let mut agent = Connection::spawn_with(
+        &dir,
+        &[
+            "--demo",
+            "--no-builtin-tools",
+            "--session",
+            sessions.to_str().expect("utf-8 scratch path"),
+        ],
+        &[("TAU_ACP_STALL_MS", "1500")],
+    );
+    agent.initialize(1);
+    let session = agent.new_session(2, &dir);
+
+    agent.prompt(3, &session, "one");
+    std::thread::sleep(Duration::from_millis(300));
+    agent.prompt(4, &session, "two");
+
+    // The second is refused — and refused now, rather than queued behind
+    // the first, which would look to a client like the agent sitting on a
+    // message it had accepted.
+    let mut notes = Vec::new();
+    let refused = agent.answer(4, &mut notes);
+    assert_eq!(refused["error"]["code"], json!(-32602), "{refused}");
+    assert!(
+        refused["error"]["message"]
+            .as_str()
+            .unwrap_or_default()
+            .contains("already running a turn"),
+        "the refusal says what is wrong: {refused}"
+    );
+    assert_eq!(
+        refused["error"]["data"], refused["error"]["message"],
+        "the detail rides `data` too, for a client that logs only that: {refused}"
+    );
+
+    // And the first turn was never disturbed by it.
+    let mut notes = Vec::new();
+    let answer = agent.answer(3, &mut notes);
+    assert_eq!(
+        answer["result"]["stopReason"],
+        json!("end_turn"),
+        "{answer}"
+    );
+    let streamed = updates(&notes, &session);
+    assert!(
+        streamed
+            .iter()
+            .map(chunk_text)
+            .collect::<String>()
+            .contains("tau is alive."),
+        "{streamed:?}"
+    );
+
+    agent.shut_down();
+}
+
+#[test]
+fn a_prompt_for_a_session_this_process_does_not_serve_is_an_error() {
+    let dir = scratch("unknown");
+    let mut agent = Connection::spawn(&dir, &["--demo", "--no-builtin-tools"]);
+    agent.initialize(1);
+
+    agent.prompt(2, "no-such-session", "hello");
+    let answer = agent.answer(2, &mut Vec::new());
+    assert_eq!(answer["error"]["code"], json!(-32602), "{answer}");
+    let message = answer["error"]["message"].as_str().unwrap_or_default();
+    assert!(message.contains("no-such-session"), "{answer}");
+
+    // Answering, not hanging or dying: the connection still serves.
+    let session = agent.new_session(3, &dir);
+    agent.prompt(4, &session, "hello");
+    let mut notes = Vec::new();
+    let answer = agent.answer(4, &mut notes);
+    assert_eq!(
+        answer["result"]["stopReason"],
+        json!("end_turn"),
+        "{answer}"
+    );
+
+    agent.shut_down();
 }

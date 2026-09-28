@@ -15,6 +15,10 @@
 //! always answers for itself (a spawned task that returns an error takes
 //! the whole connection down with it).
 //!
+//! That is also why `session/cancel` is handled inline and `session/prompt`
+//! is not: the cancel has to reach a running turn, and it can only do that
+//! if the connection is still reading while that turn runs.
+//!
 //! # What one process serves
 //!
 //! Any number of ACP sessions. Each gets its own JSONL under the directory
@@ -24,16 +28,18 @@
 //! registries are `Clone`. A JSONL written here is an ordinary tau session:
 //! `tau tree --session <file>` reads it, `--continue` resumes it.
 
+mod map;
 mod session;
+mod turn;
 
 use std::sync::Arc;
 
-use agent_client_protocol::schema::v1::{
-    AgentCapabilities, Error, Implementation, InitializeRequest, InitializeResponse,
-    NewSessionRequest, NewSessionResponse, PromptCapabilities,
-};
 use agent_client_protocol::schema::ProtocolVersion;
-use agent_client_protocol::{Agent, Stdio, on_receive_request};
+use agent_client_protocol::schema::v1::{
+    AgentCapabilities, CancelNotification, Error, Implementation, InitializeRequest,
+    InitializeResponse, NewSessionRequest, NewSessionResponse, PromptCapabilities, PromptRequest,
+};
+use agent_client_protocol::{Agent, Stdio, on_receive_notification, on_receive_request};
 
 use crate::Cli;
 use session::Sessions;
@@ -45,9 +51,15 @@ use session::Sessions;
 /// `connect_to` reports it.
 pub async fn serve(cli: &Cli) -> anyhow::Result<()> {
     let harness = crate::setup::build(cli).await?;
-    let sessions = Arc::new(Sessions::new(harness, cli.session_dir(), cli.system.clone()));
+    let sessions = Arc::new(Sessions::new(
+        harness,
+        cli.session_dir(),
+        cli.system.clone(),
+    ));
 
     let created = Arc::clone(&sessions);
+    let prompted = Arc::clone(&sessions);
+    let cancelled = Arc::clone(&sessions);
     let closed = Arc::clone(&sessions);
 
     Agent
@@ -110,6 +122,42 @@ pub async fn serve(cli: &Cli) -> anyhow::Result<()> {
                 })
             },
             on_receive_request!(),
+        )
+        .on_receive_request(
+            async move |request: PromptRequest, responder, connection| {
+                let sessions = Arc::clone(&prompted);
+                // Parsed here, run there: folding the blocks into one
+                // message is a pure function and costs nothing, and the
+                // notes it returns — a block tau cannot carry — are worth
+                // printing even if the turn below never starts.
+                let (prompt, notes) = map::prompt_message(&request.prompt);
+                for note in &notes {
+                    eprintln!("[tau] acp: {note}");
+                }
+                let id = request.session_id;
+                // The task keeps a clone: the handler's own connection
+                // handle is borrowed by `spawn`, and a turn needs one to
+                // send `session/update` while it runs.
+                let sender = connection.clone();
+                connection.spawn(async move {
+                    sessions.prompt(id, prompt, responder, sender).await;
+                    // Never an error: returning one here would take the
+                    // whole connection down over a single failed turn.
+                    Ok(())
+                })
+            },
+            on_receive_request!(),
+        )
+        .on_receive_notification(
+            async move |notification: CancelNotification, _connection| {
+                // Handled inline, not spawned: this notification is only
+                // useful if it lands while the turn it cancels is running,
+                // and a spawned task could be scheduled after that turn
+                // had already answered.
+                cancelled.cancel(&notification.session_id);
+                Ok(())
+            },
+            on_receive_notification!(),
         )
         .on_close(async move |_connection| {
             closed.end_all().await;

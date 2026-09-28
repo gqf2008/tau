@@ -30,6 +30,9 @@ rustyline = "18.0.1"
 # over stdio directly — Zed's SDK, no adapter process in between.
 # Default features only: the `unstable_*` set is draft protocol.
 agent-client-protocol = "2.2.0"
+# A prompt's images arrive base64; tau's messages carry honest bytes
+# (base64 is a JSON-edge encoding — see tau-core's Media).
+base64 = "0.23.1"
 # Phase 0 realtime-av (docs/realtime-av.md): host-side capture/playback
 # (the architecture red line keeps audio I/O out of wasm guests).
 cpal = "0.17"

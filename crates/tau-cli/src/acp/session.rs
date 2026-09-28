@@ -1,36 +1,55 @@
 //! The session registry: one ACP session, one JSONL, one agent.
 //!
-//! Everything a session owns lives here — its tree, its active branch, the
-//! agent that runs its turns. Everything it does not is in the
-//! [`Harness`]: the tools, the probes, the component host and the model are
-//! built once per process and handed to every session, and a clone of the
-//! registries shares the tool instances rather than copying them. That is
-//! what keeps a wasm component instantiated once however many sessions
-//! this process serves.
+//! Everything a session owns lives here — its tree, its file, the agent
+//! that runs its turns. Everything it does not is in the [`Harness`]: the
+//! tools, the probes, the component host and the model are built once per
+//! process and handed to every session, and a clone of the registries
+//! shares the tool instances rather than copying them. That is what keeps
+//! a wasm component instantiated once however many sessions this process
+//! serves.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
-use std::sync::atomic::{AtomicBool, Ordering};
 
-use agent_client_protocol::schema::v1::{NewSessionRequest, SessionId};
+use agent_client_protocol::schema::v1::{NewSessionRequest, PromptResponse, SessionId};
+use agent_client_protocol::{Client, ConnectionTo, Responder};
 use anyhow::{Context, Result};
 use tau_core::probe::ProbePoint;
 use tau_core::session::{JsonlStore, new_id};
-use tau_core::{Agent, Model, ProbeRegistry, ToolRegistry};
+use tau_core::{Agent, Control, Message, Model, ProbeRegistry, ToolRegistry};
 
 use crate::setup::{Harness, SharedModel};
+
+use super::turn;
 
 /// One ACP session.
 ///
 /// What is durable about a session is its file: the tree at
 /// `<dir>/<session-id>.jsonl` holds every message, and a turn rebuilds its
 /// history from it. What lives here is what the file cannot say — the
-/// agent, holding this process's tools and probes, and the payload the
-/// session lifecycle was announced with.
+/// agent, holding this process's tools and probes, the payload the session
+/// lifecycle was announced with, and the two counters a turn needs.
 pub struct Session {
+    /// The client-facing id, and the stem of [`Session::path`].
+    pub id: SessionId,
+    /// The session's own file. The tree in it *is* the session.
+    pub path: PathBuf,
     /// The agent over the shared tools and probes.
     pub agent: Agent,
+    /// How many turns have started here, counting from one. Only ever
+    /// incremented, and it rides the id a client sees, so a provider that
+    /// reuses tool-call ids across turns cannot make a client draw two
+    /// calls as one.
+    pub turns: AtomicU64,
+    /// Whether a turn is running.
+    ///
+    /// `session/cancel` is honored only while this is set. An abort sent
+    /// while nothing runs does not evaporate: the control channel is
+    /// drained by the *next* run, which would then die before it began, on
+    /// behalf of a client that asked to cancel a turn already over.
+    pub in_flight: AtomicBool,
     /// The session_start payload, key for key what print mode sends.
     pub payload: serde_json::Value,
 }
@@ -53,7 +72,10 @@ pub struct Sessions {
     /// The extension host channel takes one bus for the whole process, so
     /// it is wired to the first session and stays there.
     channel_wired: AtomicBool,
-    sessions: Mutex<HashMap<String, Session>>,
+    /// Behind an `Arc` because a turn holds its session across awaits, off
+    /// the dispatch loop, while `session/cancel` has to reach the same
+    /// session from inside it.
+    sessions: Mutex<HashMap<String, Arc<Session>>>,
 }
 
 impl Sessions {
@@ -116,8 +138,7 @@ impl Sessions {
         // `tau tree --session <file>` sees it, and a session directory tau
         // cannot write to fails at session/new — where the client can be
         // told — instead of mid-turn.
-        std::fs::File::create(&path)
-            .with_context(|| format!("creating {}", path.display()))?;
+        std::fs::File::create(&path).with_context(|| format!("creating {}", path.display()))?;
         // Opened and closed: the file is the session's durable state, and
         // a turn reopens it. Opening here is what surfaces a torn tail
         // left by an earlier crash at the point the client is listening,
@@ -151,7 +172,17 @@ impl Sessions {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let second = sessions.len() == 1;
-        sessions.insert(id.clone(), Session { agent, payload });
+        sessions.insert(
+            id.clone(),
+            Arc::new(Session {
+                id: SessionId::new(id.clone()),
+                path,
+                agent,
+                turns: AtomicU64::new(0),
+                in_flight: AtomicBool::new(false),
+                payload,
+            }),
+        );
         drop(sessions);
         if second {
             eprintln!(
@@ -161,12 +192,72 @@ impl Sessions {
         Ok(SessionId::new(id))
     }
 
+    /// The session with this id, if this process is still serving it.
+    fn get(&self, id: &str) -> Option<Arc<Session>> {
+        self.sessions
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .get(id)
+            .cloned()
+    }
+
+    /// Run one prompt against a session.
+    ///
+    /// Called from a spawned task, never from a handler: everything below
+    /// is awaited work, and awaiting it inside the dispatch loop would
+    /// stop the connection from processing the `session/cancel` that is
+    /// supposed to reach this very turn.
+    pub async fn prompt(
+        &self,
+        id: SessionId,
+        prompt: Message,
+        responder: Responder<PromptResponse>,
+        connection: ConnectionTo<Client>,
+    ) {
+        let Some(session) = self.get(id.0.as_ref()) else {
+            return turn::answer_unknown_session(responder, &id);
+        };
+        // The claim is taken here and held by the turn: a second prompt
+        // for a session already running one is an error the client can act
+        // on, where queueing it would look like the agent silently sitting
+        // on a message until the first turn ended.
+        match turn::InFlight::claim(session) {
+            Some(turn) => turn::run(turn, prompt, responder, connection).await,
+            None => turn::answer_busy(responder, &id),
+        }
+    }
+
+    /// Honor `session/cancel` — but only for a session that is actually
+    /// running a turn.
+    ///
+    /// The control channel is not a queue with a delete button: an abort
+    /// nobody is waiting for stays in it and is taken by the next run,
+    /// which then stops before its first token is streamed. So the gate is
+    /// this process's own record of a turn in flight, and a cancel that
+    /// arrives at rest is reported and dropped.
+    pub fn cancel(&self, id: &SessionId) {
+        let Some(session) = self.get(id.0.as_ref()) else {
+            eprintln!("[tau] acp: session/cancel for {id}, which this process is not serving");
+            return;
+        };
+        if session.in_flight.load(Ordering::SeqCst) {
+            // A send failure means the receiver is gone — the run is over,
+            // which is also the case where there is nothing left to cancel.
+            if session.agent.control().send(Control::Abort).is_err() {
+                eprintln!("[tau] acp: session/cancel arrived just as the turn ended");
+            }
+        } else {
+            eprintln!("[tau] acp: session/cancel for {id} arrived with no turn in flight; ignored");
+        }
+    }
+
     /// The first session owns the process-wide host channel.
     fn wire_host_channel(&self, agent: &Agent) {
         if self.channel_wired.swap(true, Ordering::SeqCst) {
             return;
         }
-        let (inject_tx, mut inject_rx) = tokio::sync::mpsc::unbounded_channel::<tau_core::Control>();
+        let (inject_tx, mut inject_rx) =
+            tokio::sync::mpsc::unbounded_channel::<tau_core::Control>();
         self.host.wire_host_channel(agent.bus(), inject_tx);
         let control = agent.control();
         tokio::spawn(async move {
@@ -176,11 +267,12 @@ impl Sessions {
         });
     }
 
-    /// The client is gone: fire session_end for every session that is
-    /// still open, so the components see the same lifecycle print mode
-    /// gives them, then drop them.
+    /// The client is gone: abort whatever is still running, fire
+    /// session_end for every session that is still open — so the loaded
+    /// components see the same lifecycle print mode gives them — then drop
+    /// them.
     pub async fn end_all(&self) {
-        let open: Vec<Session> = {
+        let open: Vec<Arc<Session>> = {
             let mut sessions = self
                 .sessions
                 .lock()
@@ -188,6 +280,12 @@ impl Sessions {
             sessions.drain().map(|(_, session)| session).collect()
         };
         for session in open {
+            // Best effort, and deliberately before the observation below
+            // rather than instead of it: the process is ending, so a turn
+            // that does not stop is one whose task the runtime drops.
+            if session.in_flight.load(Ordering::SeqCst) {
+                let _ = session.agent.control().send(Control::Abort);
+            }
             let payload = session.payload.clone();
             session.agent.observe(ProbePoint::SessionEnd, payload).await;
         }

@@ -3311,6 +3311,7 @@ dependencies = [
  "anyhow",
  "async-stream",
  "async-trait",
+ "base64 0.23.1",
  "clap",
  "cpal",
  "futures",
