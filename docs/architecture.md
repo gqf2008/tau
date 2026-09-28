@@ -66,7 +66,11 @@ ABI 是已知的未来改进项，当前边界先行钉死。
 
 - **Model trait**（`model.rs`）：流式接口，首要契约是**永不 panic**——
   错误作为终末流事件（`error` + `done{stop:"error"}`）传播。内置
-  provider、wasm provider、faux 模型都在这一个 trait 后面。
+  provider、wasm provider、faux 模型都在这一个 trait 后面。第二种
+  交互模式是 `realtime(config) -> Option<RealtimeSession>`：全双工会话
+  （上行 push_audio/push_image，下行 typed ModelEvent 流，interrupt
+  打断即冻结），默认 `None`——能力发现就是调用本身
+  （`docs/realtime-av.md`）。
 - **Agent 循环**（`agent.rs`）：每个 turn 组装 request（system + active
   branch + 本轮产出 + tools），探针在九个点介入（见 §4.7），tool call
   执行结果回到历史，循环到 stop reason 或 max turns。
@@ -292,5 +296,6 @@ digest）、blob 先验 sha256 再落盘、内容寻址缓存命中校验、腐�
 | `docs/signing.md` | 签名格式、信任存储、授权记忆 |
 | `docs/oci.md` | OCI 分发链路 |
 | `docs/media.md` | 多模态与 blob 存储 |
+| `docs/realtime-av.md` | 实时音视频：RealtimeSession、WIT world realtime、设备 consent 门类 |
 | `docs/wasip3-streams.md` | wasip3 stream 迁移的工具链现状与解锁条件 |
 | `docs/release.md` / `docs/perf.md` | 发布流程 / 性能基线 |
