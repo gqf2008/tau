@@ -13,7 +13,7 @@
 
 ## 1. 一句话
 
-**形状重设计：把「同步 ABI 的歉意」从契约里删掉。** 功能集不变（除因形状必然消失的
+**形状重设计：把「同步 ABI 的歉意」从契约里删掉，并把契约变成 `tau_core` 的投影。**命名原则见 §3 的投影规则（owner 指示 2026-09-29）：同名同形，投影不了的写明理由。 功能集不变（除因形状必然消失的
 东西），每个界面的语义不变；变的是怎么表达「等」、怎么表达「持有」、以及哪些载荷还
 需要是 JSON。
 
@@ -69,6 +69,59 @@
 5. **不用新机器顺手加能力。** 见 §7「不做的事」：流式媒体源、流式请求体、
    `process` 的 env/cwd、探针异步化，都不在本次。
 
+### 投影规则：WIT 是 `tau_core` 的投影（owner 指示，2026-09-29）
+
+**规则**：契约里每个类型都必须是宿主核心数据结构（`crates/tau-core`）的投影，不是另一套
+词汇。机械映射：
+
+| Rust | WIT |
+|---|---|
+| `struct` | `record`（字段 snake_case → kebab-case） |
+| `enum`（无载荷 / 带载荷） | `enum` / `variant`（臂名 kebab-case） |
+| `Option<T>` / `Vec<T>` / `Vec<u8>` | `option<T>` / `list<T>` / `list<u8>`（字节裸过 ABI，base64 只在 JSON 边缘） |
+| 嵌套的具体类型 | 独立命名的 `record`/`variant`（跨界面 `use`） |
+
+**本轮据此改掉的地方**（与 0.7.0 草案的前一版相比）：
+
+| 位置 | 改法 |
+|---|---|
+| `variant content` | **4 臂 → 7 臂**，逐臂对齐 `tau_core::types::Content`：`text / image / audio / video / file / tool-call / tool-result`。「MIME 大类型推断媒介」取消——媒介由 guest 明说，`convert.rs` 里那条「给 image 命名是校验错误」的规则随之消失 |
+| `record media` | 去掉 `name`（Rust 的 `Media` 只有 `media-type` + `source`）；文件名回到它在 Rust 里的位置：`record file { media, name: option<string> }` |
+| `variant result-block` | 五臂 `text/image/audio/video/file`，与 `content` 的非工具臂**逐一对应**；宿主转换器穷尽匹配 ⇒ 一边加臂另一边漏掉是编译错误，不是静默漂移 |
+| `record tool-result`、`tools.tool-result` | `content: list<result-block>`，对齐 `Content::ToolResult`（收窄见下）与 `ToolOutput` |
+| `tools.definition` | 对齐 `ToolDef`（`parameters-json` 是 JSON Schema——schema 本身在外部） |
+| `models.run` 的 `request` | = `tau_core::model::Request` 逐字段 + `model` / `auth` 两个宿主侧字段（provider 要知道选哪个模型、用哪把钥匙；这两样不在 tau 的对话模型里） |
+| `stop-reason`、`model-event` | 0.6.0 起就逐臂对齐 `StopReason` / `ModelEvent`，本轮未动 |
+
+**投影不了的两处：递归**（实测，不是取舍）。WIT 不允许类型自我依赖，`wasm-tools 1.259.0`
+的两条最小复现都在 `target/wit-probe/`：
+
+```
+error: type `content` depends on itself    ← record tool-result { content: list<content>, … }
+error: type `json` depends on itself       ← variant json { array(list<json>), … }
+```
+
+后果两条，写进契约注释而不是绕开：
+
+- `Content::ToolResult { content: Vec<Content> }` 比 ABI **宽**：`result-block` 是**被迫的
+  拆分**（不是因为风格）；语义上不丢——工具结果里不会再出现工具调用或嵌套结果。
+- `serde_json::Value` **不可投影**：凡 schema 不在 tau 手里的载荷只能是 **JSON 文本**
+  （`arguments-json`、`parameters-json`、`emit(event-json)`）。0.6.0 的理由（厂商 wire 本就是
+  JSON，provider 无论如何要重新序列化）继续成立，这里多了一条工具链的硬理由。
+
+**故意的收窄三处**（理由都在契约注释里，不是漏掉）：
+
+1. `host.stream-event` 3 臂 vs `AgentEvent` 15 臂：订阅环只承载**高频段**
+   （text-delta / audio-delta），且只见计数不见字节——`docs/stream-subscribe.md` 的形态裁决；
+2. `models.info` 是 provider 自述的目录（宿主只转达），`tau_core` 不需要对应类型；
+3. 事件总线上跑 `AgentEvent`（运行叙事），契约里是 `ModelEvent`（模型输出）——两者本就
+   不是同一个东西，映射在 `tau-ext`。
+
+**因此 Rust 侧要长出的东西**（并入 §6 迁移期 1）：`types.error` 对应 `tau_core` 的错误
+枚举（宿主内部现在是 `String`）；探针的 `payload` / `verdict.replace` 现在是
+`ProbeHandler::probe(point, payload: Json)` ⇒ 要按 `docs/probes.md` 已有形状长成每点一个
+类型，否则这条界面违反投影规则（**文档已先写形状，Rust 落后于文档**）。
+
 ## 4. 逐界面 before → after
 
 `wit/next/tau.wit` 的每个界面首注释都写了该界面的 delta；这里是总览。
@@ -94,7 +147,10 @@
 
 | 腿 | 状态 | 命令 / 位置 |
 |---|---|---|
-| 契约解析（语法与名字空间） | ✅ `wasm-tools 1.259.0`，`EXIT=0` | `wasm-tools component wit wit/next/tau.wit`（895 行解析输出） |
+| 契约解析（语法与名字空间） | ✅ `wasm-tools 1.259.0`，`EXIT=0` | `wasm-tools component wit wit/next/tau.wit`（931 行解析输出） |
+| 投影后的 `content`（7 臂）+ `result-block`（5 臂）：访客侧 | ✅ stable `wasm32-wasip2` | `target/wit-probe/guest-bridge/src/lib.rs` 构造全部 7 臂、穷尽匹配 `result-block` 五臂；产物回读 `wasm-tools component wit probe_bridge.wasm` 与草案逐臂一致 |
+| 同一形状：宿主侧 | ✅ wasmtime 49.0.1 `bindgen!`（`world bridge`） | `target/wit-probe/host-bind/src/main.rs` 同样构造 + 穷尽匹配，`EXIT=0` |
+| 递归不可投影（两条最小复现） | ✅ 工具链拒绝 | `wasm-tools 1.259.0`：`error: type `content` depends on itself`（`target/wit-probe/recprobe.wit`）、`error: type `json` depends on itself`（`jsonprobe.wit`） |
 | 访客侧绑定：资源导出 + `static async` 工厂 + `tuple<stream,future>` 返回 + 上行参数流 | ✅ stable `wasm32-wasip2` 编译通过 | `target/wit-probe/guest-realtime/`（`world realtime`） |
 | 访客侧绑定：资源导入（child/response/connection）+ 流读取 + 类型化 probe + async ingress | ✅ stable `wasm32-wasip2` 编译通过 | `target/wit-probe/guest-bridge/`（`world bridge`） |
 | 宿主侧绑定：wasmtime 49.0.1 四个 world 全部 `bindgen!`（`provider`/`realtime`/`bridge`/`extension`） | ✅ 编译并运行 | `target/wit-probe/host-bind/`；async 按界面开：`imports: { default: async }` + `exports: { default: async }`（wasmtime 的 bindgen **没有** `async: true` 这个键，接受的是 `debug/path/inline/world/ownership/trappable_error_type/interfaces/with/named_imports/additional_derives/stringify/skip_mut_forwarding_impls/require_store_data_send/wasmtime_crate/anyhow/include_generated_code_from_file/include_component_type/imports/exports`；async 是每个函数/每个界面的标记）。探针同时点名了宿主必须用到的生成类型并编译通过——`exports::…::session::Session`（访客导出的资源句柄）、`…::process::Child` / `…::http::Response` / `…::ws::Connection` / `…::ingress::Registration`（宿主实现的导入资源）、`host::Subscription` |
@@ -139,12 +195,17 @@ Promise/AsyncIterable）。**这也没证明什么**：`wit-bindgen-cpp` 缺的�
 | 期 | 内容 | 门禁 |
 |---|---|---|
 | 0（本轮） | 本文 + `wit/next/tau.wit` 草案；`wit/tau.wit` 不动，无组件重建 | 本文的 §5 证据；`cargo test --workspace` 与 `validate.sh` 不受影响（新文件不被任何构建引用，已核：`wit_bindgen::generate!`/`bindgen!` 全部走显式文件路径） |
-| 1 | tau-ext 宿主改造：运行期开关 `wasm_component_model_async` + `concurrency_support`，bindgen 侧 `imports/exports: { default: async }`（§5 已验证语法）、`spawn_blocking + Mutex<SharedInstance>` → `call_concurrent` / `Store::run_concurrent`、资源句柄表；**先跑 spike 补齐 §5 的三条待验证腿** | spike 端到端；`cargo test -p tau-ext` |
+| 1 | tau-core 长出投影缺的两类：错误枚举（`types.error`，替换宿主内部的 `String`）与探针类型（每点的 `payload` 与 `verdict` 的 `replace`，替换 `ProbeHandler` 的 `Json`）。tau-ext 宿主改造：async 开关（wasmtime 49 里默认已开，这两个调用只是钉住），bindgen 侧 `imports/exports: { default: async }`（§5 已验证语法）、`spawn_blocking + Mutex<SharedInstance>` → `call_concurrent` / `Store::run_concurrent`、资源句柄表；**先跑 spike 补齐 §5 的三条待验证腿** | spike 端到端；`cargo test -p tau-ext` |
 | 2 | 契约切换：`wit/tau.wit` → 0.7.0 + vendored 副本 + `CONTRACT_VERSION`；examples 重建（`validate.sh` 的 15 个 Rust 组件 + 6 个非 Rust 语言的例子，后者按 `docs/wasm-languages.md` 的每语言断点重验）| `validate.sh` 的 wasm 腿全绿（11b/11c/11d、5b–5f、1f 等） |
 | 3 | 文档随切换更新：`docs/extensions.md`（契约章）、`docs/realtime-av.md`（两会话方向）、`docs/host-channel.md`（订阅）、`docs/probes.md`（类型化点/载荷）、`docs/builtins*` 无关 | 文档与契约一致 |
 | 4 | 新增一条门禁腿：0.7.0 契约的 provider 流式（组件产流、宿主拉、`done` 后 future 为 ok）+ 一条「宿主丢流 ⇒ 组件拿到未写余量」的取消腿 | 该腿在无宿主 async 实现时会红——这正是它存在的意义 |
 
 ## 7. 代价、风险与不做的事
+
+**投影（owner 指示）的即时收益**：`convert.rs` 里「MIME 大类型推断媒介」和它带来的校验错误
+（给 image 命名即错）消失——臂就是意图；两条词汇表（契约 4 臂 vs 宿主 7 臂）合一。代价是
+`content` 与 `result-block` 的臂集必须同步（宿主转换器穷尽匹配，漏一个即编译错误）且加臂要求
+访客重建（已在下面的演进成本里记账）。
 
 **代价（访客侧）**
 - wit-bindgen ≥ 0.62（async / stream / future / `async-spawn`）。Rust 访客在 stable

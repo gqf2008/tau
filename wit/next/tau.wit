@@ -97,17 +97,15 @@ interface types {
         invalid(string),
     }
 
-    /// A media payload: image, audio, video, or an arbitrary file. The
-    /// MIME major type carries the semantics (image/*, audio/*, video/*;
-    /// anything else is a file). Raw bytes cross the ABI — never base64.
+    /// A media payload. Mirrors tau_core::types::Media: the media type and
+    /// where the bytes live, nothing else. Raw bytes cross the ABI — never
+    /// base64 (that exists only at tau's JSON edges: session file, provider
+    /// HTTP).
     record media {
         /// MIME type, e.g. "image/png", "audio/pcm;rate=24000".
         media-type: string,
         /// Where the bytes live.
         source: media-source,
-        /// Original filename — file semantics only. The host rejects a
-        /// name on image/audio/video media.
-        name: option<string>,
     }
 
     /// Where a media's bytes live. Mirrors tau_core::types::MediaSource.
@@ -123,6 +121,16 @@ interface types {
         blob(string),
     }
 
+    /// An attachment that is not an image, audio or video clip. Mirrors
+    /// tau_core::types::Content::File, whose filename field lives on this
+    /// arm (as it does in Rust) rather than on `media`.
+    record file {
+        /// The file payload.
+        media: media,
+        /// Original filename, when known.
+        name: option<string>,
+    }
+
     /// A tool invocation requested by the assistant.
     record tool-call {
         /// Provider-assigned call id (echoed back by tool-result).
@@ -133,19 +141,35 @@ interface types {
         arguments-json: string,
     }
 
-    /// A block of a tool result. A separate, non-recursive variant: a
-    /// tool result never contains tool calls or nested results (and
-    /// wasmtime's host bindgen rejects recursive types outright).
+    /// A block of a tool result: the non-recursive half of `content`.
+    ///
+    /// It has to be a separate variant, and that is a toolchain fact, not a
+    /// style choice: `content` reaching itself through a tool result is
+    /// refused — `wasm-tools component wit` answers
+    /// `error: type `content` depends on itself` (a recursive `json` for
+    /// arbitrary JSON fails the same way). Rust's
+    /// `Content::ToolResult { content: Vec<Content> }` is therefore wider
+    /// than the ABI; a tool result never carries a tool call or a nested
+    /// result, so the narrowing is semantic, not lossy. The arms mirror
+    /// `content`'s non-tool arms one for one, and keep mirroring them: the
+    /// host converter matches exhaustively, so an arm added to one and not
+    /// the other is a compile error, not a silent drift.
     variant result-block {
         /// A plain text block.
         text(string),
-        /// A media block (image, audio, video, file).
-        media(media),
+        /// An image (screenshot, photo, diagram).
+        image(media),
+        /// An audio clip.
+        audio(media),
+        /// A video clip.
+        video(media),
+        /// An arbitrary file attachment (PDF, archive, source bundle, ...).
+        file(file),
     }
 
     /// The outcome of one tool call, as conversation content. Multi-block
-    /// since 0.3.0 (docs/tool-media.md, wit-review F4): text and/or media;
-    /// media bytes cross the ABI raw, never base64.
+    /// since 0.3.0 (docs/tool-media.md, wit-review F4); media bytes cross
+    /// the ABI raw, never base64.
     record tool-result {
         /// The call this answers.
         call-id: string,
@@ -156,13 +180,21 @@ interface types {
     }
 
     /// One block of a message's content. Mirrors tau_core::types::Content
-    /// with image/audio/video/file collapsed into media (MIME major is
-    /// the semantics).
+    /// arm for arm — including the four media arms: a guest says which kind
+    /// of medium it is sending, instead of the host inferring it from the
+    /// MIME major type. (That inference, and its "naming an image is a
+    /// validation error" rule, are gone: the arm is the intent.)
     variant content {
         /// A plain text block.
         text(string),
-        /// A media block (image, audio, video, file).
-        media(media),
+        /// An image (screenshot, photo, diagram).
+        image(media),
+        /// An audio clip.
+        audio(media),
+        /// A video clip.
+        video(media),
+        /// An arbitrary file attachment (PDF, archive, source bundle, ...).
+        file(file),
         /// A tool invocation requested by the assistant.
         tool-call(tool-call),
         /// The outcome of one tool call.
@@ -192,9 +224,10 @@ interface tools {
     }
 
     record tool-result {
-        /// Result blocks handed back to the model: text and/or media
-        /// (multi-block since 0.3.0, docs/tool-media.md). The call-id is
-        /// paired host-side, the guest never sees it.
+        /// Result blocks handed back to the model: text and/or a media
+        /// block (image/audio/video/file — multi-block since 0.3.0,
+        /// docs/tool-media.md). The call-id is paired host-side, the guest
+        /// never sees it.
         content: list<result-block>,
         is-error: bool,
     }
