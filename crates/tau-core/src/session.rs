@@ -585,14 +585,11 @@ mod tests {
         // 10k entries; the generous bound guards pathological (e.g.
         // quadratic) regressions, not micro-perf. The actual time is
         // printed for docs/perf.md.
-        let dir = std::env::temp_dir().join(format!(
-            "tau-test-perf-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
-        ));
+        // Unique by construction -- a clock-derived suffix is not unique
+        // on Windows (100 ns steps) and parallel test threads collide.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let dir = std::env::temp_dir().join(format!("tau-test-perf-{}-{seq}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("big.jsonl");
         {

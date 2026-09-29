@@ -84,14 +84,14 @@ async fn pull(reference: &str, cache: &std::path::Path) -> Result<oci::Pulled, o
 }
 
 fn cache() -> PathBuf {
-    std::env::temp_dir().join(format!(
-        "tau-test-oci-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_nanos()
-    ))
+    // Unique per call, by construction: these tests run in parallel and
+    // `SystemTime::now()` is not a source of uniqueness on Windows (it
+    // advances in 100 ns steps, so two tests starting together get the
+    // same stamp, share a cache dir, and one removes it under the other
+    // -- PermissionDenied / NotFound out of `pull_into`).
+    static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+    let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    std::env::temp_dir().join(format!("tau-test-oci-{}-{seq}", std::process::id()))
 }
 
 #[tokio::test]

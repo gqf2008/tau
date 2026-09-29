@@ -247,13 +247,14 @@ mod tests {
     use super::*;
 
     fn store() -> (PathBuf, ConsentStore) {
+        // Unique per call (not per clock reading): the tests in this
+        // module run in parallel and a shared dir would let one test's
+        // revoke/corrupt poke at another's store.
+        static NEXT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let seq = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let dir = std::env::temp_dir().join(format!(
-            "tau-test-consent-{}-{}",
-            std::process::id(),
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .unwrap()
-                .as_nanos()
+            "tau-test-consent-{}-{seq}",
+            std::process::id()
         ));
         (dir.clone(), ConsentStore::new(dir))
     }
