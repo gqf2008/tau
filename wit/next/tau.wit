@@ -659,16 +659,24 @@ interface session {
         /// it as the host produces it; a slow provider suspends the host's
         /// write instead of overrunning a buffer. Dropping the writable end
         /// (or the whole session) ends the uplink.
-        uplink-audio: func(audio: stream<u8>) -> future<result<_, error>>;
+        /// `async` is load-bearing, not decoration: a task the guest spawns
+        /// from a *synchronously lowered* export is never scheduled, because
+        /// the executor that drains spawned tasks only runs inside the async
+        /// callback (measured: docs/wit-redesign.md §5, legs 1b/1c/1d —
+        /// sync `func(stream) -> future` hangs forever, `async func` does
+        /// not). Any declaration whose guest side must produce a stream or a
+        /// future while answering is therefore `async`.
+        uplink-audio: async func(audio: stream<u8>) -> future<result<_, error>>;
 
         /// Uplink image frames (the video uplink, ~1fps or scene-triggered).
         /// One element is one complete JPEG.
-        uplink-image: func(jpeg: stream<list<u8>>) -> future<result<_, error>>;
+        uplink-image: async func(jpeg: stream<list<u8>>) -> future<result<_, error>>;
 
         /// Downlink: the assistant's audio and the VAD/barge-in facts, in
         /// order. Same pull shape as `models.run`, same meaning for the
-        /// returned future.
-        downlink: func() -> tuple<stream<event>, future<result<_, error>>>;
+        /// returned future — and the same `async`, for the same reason: the
+        /// guest produces this stream from a task it spawns.
+        downlink: async func() -> tuple<stream<event>, future<result<_, error>>>;
 
         /// Barge-in: truncate the in-flight assistant response. Kept as a
         /// call rather than "drop the downlink": a guest may have the

@@ -138,8 +138,8 @@ payload: Json)` 与 `payload["messages"]` 式取字段随之消失。**组件侧
 | `models` | `run: func(request-json)` + 组件 push | `run: async func(request: request) -> tuple<stream<event>, future<result<_, error>>>` | 背压（宿主慢 ⇒ 组件写 await ⇒ 从源头慢下来）、取消（宿主丢流 ⇒ 组件下一次写拿到未写出的余量 ⇒ 停止向厂商 API 拉取）、少一个界面。事件里的 `done`/`error` 仍是组件自己的叙事；future 报告**宿主对这条流**的裁决 |
 | `host` | `notify(level: string, ..)`、`emit(event-json)`、`subscribe(topics: list<string>) -> u64` + `poll` + `unsubscribe` | `enum level`、`enum topic`、`emit(event-json)` 保留、`subscribe -> resource subscription { poll }` | 句柄族收进所有权；`lagged` **保留**（见下） |
 | `host.subscribe`（单列） | 轮询句柄 | resource + `poll`，**不是** `stream<stream-event>` | 总线发布者是 agent 循环：若订阅是流，最慢的组件会把整个运行拖住——这正是「有界环 + lagged」要防的事。`lagged` 不是轮询的产物，是「组件没在读」的诚实答案；换成流也躲不开，还要多一次宿主能等的前提。这是本草案**拒绝**用流的一处，理由写在契约注释里 |
-| `session`（realtime） | 界面级 `open(config-json)` / `push-audio` / `push-image` / `interrupt` / `close`，一实例一会话 | `resource session { create (static async), uplink-audio(audio: stream<u8>) -> future, uplink-image(jpeg: stream<list<u8>>) -> future, downlink() -> tuple<stream<event>, future>, interrupt() }` | 两个方向都成了流：上行是参数流（宿主写、组件读，丢掉写端＝上行结束），下行是返回流（组件写、宿主按播放节奏读）。「一实例一会话」原本不是关于会话的决定，是「界面没有实例状态」的结果——资源有 |
-| `process` | `spawn(argv) -> u64` + `write-stdin(handle, data, timeout-ms) -> taken` + `read-stdout(handle, max, timeout-ms) -> (bytes, eof)` + `kill(handle)` | `resource child { spawn (static), stdin(stream<u8>) -> future, stdout() -> stream<u8>, stderr() -> stream<u8>, wait() -> future<exit-status>, kill() }` | 短写记账、`timeout-ms`、句柄代际同时消失；EOF 与「子进程死了」不再共用一个 `eof` 布尔——退出状态问 `wait()` |
+| `session`（realtime） | 界面级 `open(config-json)` / `push-audio` / `push-image` / `interrupt` / `close`，一实例一会话 | `resource session { create (static async), uplink-audio: async func(audio: stream<u8>) -> future, uplink-image: async func(jpeg: stream<list<u8>>) -> future, downlink() -> tuple<stream<event>, future>, interrupt() }` | 两个方向都成了流：上行是参数流（宿主写、组件读，丢掉写端＝上行结束），下行是返回流（组件写、宿主按播放节奏读）。「一实例一会话」原本不是关于会话的决定，是「界面没有实例状态」的结果——资源有 |
+| `process` | `spawn(argv) -> u64` + `write-stdin(handle, data, timeout-ms) -> taken` + `read-stdout(handle, max, timeout-ms) -> (bytes, eof)` + `kill(handle)` | `resource child { spawn (static), stdin: async func(stream<u8>) -> future, stdout() -> stream<u8>, stderr() -> stream<u8>, wait() -> future<exit-status>, kill() }` | 短写记账、`timeout-ms`、句柄代际同时消失；EOF 与「子进程死了」不再共用一个 `eof` 布尔——退出状态问 `wait()` |
 | `http` | `request(.., timeout-ms) -> u64` + `status/header/read-body(handle, max, timeout-ms)/close` | `request: async func(..) -> result<response, error>` + `resource response { status, header, body() -> stream<u8> }` | 连接与响应头是这次调用的等待；响应体是流（SSE 增量消费、提前停止＝放弃剩余并关连接，取消不需要单独的方法） |
 | `ws` | `connect(url, timeout-ms) -> u64` + `send(handle, frame)` + `recv(handle, timeout-ms)` + `close(handle)` | `resource connection { connect (static async), send: async func(frame), receive() -> tuple<stream<frame>, future<result<_, error>>> }` | 「Ok 意味着已写出」（钉钉 ack 教训）由 `await` 精确表达；30s ping / 60s 空闲关闭策略不变，但以「流结束 + future 里的原因」呈现 |
 | `ingress` | `listen(route) -> result` + `close(route)` | `listen(route) -> result<registration, error>`，`resource registration`（无方法） | 「关闭一个从未注册的路由会报错」这种不得不定义的错误，在所有权下不可表达 |
@@ -157,12 +157,47 @@ payload: Json)` 与 `payload["messages"]` 式取字段随之消失。**组件侧
 | 访客侧绑定：资源导出 + `static async` 工厂 + `tuple<stream,future>` 返回 + 上行参数流 | ✅ stable `wasm32-wasip2` 编译通过 | `target/wit-probe/guest-realtime/`（`world realtime`） |
 | 访客侧绑定：资源导入（child/response/connection）+ 流读取 + 类型化 probe + async ingress | ✅ stable `wasm32-wasip2` 编译通过 | `target/wit-probe/guest-bridge/`（`world bridge`） |
 | 宿主侧绑定：wasmtime 49.0.1 四个 world 全部 `bindgen!`（`provider`/`realtime`/`bridge`/`extension`） | ✅ 编译并运行 | `target/wit-probe/host-bind/`；async 按界面开：`imports: { default: async }` + `exports: { default: async }`（wasmtime 的 bindgen **没有** `async: true` 这个键，接受的是 `debug/path/inline/world/ownership/trappable_error_type/interfaces/with/named_imports/additional_derives/stringify/skip_mut_forwarding_impls/require_store_data_send/wasmtime_crate/anyhow/include_generated_code_from_file/include_component_type/imports/exports`；async 是每个函数/每个界面的标记）。探针同时点名了宿主必须用到的生成类型并编译通过——`exports::…::session::Session`（访客导出的资源句柄）、`…::process::Child` / `…::http::Response` / `…::ws::Connection` / `…::ingress::Registration`（宿主实现的导入资源）、`host::Subscription` |
-| 访客 async 导出 + 宿主读返回流（端到端运行） | ✅ 既有 spike | `target/wasip3-spike/`（4×4096 字节逐字节校验） |
+| 访客 async 导出 + 宿主读返回流（端到端运行） | ✅ 既有 spike（2026-09-29 复跑：修好下面那条消费者缓冲陷阱后原样通过，16384 字节模式一致） | `target/wasip3-spike/`（4×4096 字节逐字节校验） |
 | 编译产物里真的是异步提升 | ✅ | 对 `probe_realtime.wasm` 反汇编：`(canon lift (core func "[async-lift]tau:extension/models@0.7.0#run") … async (callback …))`、`[static]session.create` 同；`[method]session.downlink` 是普通 lift。`wasm-tools component wit` 读回的组件类型与草案逐字一致 |
 | 迁移期 1 前半：`HostError` + `ProbePayload`（0.6.0 ABI 不动） | ✅ 宿主侧全量迁移，`cargo test --workspace` 绿（`probe_payload` 6 条：每点 JSON 往返、空替换不改动、坏字段为 `invalid`、`before_tool` 整体替换、`after_tool` 的旧字符串升级；tau-ext `replace_tests` 3 条：合法替换、非 JSON/坏字段/无载荷一律降级 `continue`、未知字段忽略） | `crates/tau-core/src/{error.rs,probe_payload.rs}`、`crates/tau-ext/src/{lib.rs,bridge.rs}`、`crates/tau-cli/src/acp/permission.rs` |
-| **宿主向访客流写入**（`session.uplink`、`child.stdin` 方向） | ⬜ 待 spike | 迁移 spike 第一腿；失败则退回 `push-audio(data) -> result`（0.6.0 形状，已在契约注释里写明为回退） |
-| 宿主持有访客资源句柄的运行时行为 | ⬜ 待 spike | 同上；`bindgen!` 编译通过只证明绑定，不证明运行时 |
-| `Store::run_concurrent` 下多会话并发的宿主模型 | ⬜ 待 spike | tau-ext 迁移的核心未知 |
+| **宿主向访客流写入**（`session.uplink`、`child.stdin` 方向） | ✅ **过关**（leg 1）：宿主自产流交给访客，访客在自己的 async 导出里 `next().await` 读完 —— 16384 字节、校验和 24576 | `target/async-spike/`（访客 stable `wasm32-wasip2`，宿主 wasmtime 49.0.1）；`SPIKE_CHUNKS` / `SPIKE_SIZE` 可调。**不需要**回退到 `push-audio(data) -> result` |
+| 宿主持有访客资源句柄的运行时行为 | ✅ **过关**（leg 2）：一个 `run_concurrent` 块里 `create` 出的句柄，在**另一个**块里调 async `uplink`，在任何块**外**调同步 `interrupt` / `facts`（回 `("a", 2)`）—— 实例状态与句柄身份都跨块成立 | 同上（leg 2） |
+| `Store::run_concurrent` 下多会话并发的宿主模型 | ✅ **过关**（leg 3a/3b/3c）：一个 store 两个会话；B 跑到底时 A 的读被有意卡住（A 只被兜过一次数据 ⇒ 背压真的落在写端）→ 释放后 A 续上，两条流各 16384 字节逐字节一致；`a=("a",1)` / `b=("b",1)` 状态互不串 | 同上（leg 3）；0.6.0 式同步方法**不能**在块内调用（见下条硬约束） |
+| 访客产流：组件写、宿主按自己的节奏读（`models.run`、`session.downlink` 方向） | ✅ **过关**（leg 3s）：单条无门下行 16384 字节逐字节一致 | 同上（leg 3s） |
+| **同步导出里 `spawn` 的后台任务不会被调度** —— 草案上行签名必须改一个词 | ❌ 形状不成立 → 修法已实测 | leg 1b：`func(bytes: stream<u8>) -> future<…>`（草案里 `uplink-audio` / `uplink-image` / `process.child.stdin` 逐字如此）里 `spawn_local` 的 drain 任务**从未被 poll**（访客 `[guest-1b] spawned drain task polled` 不打印），future 永挂（25s 超时）；leg 1c：同一个实例上只要另有一个 async 调用跑到底，同一份任务就被调度、future 兑现（16384/24576）；leg 1d：把签名改成 **`async func(bytes: stream<u8>) -> future<…>`**，任务照常跑完（16384/24576）⇒ **形状不用换，`func` 改 `async func` 即可** | root cause 在 wit-bindgen 0.62 的访客执行器：`spawn_local` 只把 future 推进全局 `SPAWNED`，而 drain 它的只有异步回调里的 `Tasks::poll_next`（`src/rt/async_support/spawn.rs:15`、`:29`）；同步降低的导出没有回调/任务，所以没人 drain |
+
+| 宿主实现方**返回**流/future（`child.stdout/stderr`、`http.response.body`、`ws.receive`、`child.wait`） | ⬜ 仍未测 | 这三条腿是**宿主侧**产出方，不受「同步导出里 spawn 不被调度」的约束（那是访客执行器的事），但形状是否成立要另跑一腿：宿主在同步导入里返回一条自己产出的流（`StreamReader::new(store, producer)` 当**返回值**，leg 1 只测过它当参数）与一个宿主兑现的 future。迁到 tau-ext 的 `process`/`http`/`ws` 实现前必须补上 |
+
+### 本轮 spike 实测的四条硬约束（喂给迁移期 1 后半）
+
+spike 的落点不是「能不能跑」，而是宿主改造前必须知道的事。四条都是实测，不是推断：
+
+1. **消费者自己决定每轮能接多少字节**：`Source::read` 最多搬运 `buffer.remaining_capacity()`
+   项，而 `Vec<T>` 的 `remaining_capacity()` 是 `capacity - len` —— 于是 `Vec::new()`（容量 0）
+   **一项都读不到**：不报错，只是回 0。本轮两条假阴性（旧 spike 疑似失效、leg 3 疑似死锁）
+   都出在这里。宿主消费者必须自备容量（`buf.reserve(64 * 1024)`），否则症状是「消费者被反复
+   以空 source 轮询」或「写端永远等容量」，极易误诊成工具链缺陷。空 source 时按 trait 契约
+   存 waker 再回 `Pending`。
+2. **同步 WIT 函数生成的宿主 API 要独占 store**：`call_x<S: AsContextMut>(&mut store, …)`，
+   走 `call_async`；它**不能**在 `run_concurrent` 闭包里调用（`acc.with(…)` 那条逃逸路借不过
+   borrow check）。⇒ 0.6.0 式「资源上的同步方法」（`session.interrupt`、`probes.probe`）只能在
+   块外单发——这是草案 §4 保留同步方法的代价，迁移时每个同步调用点都要落在这个形状上。
+3. **`call_concurrent` 的任务无法取消**，除非丢掉整个 store（wasmtime #11833）；块内也没有可靠的
+   `select`/超时（#11869/#11870，超时必须包住整个 `run_concurrent`）。⇒ 草案 §3「取消＝丢弃流」
+   不只是风格选择，是这条路**唯一**可用的取消信号。
+4. **访客的后台任务只在异步回调的执行器里被 drain**（见上表末行）⇒ 任何「访客起个任务、立刻
+   返回句柄」的形状，宿主那一侧要么走 async 导出（leg 1d 过的），要么保证实例上还有别的 async
+   活动——后者不可依赖。
+
+**复现**（两条命令，产物都在 `target/`，不入库）：
+
+```bash
+cd target/async-spike/guest && cargo build --release --target wasm32-wasip2
+cd ../host && cargo build && ./target/debug/spike-async-host.exe all   # 1/1c/2/3
+./target/debug/spike-async-host.exe 1d                                 # async func(...) -> future
+SPIKE_CHUNKS=1 ./target/debug/spike-async-host.exe 3s                  # 单条无门下行
+# 1b 会挂满 25s 再超时退出——那正是它的结论
+```
 
 ### 语言矩阵（本轮实测；工具链本机全部已有）
 
@@ -199,7 +234,7 @@ Promise/AsyncIterable）。**这也没证明什么**：`wit-bindgen-cpp` 缺的�
 | 期 | 内容 | 门禁 |
 |---|---|---|
 | 0（本轮） | 本文 + `wit/next/tau.wit` 草案；`wit/tau.wit` 不动，无组件重建 | 本文的 §5 证据；`cargo test --workspace` 与 `validate.sh` 不受影响（新文件不被任何构建引用，已核：`wit_bindgen::generate!`/`bindgen!` 全部走显式文件路径） |
-| 1 | **前半已落地**（2026-09-29）：tau-core 的两类——错误枚举 `HostError`（`types.error`）与探针类型 `ProbePayload`（每点一臂，含 `SessionFacts` / `Branch`），宿主侧 12 个探针调用点、`faux.rs` 测试处理器、两个 wasm 适配器（`WasmProbes` / `BridgeProbes`，失败降级为 `continue` 并在 stderr 说明）、CLI 的权限门与三处 `observe` 全部改用类型；`cargo test --workspace` 全绿，clippy `-D warnings` 干净。**后半待做**：tau-ext 宿主改造：async 开关（wasmtime 49 里默认已开，这两个调用只是钉住），bindgen 侧 `imports/exports: { default: async }`（§5 已验证语法）、`spawn_blocking + Mutex<SharedInstance>` → `call_concurrent` / `Store::run_concurrent`、资源句柄表；**先跑 spike 补齐 §5 的三条待验证腿** | spike 端到端；`cargo test -p tau-ext` |
+| 1 | **前半已落地**（2026-09-29）：tau-core 的两类——错误枚举 `HostError`（`types.error`）与探针类型 `ProbePayload`（每点一臂，含 `SessionFacts` / `Branch`），宿主侧 12 个探针调用点、`faux.rs` 测试处理器、两个 wasm 适配器（`WasmProbes` / `BridgeProbes`，失败降级为 `continue` 并在 stderr 说明）、CLI 的权限门与三处 `observe` 全部改用类型；`cargo test --workspace` 全绿，clippy `-D warnings` 干净。**后半待做**：tau-ext 宿主改造：async 开关（wasmtime 49 里默认已开，这两个调用只是钉住），bindgen 侧 `imports/exports: { default: async }`（§5 已验证语法）、`spawn_blocking + Mutex<SharedInstance>` → `call_concurrent` / `Store::run_concurrent`、资源句柄表。**§5 的三条腿已实测过关**（宿主向访客流写入、跨块的资源句柄、`run_concurrent` 多会话），另有四条硬约束照单全收——消费者自备缓冲容量、同步调用只能在块外单发、取消＝丢流、访客后台任务必须挂在 async 导出下 | spike 端到端；`cargo test -p tau-ext` |
 | 2 | 契约切换：`wit/tau.wit` → 0.7.0 + vendored 副本 + `CONTRACT_VERSION`；examples 重建（`validate.sh` 的 15 个 Rust 组件 + 6 个非 Rust 语言的例子，后者按 `docs/wasm-languages.md` 的每语言断点重验）| `validate.sh` 的 wasm 腿全绿（11b/11c/11d、5b–5f、1f 等） |
 | 3 | 文档随切换更新：`docs/extensions.md`（契约章）、`docs/realtime-av.md`（两会话方向）、`docs/host-channel.md`（订阅）、`docs/probes.md`（类型化点/载荷）、`docs/builtins*` 无关 | 文档与契约一致 |
 | 4 | 新增一条门禁腿：0.7.0 契约的 provider 流式（组件产流、宿主拉、`done` 后 future 为 ok）+ 一条「宿主丢流 ⇒ 组件拿到未写余量」的取消腿 | 该腿在无宿主 async 实现时会红——这正是它存在的意义 |
@@ -226,7 +261,10 @@ Promise/AsyncIterable）。**这也没证明什么**：`wit-bindgen-cpp` 缺的�
   WASI 0.3.0 已于 2026-06-11 发布且是稳定版（wasmtime 46 起默认带 CM async），所以这件事是
   一次**独立的后续小迁移**（examples 换 target + 宿主 p2 linker 换 p3），与契约形状解耦。
 - 生产流的访客需要一次 `spawn`（创建流 → 派生写任务 → 返回读端）——这正是 WASI 0.3
-  自己每个 `read-via-stream` 的形状，但它是新代码模式，examples 要逐个改。
+  自己每个 `read-via-stream` 的形状，但它是新代码模式，examples 要逐个改。**并且这个导出
+  必须是 `async func`**：同步降低的导出里 `spawn_local` 的任务永远不会被调度（§5 末行，
+  leg 1b/1c/1d），所以草案里 `uplink-audio` / `uplink-image` / `process.stdin` 的
+  `func(...) -> future` 一律加 `async`。
 - **非 Rust 工具链：三个能，一个不能（本轮实测，见 §5 语言矩阵）**。C 生成 `_callback`/`_return`
   的异步导出 ABI 与 `stream`/`future`/`own_*` 句柄类型；Go 生成 `[async-lift]` +
   `StreamReader/StreamWriter/FutureReader` + `StreamVtable`；jco 生成
@@ -258,8 +296,10 @@ Promise/AsyncIterable）。**这也没证明什么**：`wit-bindgen-cpp` 缺的�
 
 1. **是否按本草案推进**：这是一次重构而非新功能，工作量集中在 tau-ext 宿主与
    examples，收益是契约更小、更真、少一层同步代价。
-2. **上行流的先后**：`session.uplink`（宿主向访客写流）与 `child.stdin` 同一腿，
-   若 spike 证明不了，是按回退形状（逐块 `push-audio`）先落地，还是等宿主模型成熟。
+2. **上行流的形状**（原「先后」问题已被 spike 消解）：宿主向访客写流**已实测过关**
+   （§5 leg 1），不必回退到逐块 `push-audio(data) -> result`；唯一要 owner 点头的是签名
+   从 `func(...) -> future` 改成 **`async func(...) -> future`**（leg 1b/1d：同步降低的导出
+   里访客的后台任务不会被调度）。
 3. **版本号**：0.7.0（本文假设）还是 1.0.0（若把 async 契约视为稳定性宣言）。
 4. **`types.error` 三分**（`refused`/`failed`/`invalid`）：宿主需要在每个调用点归类，
    成本在宿主；组件则第一次能按「没同意 / 坏了」分流。
