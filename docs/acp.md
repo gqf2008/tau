@@ -105,6 +105,7 @@ are shared.
 | `protocolVersion` | `1` | only the stable v1 protocol is implemented; a client offering another version is answered `1` and told on stderr |
 | `agentCapabilities.loadSession` | `false` | the file that would back it is on disk, but replaying a branch as `session/update` is not written — claiming it would make an editor offer a history it cannot show |
 | `agentCapabilities.promptCapabilities.image` | `true` | an image block becomes `Content::Image`, which is how the built-in `read` already returns a picture |
+| `agentCapabilities.promptCapabilities.audio` | `true` | an audio block becomes `Content::Audio`, the shape the REPL's own `/mic` sends; a realtime provider's *output* audio is the other direction and is not carried (see the event table) |
 | `authMethods` | `[]` | credentials come from the spawn environment; `authenticate` is answered method-not-found |
 | `agentInfo` | `tau <version>` | |
 
@@ -121,6 +122,7 @@ the one user message tau's loop takes:
 |-------|---------|
 | `text` | `Content::Text` |
 | `image` | `Content::Image` (base64 decoded to bytes) |
+| `audio` | `Content::Audio` (base64 decoded to bytes) |
 | `resource_link` | the text `[resource: <uri>]` |
 | anything else | `[unsupported prompt block: <name>]`, plus a line on stderr |
 
@@ -138,7 +140,8 @@ the loop produced, and answers with a stop reason.
 | `ToolCallEnd` | `tool_call_update` (`completed`/`failed`, with a flattened preview of the output — the whole output is in the session file) |
 | `RunEnd { stop }` | the response to `session/prompt` |
 | `RunError { message }` | a JSON-RPC error (`internal_error`, message in `data` and `message`) |
-| probe, steer, follow-up, extension notice/fact, audio | stderr only — stable v1 has no update for them, and a line per audio chunk is not a log |
+| probe, steer, follow-up, extension notice/fact | stderr only — stable v1 has no update for them, and neither is a log |
+| a realtime provider's audio, VAD, barge-in | dropped, with one line on stderr per turn to say so — this mode maps text deltas only, and a line per chunk is not a log. ACP v1 does define an audio content block, so carrying them is possible; not carrying them is this version's scope. The audio itself is kept: the loop assembles the chunks into `Content::Audio` in the assistant message, which is in the session file |
 
 Tool-call ids on the wire are `{turn}:{provider id}` — the loop's ids
 come from the provider and a scripted model reuses them across turns, so
@@ -231,8 +234,11 @@ decisions made on the CLI with `--remember`.
 - Plan/thought/usage updates and compaction notices: tau produces no
   reasoning stream, and those updates are unstable-v1 and need client
   capabilities tau does not request.
-- Realtime voice in this mode; audio events go to stderr and nowhere
-  else.
+- Realtime voice in this mode: a realtime provider's audio, VAD, and
+  barge-in are dropped — with one line on stderr per turn to say so — and
+  no microphone or playback is opened. Audio *prompts* are carried (see
+  the prompt table); what v1 does not carry is the model's audio coming
+  back out.
 - Per-session working directories, and per-session isolation of a wasm
   provider's state.
 

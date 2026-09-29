@@ -17,8 +17,8 @@ use tau_core::{Content, Media, Message, Role, StopReason};
 ///
 /// A block tau cannot carry becomes a text placeholder rather than
 /// vanishing, and each one is named in the returned notes so the caller
-/// can put it on stderr: a client that sent an audio clip should be able
-/// to find out why the model never heard it.
+/// can put it on stderr: a client that sent an embedded resource should be
+/// able to find out why the model never saw it.
 pub fn prompt_message(blocks: &[ContentBlock]) -> (Message, Vec<String>) {
     let mut content = Vec::new();
     let mut notes = Vec::new();
@@ -36,6 +36,19 @@ pub fn prompt_message(blocks: &[ContentBlock]) -> (Message, Vec<String>) {
                         notes.push(format!("an image block was not valid base64: {error}"));
                         content.push(Content::Text {
                             text: "[image: undecodable base64]".to_string(),
+                        });
+                    }
+                }
+            }
+            ContentBlock::Audio(audio) => {
+                match base64::engine::general_purpose::STANDARD.decode(&audio.data) {
+                    Ok(bytes) => content.push(Content::Audio {
+                        media: Media::bytes(audio.mime_type.clone(), bytes),
+                    }),
+                    Err(error) => {
+                        notes.push(format!("an audio block was not valid base64: {error}"));
+                        content.push(Content::Text {
+                            text: "[audio: undecodable base64]".to_string(),
                         });
                     }
                 }
@@ -66,7 +79,6 @@ pub fn prompt_message(blocks: &[ContentBlock]) -> (Message, Vec<String>) {
 /// too, as `unknown` — which is still better than a silent drop.
 fn unsupported(block: &ContentBlock) -> &'static str {
     match block {
-        ContentBlock::Audio(_) => "audio",
         ContentBlock::Resource(_) => "embedded resource",
         _ => "unknown",
     }
@@ -141,7 +153,10 @@ pub fn stop_reason(stop: StopReason) -> WireStop {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use agent_client_protocol::schema::v1::{ImageContent, ResourceLink};
+    use agent_client_protocol::schema::v1::{
+        AudioContent, EmbeddedResource, EmbeddedResourceResource, ImageContent, ResourceLink,
+        TextResourceContents,
+    };
 
     fn text_of(message: &Message) -> Vec<String> {
         message
@@ -180,9 +195,11 @@ mod tests {
     fn blocks_tau_cannot_carry_are_placed_and_named() {
         let blocks = vec![
             ContentBlock::ResourceLink(ResourceLink::new("notes", "file:///notes.md")),
-            ContentBlock::Audio(agent_client_protocol::schema::v1::AudioContent::new(
-                "aGk=",
-                "audio/wav",
+            ContentBlock::Resource(EmbeddedResource::new(
+                EmbeddedResourceResource::TextResourceContents(TextResourceContents::new(
+                    "the notes",
+                    "file:///notes.md",
+                )),
             )),
         ];
         let (message, notes) = prompt_message(&blocks);
@@ -191,12 +208,42 @@ mod tests {
             texts,
             vec![
                 "[resource: file:///notes.md]".to_string(),
-                "[unsupported prompt block: audio]".to_string(),
+                "[unsupported prompt block: embedded resource]".to_string(),
             ],
             "the placeholder is where the block was, and says what it was"
         );
         assert_eq!(notes.len(), 1, "{notes:?}");
-        assert!(notes[0].contains("audio"), "{notes:?}");
+        assert!(notes[0].contains("embedded resource"), "{notes:?}");
+    }
+
+    /// Audio is carried, like an image: the wire carries base64 and the
+    /// message carries the bytes, which is what `promptCapabilities.audio`
+    /// promises the client.
+    #[test]
+    fn an_audio_block_reaches_the_model_as_bytes() {
+        let blocks = vec![ContentBlock::Audio(AudioContent::new("aGk=", "audio/wav"))];
+        let (message, notes) = prompt_message(&blocks);
+        assert!(notes.is_empty(), "{notes:?}");
+        match &message.content[0] {
+            Content::Audio { media } => {
+                assert_eq!(media.media_type, "audio/wav");
+                assert_eq!(media.source, tau_core::MediaSource::Bytes(b"hi".to_vec()));
+            }
+            other => panic!("expected the audio block, got {other:?}"),
+        }
+    }
+
+    /// The same honesty for audio as for images: a clip that is not base64
+    /// is named and placed, not dropped on the floor.
+    #[test]
+    fn an_audio_that_is_not_base64_is_reported_and_placed() {
+        let blocks = vec![ContentBlock::Audio(AudioContent::new(
+            "not base64!",
+            "audio/wav",
+        ))];
+        let (message, notes) = prompt_message(&blocks);
+        assert_eq!(text_of(&message), vec!["[audio: undecodable base64]"]);
+        assert_eq!(notes.len(), 1, "{notes:?}");
     }
 
     #[test]

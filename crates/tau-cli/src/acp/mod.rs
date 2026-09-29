@@ -101,7 +101,16 @@ pub async fn serve(cli: &Cli) -> anyhow::Result<()> {
                                 // written, and claiming it would make an
                                 // editor offer a history it cannot show.
                                 .load_session(false)
-                                .prompt_capabilities(PromptCapabilities::new().image(true)),
+                                // Both content bits are honest: an image
+                                // block becomes Content::Image and an audio
+                                // block Content::Audio, the same shapes the
+                                // REPL's own /mic sends. The other direction
+                                // is not carried — a realtime provider's
+                                // output audio has no stable v1 update
+                                // (docs/acp.md).
+                                .prompt_capabilities(
+                                    PromptCapabilities::new().image(true).audio(true),
+                                ),
                         )
                         // No auth methods: credentials come from the
                         // environment the client spawned us with, so

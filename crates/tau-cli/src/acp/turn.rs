@@ -170,7 +170,7 @@ async fn render(
     // The calls the client has been told about, by wire id. ACP wants a
     // call announced before its update: a client that never saw the call
     // has nothing to draw the update on.
-    let mut announced: HashSet<String> = HashSet::new();
+    let mut rendered = Rendered::default();
     loop {
         match events.recv().await {
             Ok(AgentEvent::RunEnd { stop }) => return Some(stop),
@@ -179,7 +179,7 @@ async fn render(
                 return None;
             }
             Ok(event) => {
-                for update in updates(&event, number, &mut announced) {
+                for update in updates(&event, number, &mut rendered) {
                     let notification = SessionNotification::new(session.id.clone(), update);
                     if let Err(error) = connection.send_notification(notification) {
                         eprintln!("[tau] acp: a session/update did not reach the client: {error}");
@@ -196,13 +196,33 @@ async fn render(
     }
 }
 
+/// What one turn's renderer remembers between events: the calls the
+/// client has been told about (ACP wants a call announced before its
+/// update, and the loop reports both ends of every call), and whether the
+/// one-line notice about realtime audio has been said.
+#[derive(Default)]
+struct Rendered {
+    announced: HashSet<String>,
+    audio_noted: bool,
+}
+
+impl Rendered {
+    /// Whether this is the first realtime event of the turn — the only one
+    /// worth a line. The first chunk is news; the next thousand are not.
+    fn first_audio(&mut self) -> bool {
+        let first = !self.audio_noted;
+        self.audio_noted = true;
+        first
+    }
+}
+
 /// What one event becomes, if anything.
-fn updates(event: &AgentEvent, number: u64, announced: &mut HashSet<String>) -> Vec<SessionUpdate> {
+fn updates(event: &AgentEvent, number: u64, rendered: &mut Rendered) -> Vec<SessionUpdate> {
     match event {
         AgentEvent::TextDelta(text) => vec![map::text_chunk(text)],
         AgentEvent::ToolCallStart { id, name } => {
             let id = wire_id(number, id);
-            announced.insert(id.clone());
+            rendered.announced.insert(id.clone());
             vec![map::tool_call(&id, name)]
         }
         AgentEvent::ToolCallEnd {
@@ -216,7 +236,7 @@ fn updates(event: &AgentEvent, number: u64, announced: &mut HashSet<String>) -> 
             // First sight: announce, so the update below has a call to
             // attach to. The loop emits both events for every call it
             // runs, so this is the catch-up path, not the common one.
-            if announced.insert(id.clone()) {
+            if rendered.announced.insert(id.clone()) {
                 updates.push(map::tool_call(&id, name));
             }
             updates.push(map::tool_result(&id, *is_error, output));
@@ -227,7 +247,7 @@ fn updates(event: &AgentEvent, number: u64, announced: &mut HashSet<String>) -> 
         // and need client capabilities tau does not ask for). It goes to
         // stderr, where the operator can see it.
         other => {
-            note(other);
+            note(other, rendered);
             Vec::new()
         }
     }
@@ -245,7 +265,7 @@ fn wire_id(number: u64, id: &str) -> String {
 
 /// The events no client sees, said out loud on stderr. The phrasings are
 /// print mode's, so an operator reading either mode reads the same words.
-fn note(event: &AgentEvent) {
+fn note(event: &AgentEvent, rendered: &mut Rendered) {
     match event {
         AgentEvent::Probe { point, action } => eprintln!("[tau] probe {point}: {action}"),
         AgentEvent::Steer(message) => eprintln!("[tau] steer: {}", message.text()),
@@ -262,10 +282,27 @@ fn note(event: &AgentEvent) {
                 crate::repl::compact_preview(&text_of(content))
             );
         }
-        // The rest — run and turn boundaries, an honored abort, and the
-        // realtime family (audio chunks, VAD, barge-in) — is not a log: a
-        // line per audio chunk is noise, ACP mode opens no realtime
-        // session, and the boundaries are visible in the turn's answer.
+        // A realtime provider's audio, VAD, and barge-in have no stable v1
+        // update, and this mode carries none of them (docs/acp.md). The
+        // guard is what makes the line once per turn rather than once per
+        // chunk — a line per chunk is noise, and a user watching an editor
+        // should still be told why nothing plays. Everything past the first
+        // chunk falls through to the arm below. The audio itself is kept:
+        // the loop assembles contiguous chunks into the assistant message,
+        // which the session file holds.
+        AgentEvent::AudioDelta { .. }
+        | AgentEvent::InputAudioChunk { .. }
+        | AgentEvent::SpeechStarted
+        | AgentEvent::SpeechStopped
+        | AgentEvent::Interrupted
+            if rendered.first_audio() =>
+        {
+            eprintln!(
+                "[tau] acp: realtime audio is not carried in this mode; the session file has it"
+            );
+        }
+        // The rest — run and turn boundaries, an honored abort — is not a
+        // log: the boundaries are visible in the turn's answer.
         _ => {}
     }
 }
@@ -363,5 +400,15 @@ mod tests {
             "a negative delay is not a delay"
         );
         assert_eq!(parse_stall(None), None);
+    }
+
+    /// The notice about uncarried audio is said once a turn, however many
+    /// chunks arrive after it.
+    #[test]
+    fn the_audio_notice_is_said_once_a_turn() {
+        let mut rendered = Rendered::default();
+        assert!(rendered.first_audio(), "the first chunk is news");
+        assert!(!rendered.first_audio(), "the second is not");
+        assert!(!rendered.first_audio());
     }
 }

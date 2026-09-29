@@ -6,7 +6,7 @@ into the protocol stream would fail this leg, which is the point of it.
 
 What is proven here, in one process each:
 
-- The handshake: protocol version 1, `loadSession` false, images true,
+- The handshake: protocol version 1, `loadSession` false, images and audio true,
   no auth methods, and the client-info block.
 - `session/new` lands a session file at the DEFAULT location —
   `<cwd>/.tau/sessions/<id>.jsonl`, with the client's cwd — and that
@@ -247,15 +247,16 @@ def handshake_and_a_turn():
         result = agent.initialize()["result"]
         # Exactly what an editor reads before it offers anything, and
         # each of these is a promise: v1 only, no history it cannot
-        # replay, images it really does carry, credentials from the
-        # environment it spawned us with.
+        # replay, images and audio it really does carry, credentials
+        # from the environment it spawned us with.
         assert result["protocolVersion"] == 1, result
         capabilities = result["agentCapabilities"]
         assert capabilities["loadSession"] is False, result
         assert capabilities["promptCapabilities"]["image"] is True, result
+        assert capabilities["promptCapabilities"]["audio"] is True, result
         assert result["authMethods"] == [], result
         assert result["agentInfo"]["name"] == "tau", result
-        print("ok — handshake: v1, no session/load, images yes, no auth methods")
+        print("ok — handshake: v1, no session/load, images and audio yes, no auth methods")
 
         session = agent.new_session()
         assert session, "session/new answered without an id"

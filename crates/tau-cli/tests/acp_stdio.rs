@@ -252,6 +252,11 @@ fn handshake_reports_what_tau_can_do() {
         "images reach the model as Content::Image, so the bit is honest: {answer}"
     );
     assert_eq!(
+        result["agentCapabilities"]["promptCapabilities"]["audio"],
+        json!(true),
+        "audio blocks reach the model as Content::Audio, same as images: {answer}"
+    );
+    assert_eq!(
         result["authMethods"],
         json!([]),
         "credentials come from the spawn environment, so there is no method to offer: {answer}"
@@ -879,9 +884,11 @@ const COMMAND: &str = "touch marker.txt";
 /// before the arguments do).
 fn tool_call_body() -> String {
     let mut body = String::new();
-    body.push_str(&chunk(serde_json::json!({"choices": [{"delta": {"tool_calls": [
-        {"index": 0, "id": "call_bash_1", "function": {"name": "bash", "arguments": ""}}
-    ]}}]})));
+    body.push_str(&chunk(
+        serde_json::json!({"choices": [{"delta": {"tool_calls": [
+            {"index": 0, "id": "call_bash_1", "function": {"name": "bash", "arguments": ""}}
+        ]}}]}),
+    ));
     body.push_str(&chunk(serde_json::json!({"choices": [{"delta": {"tool_calls": [
         {"index": 0, "function": {"arguments": serde_json::json!({"command": COMMAND}).to_string()}}
     ]}}]})));
@@ -1000,7 +1007,11 @@ fn a_gated_call_asks_the_client_and_the_answer_decides() {
     let mut notes = Vec::new();
     let mut asked = Vec::new();
     let answer = agent.answer_asking(3, "allow_once", &mut notes, &mut asked);
-    assert_eq!(answer["result"]["stopReason"], json!("end_turn"), "{answer}");
+    assert_eq!(
+        answer["result"]["stopReason"],
+        json!("end_turn"),
+        "{answer}"
+    );
     assert_eq!(asked.len(), 1, "one gated call, one question: {asked:?}");
 
     // The question is about the call the client was already shown: same
@@ -1061,7 +1072,11 @@ fn a_gated_call_asks_the_client_and_the_answer_decides() {
     let mut notes = Vec::new();
     let mut asked = Vec::new();
     let answer = agent.answer_asking(5, "reject_once", &mut notes, &mut asked);
-    assert_eq!(answer["result"]["stopReason"], json!("end_turn"), "{answer}");
+    assert_eq!(
+        answer["result"]["stopReason"],
+        json!("end_turn"),
+        "{answer}"
+    );
     assert_eq!(asked.len(), 1, "a new session asks again: {asked:?}");
     assert_eq!(
         asked[0]["toolCall"]["toolCallId"],

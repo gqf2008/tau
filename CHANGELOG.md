@@ -29,12 +29,17 @@
   JSONL at `<dir>/<session-id>.jsonl`, which is an ordinary tau session
   (`tau tree --session` reads it, `--continue --session` resumes it).
   The handshake claims only what is true — v1, `loadSession: false`,
-  `promptCapabilities.image: true`, no auth methods — and every method
+  `promptCapabilities.image` and `.audio` (both blocks reach the model as
+  `Content::Image`/`Content::Audio`), no auth methods — and every method
   tau does not implement (`session/load`, `authenticate`, `fs/*`,
   `terminal/*`) is answered method-not-found. A prompt's blocks fold, in
-  order, into one message; the loop's events become `session/update`
-  (text deltas; a tool call announced before its update, which carries a
-  flattened preview of the output); tool-call ids on the wire are
+  order, into one message (text, image and audio blocks all carry their
+  bytes to the model); the loop's events become `session/update` (text
+  deltas; a tool call announced before its update, which carries a
+  flattened preview of the output); a realtime provider's audio, VAD and
+  barge-in have no stable-v1 update, so they are dropped with one line on
+  stderr per turn — the assembled audio stays in the session file;
+  tool-call ids on the wire are
   `{turn}:{provider id}`, because a scripted model reuses its own ids
   across turns and a client would otherwise draw one call that never
   ends. `session/cancel` is honored only while a turn is in flight — at
