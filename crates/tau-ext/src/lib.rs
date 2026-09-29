@@ -50,6 +50,11 @@ mod bindings {
         // by the wit_vendored test below.
         path: "wit/tau.wit",
         world: "extension",
+        // Exports are driven as async (`call_*` futures) and WASI is
+        // linked in its async form: the host awaits component calls
+        // instead of parking a thread on them, and no host function
+        // block_on's a runtime thread (docs/wit-redesign.md §6, stage 1).
+        exports: { default: async },
     });
 }
 
@@ -417,7 +422,7 @@ struct InstanceFactory {
 }
 
 impl InstanceFactory {
-    fn instantiate(&self) -> Result<ComponentInstance, wasmtime::Error> {
+    async fn instantiate(&self) -> Result<ComponentInstance, wasmtime::Error> {
         let state = ComponentState {
             ctx: self.wasi.ctx_builder().build(),
             table: ResourceTable::new(),
@@ -427,7 +432,9 @@ impl InstanceFactory {
             next_subscription: 0,
         };
         let mut store = Store::new(&self.engine, state);
-        let bindings = bindings::Extension::instantiate(&mut store, &self.component, &self.linker)?;
+        let bindings =
+            bindings::Extension::instantiate_async(&mut store, &self.component, &self.linker)
+                .await?;
         Ok(ComponentInstance { store, bindings })
     }
 }
@@ -441,14 +448,18 @@ impl SharedInstance {
     /// Drop a poisoned instance and build a fresh one. Best-effort: if
     /// re-instantiation somehow fails, the poisoned instance stays and
     /// calls keep degrading the way they did before this fix.
-    fn revive(&mut self) {
-        if let Ok(fresh) = self.factory.instantiate() {
+    async fn revive(&mut self) {
+        if let Ok(fresh) = self.factory.instantiate().await {
             self.instance = fresh;
         }
     }
 }
 
-type Shared = Arc<Mutex<SharedInstance>>;
+/// One instance behind an async lock: calls await the component while
+/// holding it, so a call in flight (not a thread) is what serializes two
+/// callers (the `spawn_blocking` + std-mutex pair this replaced parked a
+/// blocking-pool thread per call).
+type Shared = Arc<tokio::sync::Mutex<SharedInstance>>;
 
 /// What a loaded component contributes, unpacked.
 pub type LoadedParts = (Vec<Box<dyn Tool>>, Vec<Box<dyn ProbeHandler>>);
@@ -611,6 +622,34 @@ impl Default for ExtensionHost {
     }
 }
 
+/// Drive a component call to completion from a synchronous caller.
+///
+/// Component calls are async: the store's WASI imports are the async ones
+/// (`add_to_linker_async`) precisely so that no host function block_on's,
+/// and their blocking pool wants a Tokio runtime context. Inside a runtime
+/// the future is driven on a scratch thread with its own current-thread
+/// runtime (blocking a worker would deadlock the executor that may be
+/// driving the guest); outside one it runs here.
+fn block_on_component<T: Send>(fut: impl std::future::Future<Output = T> + Send) -> T {
+    fn drive<T>(fut: impl std::future::Future<Output = T>) -> T {
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("scratch runtime for component calls");
+        rt.block_on(fut)
+    }
+    if tokio::runtime::Handle::try_current().is_ok() {
+        std::thread::scope(|scope| {
+            scope
+                .spawn(|| drive(fut))
+                .join()
+                .expect("component thread")
+        })
+    } else {
+        drive(fut)
+    }
+}
+
 impl ExtensionHost {
     /// Library default: unsigned components load. The CLI product uses
     /// `with_policy(RequireTrusted)` and gates this behind --allow-unsigned.
@@ -686,7 +725,9 @@ impl ExtensionHost {
     /// Run component instantiation and entry-point calls on a plain OS
     /// thread when called from inside a tokio runtime: wasmtime-wasi's sync
     /// host functions block_on internally and panic on a runtime thread
-    /// ("Cannot start a runtime from within a runtime").
+    /// ("Cannot start a runtime from within a runtime"). The extension
+    /// world has moved off this path (async linker + [`block_on_component`]);
+    /// the provider, bridge and realtime worlds still use it.
     fn off_runtime<T: Send>(f: impl FnOnce() -> Result<T, ExtError> + Send) -> Result<T, ExtError> {
         if tokio::runtime::Handle::try_current().is_ok() {
             std::thread::scope(|scope| scope.spawn(f).join().expect("loader thread"))
@@ -714,10 +755,10 @@ impl ExtensionHost {
         inject: bool,
     ) -> Result<LoadedExtension, ExtError> {
         let path = path.as_ref().to_path_buf();
-        Self::off_runtime(move || self.load_inner(&path, inject))
+        block_on_component(self.load_inner(&path, inject))
     }
 
-    fn load_inner(&self, path: &Path, inject: bool) -> Result<LoadedExtension, ExtError> {
+    async fn load_inner(&self, path: &Path, inject: bool) -> Result<LoadedExtension, ExtError> {
         let bytes = self.read_verified(path)?;
         let component =
             Component::from_binary(&self.engine, &bytes).map_err(|e| ExtError::Load {
@@ -725,9 +766,12 @@ impl ExtensionHost {
                 reason: e.to_string(),
             })?;
         // WASI interfaces are linked so wasip2-std components instantiate;
-        // what they may actually do follows the host's WasiPolicy.
+        // what they may actually do follows the host's WasiPolicy. The
+        // async linker is what lets a call await its own I/O: the sync one
+        // block_on's inside a host function, which is why this loader used
+        // to need a runtime-free thread under it.
         let mut linker: Linker<ComponentState> = Linker::new(&self.engine);
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         // The extension world's own import: the host channel. Its sinks
         // are late-bound (wire_host_channel); the functions are always
         // linked so components instantiate before the agent exists.
@@ -740,7 +784,7 @@ impl ExtensionHost {
             channel: self.channel.clone(),
             inject,
         };
-        let mut instance = factory.instantiate().map_err(|e| ExtError::Load {
+        let mut instance = factory.instantiate().await.map_err(|e| ExtError::Load {
             path: path.display().to_string(),
             reason: format!(
                 "instantiation failed (does it import capabilities the host does not grant?): {}{}",
@@ -753,6 +797,7 @@ impl ExtensionHost {
             .bindings
             .tau_extension_tools()
             .call_definitions(&mut instance.store)
+            .await
             .map_err(|e| ExtError::Load {
                 path: path.display().to_string(),
                 reason: format!("definitions() trapped: {}", compact_wasm_error(&e)),
@@ -761,12 +806,16 @@ impl ExtensionHost {
             .bindings
             .tau_extension_probes()
             .call_points(&mut instance.store)
+            .await
             .map_err(|e| ExtError::Load {
                 path: path.display().to_string(),
                 reason: format!("points() trapped: {}", compact_wasm_error(&e)),
             })?;
 
-        let shared: Shared = Arc::new(Mutex::new(SharedInstance { instance, factory }));
+        let shared: Shared = Arc::new(tokio::sync::Mutex::new(SharedInstance {
+            instance,
+            factory,
+        }));
 
         let mut tools: Vec<Box<dyn Tool>> = Vec::with_capacity(definitions.len());
         for def in definitions {
@@ -839,26 +888,21 @@ impl Tool for WasmTool {
 
     async fn execute(&self, arguments: serde_json::Value) -> ToolOutput {
         let name = self.def.name.clone();
-        let shared = self.shared.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let mut guard = shared
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self.shared.lock().await;
+        let result = {
             let ComponentInstance { store, bindings } = &mut guard.instance;
-            let result =
-                bindings
-                    .tau_extension_tools()
-                    .call_execute(store, &name, &arguments.to_string());
-            if result.is_err() {
-                // The trap poisoned the guest; rebuild so the next call
-                // reaches a working tool instead of trapping forever.
-                guard.revive();
-            }
-            result
-        })
-        .await;
+            bindings
+                .tau_extension_tools()
+                .call_execute(store, &name, &arguments.to_string())
+                .await
+        };
+        if result.is_err() {
+            // The trap poisoned the guest; rebuild so the next call
+            // reaches a working tool instead of trapping forever.
+            guard.revive().await;
+        }
         match result {
-            Ok(Ok(r)) => match convert::tool_result_blocks_to_core(r.content) {
+            Ok(r) => match convert::tool_result_blocks_to_core(r.content) {
                 // 校验即错误: invalid/oversize blocks become a tool error
                 // the model sees — never silently truncated or dropped.
                 Ok(content) => ToolOutput {
@@ -867,8 +911,7 @@ impl Tool for WasmTool {
                 },
                 Err(e) => ToolOutput::err(format!("invalid tool result: {e}")),
             },
-            Ok(Err(e)) => ToolOutput::err(format!("wasm trap: {}", compact_wasm_error(&e))),
-            Err(e) => ToolOutput::err(format!("extension task failed: {e}")),
+            Err(e) => ToolOutput::err(format!("wasm trap: {}", compact_wasm_error(&e))),
         }
     }
 }
@@ -914,28 +957,23 @@ impl ProbeHandler for WasmProbes {
     }
 
     async fn probe(&self, point: ProbePoint, payload: ProbePayload) -> Verdict {
-        let shared = self.shared.clone();
         let point_name = point.name().to_string();
         let payload_json = payload.to_json().to_string();
-        let result = tokio::task::spawn_blocking(move || {
-            let mut guard = shared
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut guard = self.shared.lock().await;
+        let result = {
             let ComponentInstance { store, bindings } = &mut guard.instance;
-            let result =
-                bindings
-                    .tau_extension_probes()
-                    .call_probe(store, &point_name, &payload_json);
-            if result.is_err() {
-                // The trap poisoned the guest; rebuild so the next probe
-                // still decides instead of degrading forever.
-                guard.revive();
-            }
-            result
-        })
-        .await;
+            bindings
+                .tau_extension_probes()
+                .call_probe(store, &point_name, &payload_json)
+                .await
+        };
+        if result.is_err() {
+            // The trap poisoned the guest; rebuild so the next probe
+            // still decides instead of degrading forever.
+            guard.revive().await;
+        }
         match result {
-            Ok(Ok(verdict)) => match verdict.action {
+            Ok(verdict) => match verdict.action {
                 bindings::exports::tau::extension::probes::Action::Continue => Verdict::Continue,
                 bindings::exports::tau::extension::probes::Action::Replace => {
                     replace_probe_payload(point, payload, verdict.payload_json)
@@ -945,7 +983,7 @@ impl ProbeHandler for WasmProbes {
                 },
             },
             // A broken extension degrades to Continue, never wedges the run.
-            Ok(Err(_)) | Err(_) => Verdict::Continue,
+            Err(_) => Verdict::Continue,
         }
     }
 }
