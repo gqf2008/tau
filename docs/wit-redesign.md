@@ -150,6 +150,16 @@ Promise/AsyncIterable）。**这也没证明什么**：`wit-bindgen-cpp` 缺的�
 - wit-bindgen ≥ 0.62（async / stream / future / `async-spawn`）。Rust 访客在 stable
   `wasm32-wasip2` 上可用（§5 已证），**不需要** nightly `wasm32-wasip3`（那要等
   Rust 1.100 的 std，见 `docs/wasip3-streams.md`）。
+- **本草案不要求 WASI 0.3**——两者是不同的层。`async func` / `stream` / `future` 是
+  Canonical ABI（component model）的能力：wasmtime 49 里已**默认编译且默认开启**
+  （`component-model-async` 是 wasmtime 的默认 crate feature，`CM_ASYNC` 默认取
+  `cfg!(feature = "component-model-async")`），guest 仍是 `wasm32-wasip2`——实测
+  examples 产物里 import 的是 `wasi:*@0.2.9`，宿主 `wasmtime_wasi::p2::add_to_linker_sync`
+  服务的是 `wasi:*@0.2.12`。**需要 WASI 0.3 的是另一件事**：guest 想用 WASI 自己的异步接口
+  （`wasi:cli` 的 `read-via-stream`、p3 sockets）或直接编到 `wasm32-wasip3`——那要等 Rust
+  stable 带 p3 std（本机 stable 1.98.1 的 `rustup target list` 里还没有 `wasm32-wasip3`）。
+  WASI 0.3.0 已于 2026-06-11 发布且是稳定版（wasmtime 46 起默认带 CM async），所以这件事是
+  一次**独立的后续小迁移**（examples 换 target + 宿主 p2 linker 换 p3），与契约形状解耦。
 - 生产流的访客需要一次 `spawn`（创建流 → 派生写任务 → 返回读端）——这正是 WASI 0.3
   自己每个 `read-via-stream` 的形状，但它是新代码模式，examples 要逐个改。
 - **非 Rust 工具链：三个能，一个不能（本轮实测，见 §5 语言矩阵）**。C 生成 `_callback`/`_return`

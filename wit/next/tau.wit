@@ -28,10 +28,13 @@ package tau:extension@0.7.0;
 ///     invalid) instead of arriving as an untyped string a guest must not
 ///     pattern-match on.
 ///
-/// Requires the Component Model async ABI on both sides: wasmtime 49+ with
-/// `wasm_component_model_async` + `concurrency_support`, and wit-bindgen 0.62+
-/// for guests (the `async-spawn` feature where a guest produces a stream).
-/// The evidence and the staged migration are in docs/wit-redesign.md.
+/// Requires the Component Model async ABI on both sides: wasmtime 49+ (CM_ASYNC
+/// is on by default there — `component-model-async` is one of wasmtime's default
+/// crate features, so `wasm_component_model_async` + `concurrency_support` only
+/// pin it) and wit-bindgen 0.62+ for guests (the `async-spawn` feature where a
+/// guest produces a stream). It does NOT require WASI 0.3: the async ABI lives
+/// in the component model, and guests stay `wasm32-wasip2` with `wasi:*@0.2.x`
+/// imports. The evidence and the staged migration are in docs/wit-redesign.md.
 ///
 /// Deliberately NOT here (each is a capability, not a shape):
 ///   * streaming media sources (`media-source.stream`) — the blob arm
