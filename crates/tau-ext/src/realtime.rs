@@ -22,6 +22,11 @@ mod realtime_bindings {
         // by the wit_vendored test in lib.rs.
         path: "wit/tau.wit",
         world: "realtime",
+        // Same posture as the provider world (docs/wit-redesign.md §6,
+        // stage 1): exports awaited, imports async so the guest's
+        // `http.*` calls leave the runtime worker.
+        imports: { default: async },
+        exports: { default: async },
     });
 }
 
@@ -35,7 +40,9 @@ struct RealtimeState {
     /// per-call wiring, a session's events flow until close).
     event_tx: Option<UnboundedSender<tau_core::ModelEvent>>,
     /// Origin-allowlisted HTTP egress, granted by per-fingerprint consent.
-    http: HttpRegistry,
+    /// Behind a lock the host import may hand to `spawn_blocking` (see
+    /// the provider world's state for why).
+    http: std::sync::Arc<std::sync::Mutex<HttpRegistry>>,
 }
 
 impl WasiView for RealtimeState {
@@ -50,7 +57,7 @@ impl WasiView for RealtimeState {
 impl rt_events::Host for RealtimeState {
     /// Same typed posture as the provider world's emit, extended with
     /// the realtime kinds (0.3.0).
-    fn emit(&mut self, event: rt_events::ModelEvent) -> Result<(), String> {
+    async fn emit(&mut self, event: rt_events::ModelEvent) -> Result<(), String> {
         let event = match event {
             rt_events::ModelEvent::TextDelta(text) => tau_core::ModelEvent::TextDelta { text },
             rt_events::ModelEvent::ToolCallDelta(d) => tau_core::ModelEvent::ToolCallDelta {
@@ -99,7 +106,10 @@ impl rt_events::Host for RealtimeState {
 }
 
 impl rt_http::Host for RealtimeState {
-    fn request(
+    /// Same shape as the provider world's http import: the network calls
+    /// run on the blocking pool and are awaited, the table lookups answer
+    /// inline.
+    async fn request(
         &mut self,
         method: String,
         url: String,
@@ -107,23 +117,38 @@ impl rt_http::Host for RealtimeState {
         body: Vec<u8>,
         timeout_ms: u32,
     ) -> Result<u64, String> {
-        self.http.request(&method, &url, &headers, &body, timeout_ms)
+        let registry = self.http.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::lock_registry(&registry).request(&method, &url, &headers, &body, timeout_ms)
+        })
+        .await
+        .map_err(|e| format!("http.request: blocking task failed: {e}"))?
     }
 
-    fn status(&mut self, handle: u64) -> Result<u16, String> {
-        self.http.status(handle)
+    async fn status(&mut self, handle: u64) -> Result<u16, String> {
+        crate::lock_registry(&self.http).status(handle)
     }
 
-    fn header(&mut self, handle: u64, name: String) -> Result<Option<String>, String> {
-        self.http.header(handle, &name)
+    async fn header(&mut self, handle: u64, name: String) -> Result<Option<String>, String> {
+        crate::lock_registry(&self.http).header(handle, &name)
     }
 
-    fn read_body(&mut self, handle: u64, max: u32, timeout_ms: u32) -> Result<(Vec<u8>, bool), String> {
-        self.http.read_body(handle, max, timeout_ms)
+    async fn read_body(
+        &mut self,
+        handle: u64,
+        max: u32,
+        timeout_ms: u32,
+    ) -> Result<(Vec<u8>, bool), String> {
+        let registry = self.http.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::lock_registry(&registry).read_body(handle, max, timeout_ms)
+        })
+        .await
+        .map_err(|e| format!("http.read-body: blocking task failed: {e}"))?
     }
 
-    fn close(&mut self, handle: u64) {
-        self.http.close(handle);
+    async fn close(&mut self, handle: u64) {
+        crate::lock_registry(&self.http).close(handle);
     }
 }
 
@@ -144,16 +169,19 @@ struct RealtimeFactory {
 }
 
 impl RealtimeFactory {
-    fn instantiate(&self) -> Result<RealtimeInstance, wasmtime::Error> {
+    async fn instantiate(&self) -> Result<RealtimeInstance, wasmtime::Error> {
         let state = RealtimeState {
             ctx: self.wasi.ctx_builder().build(),
             table: ResourceTable::new(),
             event_tx: None,
-            http: HttpRegistry::new(self.origins.clone()),
+            http: std::sync::Arc::new(std::sync::Mutex::new(HttpRegistry::new(
+                self.origins.clone(),
+            ))),
         };
         let mut store = Store::new(&self.engine, state);
         let bindings =
-            realtime_bindings::Realtime::instantiate(&mut store, &self.component, &self.linker)?;
+            realtime_bindings::Realtime::instantiate_async(&mut store, &self.component, &self.linker)
+                .await?;
         Ok(RealtimeInstance { store, bindings })
     }
 }
@@ -166,8 +194,8 @@ struct SharedRealtimeInstance {
 impl SharedRealtimeInstance {
     /// Drop a poisoned instance and build a fresh one (same revive
     /// doctrine as the request/response provider).
-    fn revive(&mut self) {
-        if let Ok(fresh) = self.factory.instantiate() {
+    async fn revive(&mut self) {
+        if let Ok(fresh) = self.factory.instantiate().await {
             self.instance = fresh;
         }
     }
@@ -177,7 +205,7 @@ impl SharedRealtimeInstance {
 /// exported `models.run` like any provider; `realtime()` opens a fresh
 /// session instance.
 pub struct WasmRealtimeModel {
-    shared: Arc<Mutex<SharedRealtimeInstance>>,
+    shared: Arc<tokio::sync::Mutex<SharedRealtimeInstance>>,
     model: String,
     auth: Option<String>,
 }
@@ -212,7 +240,17 @@ impl crate::ExtensionHost {
     ) -> Result<WasmRealtimeModel, ExtError> {
         let path = path.as_ref().to_path_buf();
         let model = model.into();
-        let bytes = std::fs::read(&path).map_err(|e| ExtError::Load {
+        crate::block_on_component(self.load_realtime_inner(&path, model, origins, auth))
+    }
+
+    async fn load_realtime_inner(
+        &self,
+        path: &Path,
+        model: String,
+        origins: std::collections::HashSet<String>,
+        auth: Option<String>,
+    ) -> Result<WasmRealtimeModel, ExtError> {
+        let bytes = std::fs::read(path).map_err(|e| ExtError::Load {
             path: path.display().to_string(),
             reason: e.to_string(),
         })?;
@@ -221,7 +259,7 @@ impl crate::ExtensionHost {
             reason: e.to_string(),
         })?;
         let mut linker: Linker<RealtimeState> = Linker::new(&self.engine);
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         realtime_bindings::Realtime::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
         let factory = RealtimeFactory {
             engine: self.engine.clone(),
@@ -232,7 +270,7 @@ impl crate::ExtensionHost {
         };
         // Discovery contract, same as load_provider: the model id must
         // be one the component actually serves.
-        let mut probe = factory.instantiate().map_err(|e| ExtError::Load {
+        let mut probe = factory.instantiate().await.map_err(|e| ExtError::Load {
             path: path.display().to_string(),
             reason: format!("realtime provider instantiation failed: {e}"),
         })?;
@@ -240,6 +278,7 @@ impl crate::ExtensionHost {
             .bindings
             .tau_extension_models()
             .call_list_models(&mut probe.store)
+            .await
             .map_err(|e| ExtError::Load {
                 path: path.display().to_string(),
                 reason: format!("list_models trapped: {}", compact_wasm_error(&e)),
@@ -258,7 +297,7 @@ impl crate::ExtensionHost {
             });
         }
         Ok(WasmRealtimeModel {
-            shared: Arc::new(Mutex::new(SharedRealtimeInstance {
+            shared: Arc::new(tokio::sync::Mutex::new(SharedRealtimeInstance {
                 instance: probe,
                 factory,
             })),
@@ -279,17 +318,18 @@ impl tau_core::Model for WasmRealtimeModel {
         let request_json = crate::request_json(&self.model, req, self.auth.as_deref());
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ModelEvent>();
         let shared = self.shared.clone();
-        let call = tokio::task::spawn_blocking(move || {
-            let mut guard = shared.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let call = tokio::spawn(async move {
+            let mut guard = shared.lock().await;
             let instance = &mut guard.instance;
             instance.store.data_mut().event_tx = Some(tx);
             let result = instance
                 .bindings
                 .tau_extension_models()
-                .call_run(&mut instance.store, &request_json);
+                .call_run(&mut instance.store, &request_json)
+                .await;
             instance.store.data_mut().event_tx = None;
             if result.is_err() {
-                guard.revive();
+                guard.revive().await;
             }
             result
         });
@@ -328,26 +368,33 @@ impl tau_core::Model for WasmRealtimeModel {
             "instructions": config.instructions,
         })
         .to_string();
-        let opened = self
-            .shared
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .factory
-            .instantiate()
-            .map_err(|e| e.to_string())
-            .and_then(|mut instance| {
-                instance.store.data_mut().event_tx = Some(tx.clone());
-                instance
-                    .bindings
-                    .tau_extension_session()
-                    .call_open(&mut instance.store, &config_json)
-                    .map_err(|e| e.to_string())
-                    .and_then(|r| r)
-                    .map(|()| instance)
-            });
+        // `realtime()` is a synchronous trait method while instantiation
+        // and `open` are now awaited calls, so the open is driven to
+        // completion here (`block_on_component`: never on a runtime
+        // worker, and the async WASI imports get the runtime context they
+        // need).
+        let shared = self.shared.clone();
+        // The channel's sender lives in the instance for the session's
+        // lifetime; the failure path below still needs one of its own.
+        let open_tx = tx.clone();
+        let opened = crate::block_on_component(async move {
+            let guard = shared.lock().await;
+            let mut instance = guard.factory.instantiate().await.map_err(|e| e.to_string())?;
+            instance.store.data_mut().event_tx = Some(open_tx.clone());
+            match instance
+                .bindings
+                .tau_extension_session()
+                .call_open(&mut instance.store, &config_json)
+                .await
+            {
+                Ok(Ok(())) => Ok(instance),
+                Ok(Err(e)) => Err(e),
+                Err(e) => Err(e.to_string()),
+            }
+        });
         match opened {
             Ok(instance) => Some(Box::new(WasmRealtimeSession {
-                instance: Some(Arc::new(Mutex::new(instance))),
+                instance: Some(Arc::new(tokio::sync::Mutex::new(instance))),
                 event_rx: Arc::new(Mutex::new(Some(rx))),
                 closed: false,
             })),
@@ -378,64 +425,56 @@ impl tau_core::Model for WasmRealtimeModel {
 /// events flush (without this the stream would never end and the
 /// driver would wait forever).
 struct WasmRealtimeSession {
-    instance: Option<Arc<Mutex<RealtimeInstance>>>,
+    instance: Option<Arc<tokio::sync::Mutex<RealtimeInstance>>>,
     event_rx: Arc<Mutex<Option<UnboundedReceiver<tau_core::ModelEvent>>>>,
     closed: bool,
 }
 
 impl WasmRealtimeSession {
-    /// Call a session export on the blocking pool; a trap or a guest
-    /// error both surface as the door-level Err the trait promises
-    /// (sessions do not revive — a poisoned session is a dead session).
-    async fn call(
-        &mut self,
-        op: impl FnOnce(&mut RealtimeInstance) -> Result<Result<(), String>, wasmtime::Error>
-        + Send
-        + 'static,
-    ) -> Result<(), String> {
-        let Some(instance) = self.instance.as_ref().cloned() else {
-            return Err("realtime session is closed".into());
-        };
-        tokio::task::spawn_blocking(move || {
-            let mut guard = instance.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            op(&mut guard)
-        })
-        .await
-        .map_err(|e| format!("realtime call task failed: {e}"))?
-        .map_err(|e| format!("realtime call trapped: {}", compact_wasm_error(&e)))?
+    /// The session's instance, or the door-level error the trait promises
+    /// once closed. Sessions do not revive — a poisoned session is a dead
+    /// session, and a trap surfaces through the caller's `map_err`.
+    fn instance(&self) -> Result<Arc<tokio::sync::Mutex<RealtimeInstance>>, String> {
+        self.instance
+            .as_ref()
+            .cloned()
+            .ok_or_else(|| "realtime session is closed".into())
     }
 }
 
 #[async_trait::async_trait]
 impl tau_core::RealtimeSession for WasmRealtimeSession {
     async fn push_audio(&mut self, bytes: Vec<u8>) -> Result<(), String> {
-        self.call(move |instance| {
-            instance
-                .bindings
-                .tau_extension_session()
-                .call_push_audio(&mut instance.store, &bytes)
-        })
-        .await
+        let instance = self.instance()?;
+        let mut guard = instance.lock().await;
+        let RealtimeInstance { bindings, store } = &mut *guard;
+        bindings
+            .tau_extension_session()
+            .call_push_audio(store, &bytes)
+            .await
+            .map_err(|e| format!("realtime call trapped: {}", compact_wasm_error(&e)))?
     }
 
     async fn push_image(&mut self, jpeg: Vec<u8>) -> Result<(), String> {
-        self.call(move |instance| {
-            instance
-                .bindings
-                .tau_extension_session()
-                .call_push_image(&mut instance.store, &jpeg)
-        })
-        .await
+        let instance = self.instance()?;
+        let mut guard = instance.lock().await;
+        let RealtimeInstance { bindings, store } = &mut *guard;
+        bindings
+            .tau_extension_session()
+            .call_push_image(store, &jpeg)
+            .await
+            .map_err(|e| format!("realtime call trapped: {}", compact_wasm_error(&e)))?
     }
 
     async fn interrupt(&mut self) -> Result<(), String> {
-        self.call(|instance| {
-            instance
-                .bindings
-                .tau_extension_session()
-                .call_interrupt(&mut instance.store)
-        })
-        .await
+        let instance = self.instance()?;
+        let mut guard = instance.lock().await;
+        let RealtimeInstance { bindings, store } = &mut *guard;
+        bindings
+            .tau_extension_session()
+            .call_interrupt(store)
+            .await
+            .map_err(|e| format!("realtime call trapped: {}", compact_wasm_error(&e)))?
     }
 
     async fn close(&mut self) -> Result<(), String> {
@@ -446,18 +485,13 @@ impl tau_core::RealtimeSession for WasmRealtimeSession {
         let Some(instance) = self.instance.take() else {
             return Ok(());
         };
-        let result = tokio::task::spawn_blocking(move || {
-            let mut guard = instance.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-            // Split the field borrows (bindings vs store) explicitly.
-            let RealtimeInstance { bindings, store } = &mut *guard;
-            let result = bindings.tau_extension_session().call_close(store);
-            // Dropping the instance HERE (after close flushed the
-            // terminal events) drops event_tx — the event stream ends.
-            drop(guard);
-            result
-        })
-        .await
-        .map_err(|e| format!("realtime close task failed: {e}"))?;
+        let mut guard = instance.lock().await;
+        // Split the field borrows (bindings vs store) explicitly.
+        let RealtimeInstance { bindings, store } = &mut *guard;
+        let result = bindings.tau_extension_session().call_close(store).await;
+        // Dropping the instance HERE (after close flushed the
+        // terminal events) drops event_tx — the event stream ends.
+        drop(guard);
         result.map_err(|e| format!("realtime close trapped: {}", compact_wasm_error(&e)))?
     }
 

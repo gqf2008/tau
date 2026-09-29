@@ -636,7 +636,7 @@ impl Default for ExtensionHost {
 /// the future is driven on a scratch thread with its own current-thread
 /// runtime (blocking a worker would deadlock the executor that may be
 /// driving the guest); outside one it runs here.
-fn block_on_component<T: Send>(fut: impl std::future::Future<Output = T> + Send) -> T {
+pub(crate) fn block_on_component<T: Send>(fut: impl std::future::Future<Output = T> + Send) -> T {
     fn drive<T>(fut: impl std::future::Future<Output = T>) -> T {
         let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
@@ -1229,7 +1229,7 @@ impl ExtensionHost {
 
 /// Lock a registry, surviving a poisoned mutex: a panic inside one
 /// blocking http call must not poison every later call in the session.
-fn lock_registry(
+pub(crate) fn lock_registry(
     registry: &std::sync::Mutex<http::HttpRegistry>,
 ) -> std::sync::MutexGuard<'_, http::HttpRegistry> {
     registry
