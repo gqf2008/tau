@@ -65,6 +65,16 @@
   (`docs/builtin-tools.md`). The handshake also reports once, on stderr,
   the `fs`/`terminal` delegation a client offers and tau does not take
   up.
+- **`HostError`** (tau-core): the three-way host-call error that the
+  0.7.0 contract's `types.error` projects — `Refused` (nobody granted
+  this), `Failed` (granted, and it broke), `Invalid` (never a valid call
+  here). 0.6.0's ABI still answers every host call with
+  `result<_, string>`, so `From<HostError> for String` is the edge until
+  the contract carries the arm itself; the point of the type is that a
+  guest branches on the arm instead of matching English prose, and that
+  the same detail string under two different arms stays two different
+  values (docs/wit-redesign.md 投影规则). Migration stage 1, first
+  half — the typed probe payloads are the second.
 
 ### Changed
 
