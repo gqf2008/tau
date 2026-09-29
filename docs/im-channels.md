@@ -86,6 +86,19 @@ IM 平台                    tau
      `ws.connect` 等握手也各带 `timeout-ms`（0 拒绝、无响应即显式
      error）——IM 侧的现实是「连上了但平台不发帧/不回头」，与静默 SSE
      同族。本仓四条 bridge 示例统一 30s（`NET_MS`）。
+     **0.7.0 形态修正（2026-09-29）**：F9/F11 的语义（永不永阻、静默
+     即显式错误、honest-ack）全部保留，载体换了——guest 在
+     wit-bindgen 0.62 下没有可 await 的时钟，契约删掉全部
+     `timeout-ms` 参数，预算改宿主旋钮（`TAU_WS_CONNECT_TIMEOUT_MS`
+     30s、`TAU_HTTP_REQUEST_TIMEOUT_MS` 30s、
+     `TAU_HTTP_IDLE_TIMEOUT_MS` 120s），每条拒绝自报预算名与时长。
+     接口同时资源化：`connect` 改 async、返回 `connection` 资源
+     （drop 即 close）；`send` 改 async（await 完成 = 已写进 socket，
+     钉钉修正案语义原样）；接收分两条腿——能 await 的消费者用
+     `receive()`（返回 `tuple<stream<frame>, future<…>>`），同步
+     probe 里的泵用 `poll()`（同步、永不等待；一个连接一个消费者，
+     receive/poll 不分家，第二个调用者吃 `invalid`；到达过的帧先于
+     终止原因交付）。
 2. **`ingress` 能力**（webhook 平台：WhatsApp/企微）：consent-gated
    端口监听，宿主按路由把请求体喂给对应组件（UX 明示
    「该组件要监听 :8080/im/whatsapp」）。宿主依然不懂任何 IM 协议。
@@ -107,6 +120,17 @@ drain 积存并 `host::steer` 注入。
   `after_response` drain 到 mock 推来的消息并 steer ⇒ steer 落在
   当前回合后触发 turn 2 ⇒ turn 2 的 `after_response` 把回复 POST
   回 mock——全链路只用既有调用点，零新驱动机制。
+
+**0.7.0 更新（2026-09-29）**：泵的载体与调用点都升级。`ws::recv`
+（短超时）的角色由 `connection.poll()` 接任——同步、永不等待，
+正是为「泵不能等」而生（sync 降低的导出不能 await 流读，派生的
+任务也不会被调度，实测两次）。调用点在 probe/tool 之外新增两个：
+webhook 的 `handle-request` 改 async（可 await），且宿主在每个
+probe 应答后随即在同一上下文调 `bridge-io.turn(point, payload)`
+——判定仍归 probe（同步、快进快出），等待（drain 帧、发回帖）
+挪进 turn。「宿主 ping 保活不依赖 guest 调用频率」与「agent 完全
+静止时没有调用点」两条如实结论不变；变化的是活跃期几乎每个
+probe 点都附带一次可等待的 drain 机会。
 
 ## `ingress` 能力设计（webhook 平台入站，0.3.0 定稿）
 
@@ -378,3 +402,10 @@ mock →(text 帧)→ 组件：钉钉形 CALLBACK 帧（data 为转义 JSON）
 - [x] validate.sh IM 回环案例（步骤 5c，`scripts/im_mock.py`）：
       注入→steer→turn 2→回帖 POST 全链断言 + 无 --allow-inject 时
       steer 拒、零回帖的拒绝路径
+- [x] 0.7.0 资源/流式化（2026-09-29）：ws/http/process/ingress 的
+      u64 句柄全部资源化（connection/response/child/registration，
+      drop 即释放），`timeout-ms` 参数全部下线（预算改宿主旋钮，
+      每条拒绝自报预算名与时长），`handle-request` 与 `ws.send` 改
+      async，ws 增 `poll` 同步 drain 与 `bridge-io.turn` 异步调用点；
+      语义红线（honest-ack、永不永阻、签名校验归组件、consent 维度
+      不变）原样保留

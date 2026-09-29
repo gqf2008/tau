@@ -2,7 +2,7 @@
 
 End-to-end: from an empty crate to a signed, distributed component. The
 contract is `wit/tau.wit` (versioned — the `package` line there is the
-authority, currently `tau:extension@0.6.0`); this guide
+authority, currently `tau:extension@0.7.0`); this guide
 walks the three worlds — `extension` (tools + probes), `provider`
 (models), `bridge` (external protocols) — using the shipped examples as
 reference implementations. For the same path walked hands-on, with every
@@ -24,11 +24,12 @@ JSON envelopes only where the schema is external or genuinely
 arbitrary.** Concretely:
 
 - Typed: the message trunk (`message` / `content` / `media` /
-  `tool-call` / `tool-result`), verdicts, definitions, handles, errors.
+  `tool-call` / `tool-result`), verdicts, definitions, probe points
+  and payloads (since 0.7.0 — the point set and every payload shape
+  are tau's own, docs/probes.md), the provider request, errors.
 - JSON strings only at schema-less leaves: `arguments-json` (arbitrary
-  model-produced JSON), `parameters-json` (JSON Schema is itself a
-  schema language), probe `payload-json` (per-point, fast-evolving,
-  discoverable via `tau probes`).
+  model-produced JSON) and `parameters-json` (JSON Schema is itself a
+  schema language).
 
 WIT types are frozen within a package version; evolution rides package
 minor bumps (0.x semantics). The host links exactly one contract
@@ -39,8 +40,15 @@ original). A bonus the envelope never had: media crosses the ABI as
 raw `list<u8>`, never base64 — which is what the data model
 (`tau_core::types`) always required of binary boundaries.
 
-`process`/`http` handles stay plain `u64`, not resources — resources
-drag in wasi:io and strain C/TinyGo toolchains.
+Since 0.7.0 the stateful ends are **resources** (`process.child`,
+`http.response`, `ws.connection`, `ingress.registration`,
+`host.subscription`, `session.session`) and the waits are **streams and
+futures** — a guest's own await is where a deadline belongs, so every
+`timeout-ms` parameter left the contract (the budgets are host knobs,
+`TAU_*_TIMEOUT_MS`, each refusal naming its budget). The toolchain cost
+the old `u64` posture avoided is now measured rather than assumed:
+`docs/wasm-languages.md` records which generators carry the async ABI
+today (C and Python pass; C++, JS/TS and Go are toolchain-blocked).
 
 Prerequisites: a Rust toolchain with the component target —
 
@@ -93,12 +101,17 @@ keeps your build reproducible when the contract evolves.
 
 Implement `exports::tau::extension::tools::Guest`:
 
-- `definitions()` — called **once at load time**. Each definition is a
+- `definitions()` — called **once at load time** (`async` since 0.7.0:
+  a bridge whose tool list lives on a remote server performs its
+  handshake here; a literal list awaits nothing and reads as it did).
+  Each definition is a
   name, a description the model reads when deciding to call, and a JSON
   Schema (serialized) for the arguments. A `parameters-json` that does
   not parse **fails the whole load**, naming the tool — a broken schema
   is never silently widened to an open one (wit-review F5).
-- `execute(name, arguments-json)` — called per tool call. Return
+- `execute(name, arguments-json)` — called per tool call (`async`
+  since 0.7.0: a tool that talks to the host awaits those calls in
+  place). Return
   `ToolResult { content, is_error }`; the content blocks go back to the
   model as the tool result. Since tau:extension@0.3.0 `content` is a
   **list of result-blocks** (docs/tool-media.md): `text(string)` and/or
@@ -127,17 +140,23 @@ The transcript shows the loop closing: `tool → my_tool`, then
 Probes observe and influence the run at nine wired points —
 `before_run`, `transform_context`, `before_request`, `after_response`,
 `before_tool`, `after_tool`, `before_run_end`, `before_compaction`,
-`before_navigation`. `tau probes` prints the catalog with payload
-shapes; `docs/probes.md` has the full table and verdict semantics.
+`before_navigation` — plus three observe-only session points
+(`session_start`, `branch`, `session_end`). `tau probes` prints the
+catalog with payload shapes; `docs/probes.md` has the full table and
+verdict semantics.
 
-- `points()` — called once at load; return the wire names you handle
-  (`["before_tool"]`). Empty = observe nothing.
-- `probe(point, payload-json)` — synchronous; the harness **pauses**
-  until the verdict returns. Keep hot-path handlers fast; a slow probe
-  slows every run.
-- Verdicts: `continue` (no opinion), `replace` (+ `payload-json`,
-  point-specific), `block` (+ `reason`; vetoes the action — at
-  `before_tool` the reason goes back to the model as the tool result).
+- `points()` — called once at load; return the points you handle
+  (`[Point::BeforeTool]`). Empty = observe nothing.
+- `probe(point, payload)` — typed since 0.7.0: `point` is a 12-arm
+  enum, `payload` a variant with one arm per point, so a
+  context-trimming probe no longer parses the message trunk to do it.
+  Still **synchronous** on purpose: the harness **pauses** until the
+  verdict returns — a probe is a decision point, not an I/O
+  opportunity. Keep hot-path handlers fast; a slow probe slows every
+  run.
+- Verdicts: `continue` (no opinion), `replace(payload)` (the same
+  variant, point-specific arm), `block(reason)` — vetoes the action; at
+  `before_tool` the reason goes back to the model as the tool result.
 
 Handlers fold in load order: each sees the previous handler's
 replacement; first `block` wins. A trapping handler degrades to
@@ -165,19 +184,23 @@ always allowed; decisions are consent-gated:
   size (4 MiB). Enqueue-only: delivery follows the control channel's
   checkpoints (steer after the current turn's tool results, follow-up
   when the run finishes) — a probe mid-call never re-enters the loop.
-- `subscribe(topics)` / `poll(handle)` / `unsubscribe(handle)` —
-  observe the run's high-frequency streams (since 0.3.0, design:
-  `docs/stream-subscribe.md`). Topics: `text-delta`, `audio-delta`.
-  The guest **pulls**: the host hangs a bounded ring (1024 events) on
-  the bus per subscription and the guest drains it with `poll` inside
-  its own invocations — the host never calls into a component
-  asynchronously, so granularity is the guest's own call frequency and
-  an overrun surfaces as a `lagged(n)` marker. Handles are
-  instance-scoped: a trap rebuild invalidates them. Unknown topics and
-  handles fail loud.
+- `subscribe(topics)` — observe the run's high-frequency streams
+  (since 0.3.0, design: `docs/stream-subscribe.md`), returning a
+  `subscription` **resource** (since 0.7.0 the handle table and the
+  explicit unsubscribe collapsed into ownership: dropping it
+  unsubscribes, and a trap rebuild drops it for you). Topics are an
+  enum (`text-delta`, `audio-delta`), so an unknown one is
+  unrepresentable. The guest **pulls**: the host hangs a bounded ring
+  (1024 events) on the bus per subscription and the guest drains it
+  with `subscription.poll()` inside its own invocations — the host
+  never calls into a component asynchronously on this path, so
+  granularity is the guest's own call frequency and an overrun surfaces
+  as a `lagged(n)` marker.
 
-All seven return `result<_, string>`: validation failures reach the
-guest; nothing is silently swallowed. Demos: `examples/notifier` — its
+The calls return `result<_, error>` — a typed `refused` / `failed` /
+`invalid` arm since 0.7.0, so a guest branches on the arm instead of
+matching English prose (the detail string still says what happened);
+nothing is silently swallowed. Demos: `examples/notifier` — its
 `poke` tool does notify/emit/steer and reports each outcome in the tool
 result, so the consent gate is visible in the transcript;
 `examples/streamer` — subscribes at `session_start` and polls at
@@ -185,23 +208,28 @@ result, so the consent gate is visible in the transcript;
 
 ## 5. Providers (world `provider`)
 
-A provider component serves models. Streaming is **push-mode**: you
-call `events.emit(json)` per chunk and return from `run` when done.
+A provider component serves models. Streaming is a **stream the guest
+writes**: `run` returns `tuple<stream<event>, future<result<_, error>>>`
+— the 0.6.0 `events.emit(json)` push channel is gone, the stream *is*
+the channel, and the events are typed.
 
 - `list-models()` — ids the user can select with `--model`. Load fails
   for any other id, naming the available ones, so keep this list honest.
-- `run(request-json)` — the request uses tau's wire shape
-  (`{"model", "system", "messages", "tools", "auth"?}`). Emit
-  `text-delta` / `audio-delta` / `tool-call-delta` events, then exactly
-  one `done` with a stop reason. **Contract:** never trap on
-  request/transport failures — emit an `error` event followed by
-  `done {"stop":"error"}`.
+- `run(request)` — `async` since 0.7.0, and the request is a typed
+  record (`model`, `system`, `messages`, `tools`, `auth`): you still
+  re-serialize into your vendor's wire format, you just no longer parse
+  tau's JSON to get there. Write `text-delta` / `audio-delta` /
+  `tool-call-delta` events to the stream, then exactly one `done` with
+  a stop reason; the future reports the host's verdict on the stream
+  (`err` means the host closed it early). **Contract:** never trap on
+  request/transport failures — write an `error` event followed by
+  `done(error)`.
 
 Network access is consent-gated: the `http` import is always linked
 but granted empty, so calls fail at call time until the user allows
 your origins (`--provider-origin https://api.example.com`, remembered
 per fingerprint with `--remember`). When the user hands the host a
-bearer token, it arrives inside the request as `"auth": {"bearer": …}` —
+bearer token, it arrives as `auth.bearer(…)` on the request record —
 never persisted by the host.
 
 References: `examples/echo-provider` (no network, word-by-word echo —
@@ -217,32 +245,41 @@ tau --provider-wasm target/wasm32-wasip2/release/my_provider.wasm \
 ## 5.5 Realtime providers (world `realtime`)
 
 A provider that also exports `session` becomes a realtime provider: the
-world is `import events + http`, `export models + session` — so the
+world is `import http`, `export models + session` — so the
 component still doubles as an ordinary provider (`models.run` serves
 print mode), while `/live N` in the REPL opens a full-duplex session.
 Capability discovery is the export itself: the host probes the component
 type for `tau:extension/session@…`, there is no flag to set.
 
-- `open(config-json)` — the config carries `input-media-type` (e.g.
+- `session.create(config)` — a static `async` constructor returning
+  the `session` **resource** (a resource since 0.7.0: 0.6.0's "one
+  session per instance, open once" was where the state could live, not
+  a design). The config carries `input-media-type` (e.g.
   `audio/pcm;rate=16000`) plus optional output media type and
-  instructions. Refuse a config you cannot serve with `err`.
-- `push-audio(bytes)` / `push-image(jpeg)` — uplink. Every call is a
-  `result<_, string>`: once you consider the session dead, refuse at
-  the door instead of trapping.
+  instructions. Refuse a config you cannot serve with `err` — no
+  session exists at all, which beats 0.6.0's session that refuses
+  every call.
+- `uplink-audio(stream<u8>)` / `uplink-image(stream<list<u8>>)` —
+  uplink as streams: the host writes for as long as the session lives,
+  you read at your own pace (a slow provider suspends the host's write
+  instead of overrunning a buffer); dropping the writable end ends the
+  uplink.
+- `downlink()` — returns `tuple<stream<event>, future<…>>`: the
+  assistant's audio plus the VAD/barge-in facts, in order; the host
+  drains it at playback pace.
 - `interrupt()` — the user barged in (Ctrl-C during `/live`). What you
-  already emitted is what the user heard; freeze the current output
-  segment and emit an `interrupted` model-event.
-- `close()` — flush terminal events (`speech-stopped`, then exactly one
-  `done`); the host ends your event stream right after. One session per
-  instance — the host instantiates fresh per session, and a trapped
-  session poisons only its own instance.
+  already wrote to the downlink is what the user heard; freeze the
+  current output segment and write an `interrupted` event. `close` is
+  gone with the resource: flush your terminal events (`speech-stopped`,
+  then exactly one `done`) and drop — a trapped session still poisons
+  only its own instance.
 
-Downlink events ride the same `events.emit` as plain providers, with
-four extra model-event kinds: `input-audio-chunk` (uplink fact),
+The downlink stream carries the same `models.event` variant as plain
+providers, with four extra arms: `input-audio-chunk` (uplink fact),
 `speech-started` / `speech-stopped` (VAD), `interrupted`. The audio
 bytes cross to the host in `audio-delta` payloads; the guest-side
 subscription channel stays count-only by design (no audio hot path
-through `host.poll`).
+through `subscription.poll`).
 
 Device consent is the host's job, not yours: a real microphone uplink
 requires the user's `--microphone` grant (the category guards the
@@ -256,15 +293,22 @@ validate.sh step 11d.
 ## 6. Bridges (world `bridge`)
 
 Since 0.3.0 the bridge world also imports `ws` — a WebSocket frame pipe
-for stream-mode protocols (IM long connections, docs/im-channels.md):
-`connect(url, timeout-ms)` (origin allowlist shared with `http`;
-`--mcp-url` accepts ws(s) URLs; the budget bounds the TCP/TLS connect and
-the upgrade handshake — since 0.5.0), `send(handle, frame)`,
-`recv(handle, timeout-ms)` (both timeouts are mandatory — a recv or a
-handshake that can block forever hides a dead connection; the host pings
-every 30s and closes with a named reason after 60s of inbound silence),
-`close(handle)`. Handles are
-generation-fenced like `process`. Demo: `examples/ws-echo-bridge`.
+for stream-mode protocols (IM long connections, docs/im-channels.md).
+Resource-based since 0.7.0: `connect(url)` is `async` and returns a
+`connection` (origin allowlist shared with `http`; `--mcp-url` accepts
+ws(s) URLs); `send(frame)` awaits the socket write — Ok still means
+*written*, not queued (the dingtalk honest-ack amendment); and receiving
+has two legs for the two kinds of guest: `receive()` returns
+`tuple<stream<frame>, future<…>>` for a consumer that can await, while
+`poll()` drains what has arrived **synchronously, never waiting** — the
+shape a pump inside a sync probe needs (one consumer per connection; the
+second caller gets `invalid`). Close is dropping the resource. The F9
+liveness rule is unchanged — the host pings every 30s and closes with a
+named reason after 60s of inbound silence — but the `timeout-ms`
+parameters are gone (a guest has no clock to await): the connect budget
+is the host knob `TAU_WS_CONNECT_TIMEOUT_MS` (30s), and a silent peer's
+stream simply ends with the reason named. Demo:
+`examples/ws-echo-bridge`.
 
 Also since 0.3.0 (the docs/im-channels.md contract amendment): bridges
 import the **host channel** and export **probes** — the IM adapter
@@ -276,10 +320,31 @@ via `points()` (empty = observe nothing); `after_response` is the IM
 outbound leg. Demo: `examples/feishu-bridge` (ws long connection in,
 reply POST out; loopback mock `scripts/im_mock.py`, validate.sh 5c).
 
+Webhook platforms need the mirror capability: `ingress.listen(route)`,
+consent-gated per listen address (`--ingress 127.0.0.1:8080`), returns
+a `registration` resource — dropping it stops serving the route — and
+the host pushes each request into the mandatory
+`ingress-handler.handle-request` export (`async` since 0.7.0; the host
+still serializes per instance, so a webhook arriving mid-tool-call
+queues — platforms retry, that is a fact of the platform, not a loss).
+The return value *is* the HTTP response, so a 200 ack and a synchronous
+callback reply both fall out naturally; a bridge with no webhook leg
+exports a stub returning 501. Signature verification stays the
+component's job — it holds the platform secret. Demos:
+`examples/whatsapp-bridge`, `examples/wecom-bridge` (validate.sh 5d/5e).
+
+0.7.0 also adds `bridge-io.turn(point, payload)`, an export the host
+calls right after `probe` answered for the same point, in a context
+where the guest **may await**. It returns nothing — decisions stay
+`probe`'s — so a bridge keeps its verdict synchronous and does its
+waiting (open the socket, drain the frames, post the reply) here; a
+bridge that needs no such hook exports an explicit no-op.
+
 Bridges translate an external tool protocol into tau tools — the host
 stays protocol-agnostic and only grants capabilities: `process`
-(spawn-with-pipes), `http`/`ws` (origin allowlist) and `host`
-(session injection, consent-gated). All are always linked, granted
+(spawn-with-pipes), `http`/`ws` (origin allowlist), `ingress`
+(consented listen addresses) and `host` (session injection,
+consent-gated). All are always linked, granted
 empty, checked at call time; the user's consent UX shows the exact
 argv / origin / grant.
 

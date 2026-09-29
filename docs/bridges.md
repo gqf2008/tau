@@ -17,10 +17,12 @@ MCP server process  ← JSON-RPC over stdio →  mcp-bridge.wasm  ← tools ifac
 Bridge components need a capability ordinary extensions never get: spawning a
 process. tau grants it exactly one way:
 
-- The WIT `bridge` world imports `tau:extension/process`: `spawn`, `write-stdin`,
-  `read-stdout`, `kill`. Plain data only — no `wasi:io` types, no MCP-shaped
-  types. The interface is a generic spawn-with-pipes; it does not know MCP
-  exists.
+- The WIT `bridge` world imports `tau:extension/process`: `spawn` returns a
+  `child` **resource** (since 0.7.0) — `stdin(stream<u8>)` with a future
+  that resolves when the host has passed everything on, `stdout()` /
+  `stderr()` as streams, `wait()` as a future, `kill()`. The interface is
+  a generic spawn-with-pipes; it does not know MCP exists, and nothing in
+  it is protocol-shaped.
 - The host links this interface **only** for components loaded via
   `load_bridge`, and only when the caller passes the allowed command argv.
   Passing the argv **is** the consent. The bridge receives it through the
@@ -68,35 +70,33 @@ delivery story as every other tau extension.
 ## HTTP transports
 
 Remote MCP servers (streamable HTTP) need network, not `process`. The bridge
-world also imports `tau:extension/http`: a plain-data, handle-based interface
-(`request` / `status` / `header` / `read-body` / `close`), deliberately the
-same shape as `process` rather than `wasi:http` — the guest never touches
-pollables, and SSE responses are consumed incrementally and closed early once
-the JSON-RPC response arrives (the server may legally hold the stream open).
-Every wait on a peer carries its own budget (`timeout-ms`, 0 refused), and
-the guest picks it. Each `read-body` call has its own idle budget: a peer
-that goes quiet returns an explicit error instead of parking the host thread
-until exit — a long-poll that honestly waits longer passes a larger one,
-while a server holding a stream open must keep it fed (progress events or
-SSE keepalives) — wit-review F9. `request` bounds the wait for **response
-headers** separately (0.5.0, wit-review F11), because a peer that accepts
-the TCP connection and then never answers is indistinguishable from a dead
-one; the headers budget is not derivable from the body's, and reqwest's
-blocking `timeout` covers the body too, so the host bounds the header wait
-itself. The same argument bounds the `ws.connect` handshake (im-channels.md
-`ws`).
+world also imports `tau:extension/http`: `request` (`async` since 0.7.0)
+returns a `response` **resource** once the response headers are in —
+`status()`, `header(name)`, and `body()`, a `stream<u8>` the guest drains
+incrementally and drops early once the JSON-RPC response arrives (the
+server may legally hold an SSE stream open; dropping the stream abandons
+the rest and closes the connection, which is the only cancellation an SSE
+consumer needs). The peer-wait semantics the F9/F11 amendments pinned are
+unchanged — a peer that goes quiet or never answers gets an explicit
+error, never a permanent park — but the carrier changed: a wasm guest has
+no clock it can await, so every `timeout-ms` parameter left the contract
+and the budgets are host knobs now — `TAU_HTTP_REQUEST_TIMEOUT_MS` (the
+response-headers wait, 30s) and `TAU_HTTP_IDLE_TIMEOUT_MS` (a silent peer
+mid-body, 120s) — each refusal naming its budget and duration, so the
+gate can shorten one and grep for it.
 
-The write path is bounded too, but it cannot reuse that shape (0.6.0,
-wit-review F12): a write that times out may already have delivered part of
-its buffer, so timeout-plus-retry would replay half a message. Instead
-`write-stdin(handle, data, timeout-ms)` returns how many bytes the host
-**took** — taken bytes are delivered in order and belong to the host from
-that moment, a short count is normal, and `0` means the child took nothing
-within the budget. The guest resumes at the offset it left off, never
-resends, and treats a hard error as stdin gone. The host holds a bounded
-buffer per child (64 KiB) and writes it from a thread of its own, so a
-server that stops reading costs the host that buffer and nothing more;
-`examples/mcp-bridge` fails by name once a few budgets take nothing.
+The write path is where the 0.7.0 stream pays for the knot F12 could not
+untie: a blocking write that timed out could never say how much it had
+delivered, which is why 0.6.0's `write-stdin` returned a taken-count.
+`stdin(data: stream<u8>) -> future<result<_, error>>` makes the whole
+question the guest's own await — the host pumps, backpressure is the
+stream's, and the future resolves when everything was passed on or the
+pipe broke (its error says which). The host still holds a bounded buffer
+per child (64 KiB) and writes it from a thread of its own, so a server
+that stops reading costs the host that buffer and nothing more; a child
+that takes nothing for `TAU_PROCESS_STDIN_IDLE_TIMEOUT_MS` (30s) gets its
+write dropped with a line that names the budget and asks whether the
+child is reading at all.
 
 The host enforces the consent: an origin allowlist (`scheme://host[:port]`).
 Every request's origin is checked before sending; **redirects are never

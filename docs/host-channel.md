@@ -29,7 +29,7 @@ MIME 主类型即语义（image/* audio/* video/*，其余=file），不另立
 kind 枚举。
 
 下文片段记的是当时（0.2.0）的形状；现行契约以 `wit/tau.wit` 的
-`package` 行为准（当前 `tau:extension@0.6.0`）。
+`package` 行为准（当前 `tau:extension@0.7.0`）。
 
 ```wit
 package tau:extension@0.2.0;
@@ -115,6 +115,21 @@ breaking 批次，见 wit-review.md 修订记录。
 裁决记录独立成篇：`docs/stream-subscribe.md`；语义红线与本文一致
 （校验即错误、观测无门、绝不阻塞运行）。
 
+## 0.7.0 追加：类型化错误 + 订阅资源化（2026-09-29）
+
+- 四个调用（notify/emit/steer/follow-up）的 `result<_, string>` 换成
+  `result<_, types.error>`（`refused` / `failed` / `invalid`）——
+  「校验即错误」红线不变，但 guest 分支的对象是 variant arm 而不是
+  英文字符串；detail 字符串留给人看日志。注意 wit-bindgen 0.62 里
+  类型化错误的 `Display` 印的是 Debug 形（`Refused("…")`）——别
+  解析字符串，匹配变体。
+- `level` 与 `topic` 从注释里的字符串约定变成真枚举——未知
+  level/topic 从「调用时拒」变成「不可表示」。
+- `subscribe` 返回 `subscription` **资源**：0.3.0 的
+  subscribe/poll/unsubscribe 句柄三件套塌缩成所有权——
+  `subscription.poll()` 同步 drain（有界环 1024 + `lagged(n)` 语义
+  原样），drop 即退订，trap 重建自然带走它。
+
 ## 语义红线（从现有脊柱继承，不得发明新时序）
 
 1. **enqueue-only**：host 调用一律排队，绝不同步执行。probe 中途调
@@ -128,8 +143,9 @@ breaking 批次，见 wit-review.md 修订记录。
 3. **能力边界不稀释**：steer/follow-up 进 consent 体系（per-fingerprint
    remembered grant；UX 明示「该组件可向会话注入消息」）；notify/emit
    纯观测，永远可用。
-4. **校验即错误**：`result<_, string>` 回报非法输入（role 非 user、
-   JSON 不合法、超过尺寸上限），不得静默吞掉。
+4. **校验即错误**：`result<_, error>`（0.7.0 起类型化；之前是
+   `result<_, string>`）回报非法输入（role 非 user、JSON 不合法、
+   超过尺寸上限），不得静默吞掉。
 
 ## 类型化 ↔ serde 的边界（v2 论证）
 

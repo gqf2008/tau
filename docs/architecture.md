@@ -101,22 +101,27 @@ tau-core 不知道 wasm 的存在；tau-ext 不知道 CLI 的存在；
 
 ## 4. 可插拔模块设计
 
-### 4.1 契约：三个 world，两种能力，一条推送通道
+### 4.1 契约：四个 world，四种能力，资源与流
 
 契约是 `wit/tau.wit`（版本化——那里的 `package` 行即权威，当前
-`tau:extension@0.6.0`）。它按「组件扮演什么角色」切成三个 world，
+`tau:extension@0.7.0`）。它按「组件扮演什么角色」切成四个 world，
 而不是一个大接口：
 
 | world | export | import | 角色 |
 |-------|--------|--------|------|
-| `extension` | `tools`（definitions/execute）、`probes`（points/probe） | `host`（notify/emit/steer/follow-up；注入类过 consent） | 通用扩展：给 agent 加工具、在生命周期点上观察与影响、经宿主通道回传 |
-| `provider` | `models`（list-models/run） | `events`、`http` | 模型 provider：推送式流式输出，网络走授权出口 |
-| `bridge` | `tools` | `process`、`http` | 桥：把外部工具协议（MCP）翻译成 tau 工具 |
+| `extension` | `tools`（definitions/execute）、`probes`（points/probe） | `host`（notify/emit/steer/follow-up/subscribe；注入类过 consent） | 通用扩展：给 agent 加工具、在生命周期点上观察与影响、经宿主通道回传 |
+| `provider` | `models`（list-models/run） | `http` | 模型 provider：`run` 返回事件流（guest 写 `stream<event>`），网络走授权出口 |
+| `realtime` | `models`、`session` | `http` | 全双工实时 provider：上下行皆为流（§4.7、`docs/realtime-av.md`） |
+| `bridge` | `tools`、`probes`、`bridge-io`、`ingress-handler` | `process`、`http`、`ws`、`host`、`ingress` | 桥：把外部协议（MCP、IM 长连/webhook）翻译成 tau 工具与入站消息 |
 
-两个 **capability interface**（`process`、`http`）是刻意朴素的数据
-接口（handle + list\<u8\>，无 wasi:io/wasi:http 依赖，无 MCP 形状）：
-宿主能力，不是协议知识。`events` 是 provider 的推送通道，宿主永远
-提供，不算能力。
+四个 **capability interface**（`process`、`http`、`ws`、`ingress`）
+只表达宿主能力，不表达协议知识（无 wasi:http、无 MCP/IM 形状）。
+0.7.0 起句柄全部资源化（`child` / `response` / `connection` /
+`registration`，drop 即释放），等待全部换成 stream/future——「还没
+好」由 guest 自己的 await 表达，`timeout-ms` 参数随之全部下线，
+预算收进宿主旋钮（`TAU_*_TIMEOUT_MS`，每条拒绝自报预算名与时长）。
+0.6.0 的 `events` 推送通道随之取消：provider 直接往 `run` 返回的
+`stream<event>` 里写，事件本身也已类型化。
 
 设计要点：**普通扩展链接不到 `process`/`http`**。world 的划分就是
 能力的第一道边界——一个只做工具的组件在链接层面就拿不到 spawn。
@@ -233,10 +238,12 @@ before_tool → after_tool → before_run_end`，外加 `before_compaction`
 
 ### 4.7 Provider 组件
 
-- **推送式流式**：组件逐块调 `events.emit(json)`（text-delta /
-  audio-delta / tool-call-delta / done / error），`run()` 返回即结束。
-  宿主把 channel 里的事件反序列化成 `ModelEvent` 流——组件在 core
-  眼里就是一个普通 `Model`。
+- **流式输出**：`run(request)` 是 async（0.7.0 起），返回
+  `tuple<stream<event>, future<…>>`——组件把 text-delta /
+  audio-delta / tool-call-delta / done / error 顺序写进流（事件已
+  类型化，镜像 `ModelEvent`），宿主按自己的节奏 drain，future 报
+  宿主对这条流的判决（早关为 err）。组件在 core 眼里仍是一个普通
+  `Model`。
 - **模型清单强制**：`--model` 必须命中 `list-models()`（§4.2）。
 - **永不 trap 契约**：请求/传输失败走 error 事件 + `done{stop:
   "error"}`；trap 是组件违约，宿主按 §4.3 兜底但不鼓励。

@@ -5,6 +5,16 @@
 > + validate.sh 11b/11c/11d 三腿）。**仅 Phase 3（wasip3 流 ABI）未落地**，
 > 排期见 `docs/wasip3-streams.md`（Rust 1.100 解锁）。
 > **代码不得先行于本文**：已落地部分同样以本文为准，改行为先改本文。
+>
+> **2026-09-29 更新**：上下行的 stream 形态**已随契约 0.7.0 提前落地**
+> （component-model 异步 ABI，stable `wasm32-wasip2` 即可，无需等
+> wasip3 std）——`session` 资源化，`uplink-audio(stream<u8>)` /
+> `downlink() -> stream<event>` 取代了 Phase 2b 的
+> `open/push-audio/push-image/close` 逐块调用形（那正是「ABI 载不动
+> 连续流」时代的形状），`interrupt` 保留为调用。仍冻结到 Rust 1.100
+> 的只剩 **guest 迁 `wasm32-wasip3` target** 一项（wasip3-streams.md
+> 的解锁条件），接口形态不再等它。下文 Phase 2b 的记录保留原样
+> （那是落地时的真实形状）。
 
 ## 现状家底（代码实证，2026-09-27）
 

@@ -8,6 +8,14 @@ are machine-specific. Fingerprints and digests in the transcripts come from
 the machine this was written on and yours will differ — a digest covers the
 exact bytes, and those carry your build paths. That is the point of them.
 
+> **Contract note (2026-09-29):** the contract at HEAD is
+> `tau:extension@0.7.0` — exports that wait are `async`, probes are
+> typed, and resources replaced the `u64` handles (see `CHANGELOG.md`).
+> The transcripts below remain the 0.6.0 capture this header declares;
+> the re-run rule under "Keeping this document honest" applies before
+> the next release. The API walkthrough in `docs/extensions.md` is
+> already 0.7.0-shaped.
+
 Read alongside: `docs/extensions.md` (the API surface, the three worlds),
 `wit/tau.wit` (the contract itself), `docs/signing.md`, `docs/oci.md`.
 

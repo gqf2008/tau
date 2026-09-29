@@ -4,6 +4,13 @@
 > 同一班 breaking 列车）。实现严格按本文。
 > 上游依据：`docs/wit-review.md` F2（「两条腿都要」：observe-only
 > probe 低频腿已落地，本文是高频拉取订阅腿）。
+>
+> **0.7.0 形态修正（2026-09-29）**：`subscribe` 现在返回
+> `subscription` **资源**——subscribe/poll/unsubscribe 的 u64 句柄
+> 三件套塌缩成所有权（`subscription.poll()` 同步 drain，drop 即
+> 退订，trap 重建自然带走），语义（有界环 1024、`lagged(n)`、拉取
+> 不推、观测无门）原样保留。下文 0.3.0 的接口片段与清单保留原样
+> （落地时的真实形状）。
 
 ## 问题
 

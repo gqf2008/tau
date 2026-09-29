@@ -11,17 +11,20 @@ Naming: the WIT interface was `hooks` in `tau:extension@0.1.0`;
 0.2.0 renamed it `probes`, matching the code, this doc, and the
 `tau probes` CLI.
 
-The JSON below is the wire: what a component receives as `payload-json` and
-answers as `replace-json`, and what `tau probes --json` prints. Host-side
-handlers (`ProbeHandler`) do not index that JSON by name — they get a
-`tau_core::probe_payload::ProbePayload`, one arm per point
-(`ProbePayload::BeforeTool(ToolCall { .. })`, …), so a renamed field is a
-compile error instead of a silent no-op; `ProbePayload::point()` says which
-point a payload belongs to. `to_json` / `merge_json` are the edge that keeps
-the two in step: the shapes are exactly the ones in this doc, and a
-`replace` that does not fit its point degrades to `continue` (with a line on
-stderr) rather than failing the run. The 0.7.0 contract types the same
-payloads (docs/wit-redesign.md §3).
+Since 0.7.0 the wire is typed: a component receives `point` (a 12-arm
+enum) and `payload` (a variant, one arm per point), and answers a
+`verdict` (`continue` / `replace(payload)` / `block(reason)`). The JSON
+below documents each arm's shape — it is exactly what `tau probes --json`
+prints. Neither side indexes that JSON by name: host-side handlers
+(`ProbeHandler`) get a `tau_core::probe_payload::ProbePayload`, one arm
+per point (`ProbePayload::BeforeTool(ToolCall { .. })`, …), and the
+host's projection (`payload_to_wit` / `payload_from_point` in
+`tau-ext/src/convert.rs`) converts field by field, so a renamed field is
+a compile error instead of a silent no-op; `ProbePayload::point()` says
+which point a payload belongs to. `to_json` / `merge_json` are the edge
+that keeps the JSON shapes in step with this doc, and a `replace` that
+does not fit its point degrades to `continue` (with a line on stderr)
+rather than failing the run.
 
 Model (derived from pi's `HookMap`, packages/agent/src/harness/agent-harness.ts):
 
@@ -74,8 +77,9 @@ direct `eprintln` status lines.
 
 `text_delta` / `tool_progress` — streaming progress, high volume, never
 blocking. `text_delta` is covered by the pull subscription
-(`host.subscribe(["text-delta"])` + `host.poll`,
-`docs/stream-subscribe.md`, landed in 0.3.0): the probe slot stays
+(`host.subscribe([Topic::TextDelta])` + `subscription.poll`,
+`docs/stream-subscribe.md`, landed in 0.3.0; a resource since 0.7.0):
+the probe slot stays
 reserved — probes on high-frequency paths remain forbidden — and
 `ProbePoint::from_name` still rejects both names. `tool_progress` stays
 reserved outright: the bus has no tool-progress event producer, and the
