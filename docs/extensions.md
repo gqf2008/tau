@@ -28,8 +28,9 @@ arbitrary.** Concretely:
   and payloads (since 0.7.0 — the point set and every payload shape
   are tau's own, docs/probes.md), the provider request, errors.
 - JSON strings only at schema-less leaves: `arguments-json` (arbitrary
-  model-produced JSON) and `parameters-json` (JSON Schema is itself a
-  schema language).
+  model-produced JSON), `parameters-json` (JSON Schema is itself a
+  schema language) and `host.emit`'s `event-json` (the extension owns
+  that schema, so no type here can describe it).
 
 WIT types are frozen within a package version; evolution rides package
 minor bumps (0.x semantics). The host links exactly one contract
