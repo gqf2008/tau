@@ -11,14 +11,14 @@ wit_bindgen::generate!({
     world: "extension",
 });
 
-use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
+use exports::tau::extension::probes::{Guest as Probes, Payload, Point, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
 use tau::extension::types::ResultBlock;
 
 struct Upper;
 
 impl Tools for Upper {
-    fn definitions() -> Vec<Definition> {
+    async fn definitions() -> Vec<Definition> {
         vec![Definition {
             name: "upper".into(),
             description: "Convert text to UPPERCASE".into(),
@@ -31,7 +31,9 @@ impl Tools for Upper {
         }]
     }
 
-    fn execute(name: String, arguments_json: String) -> ToolResult {
+    /// `async` since 0.7.0: a tool that talks to the host awaits those calls
+    /// in place. This one has nothing to wait for, so the body is unchanged.
+    async fn execute(name: String, arguments_json: String) -> ToolResult {
         if name != "upper" {
             return ToolResult {
                 content: vec![ResultBlock::Text(format!("unknown tool: {name}"))],
@@ -53,17 +55,16 @@ impl Tools for Upper {
 }
 
 impl Probes for Upper {
-    fn points() -> Vec<String> {
+    fn points() -> Vec<Point> {
         // This extension only provides a tool; it probes nothing.
         Vec::new()
     }
 
-    fn probe(_point: String, _payload_json: String) -> Verdict {
-        Verdict {
-            action: Action::Continue,
-            payload_json: None,
-            reason: None,
-        }
+    /// Points and payloads are typed since 0.7.0: a probe that handles
+    /// nothing cannot be handed an unknown point, and "no opinion" is the
+    /// `continue` arm rather than a record with three loose fields.
+    fn probe(_point: Point, _payload: Payload) -> Verdict {
+        Verdict::Continue
     }
 }
 

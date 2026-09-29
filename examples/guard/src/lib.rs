@@ -29,20 +29,32 @@ wit_bindgen::generate!({
     world: "extension",
 });
 
-use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
+use exports::tau::extension::probes::{Guest as Probes, Payload, Point, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
-use tau::extension::host;
-use tau::extension::types::{Content, ResultBlock};
+use tau::extension::host::{self, Level};
+use tau::extension::types::{Content, Error as HostError, ResultBlock, ToolCall};
+
+/// A host error as one line: the typed kind picks the wording (the contract
+/// says the variant is what a guest branches on), the detail is the host's
+/// own sentence handed through verbatim. `{e}` would print the Debug form
+/// of the variant, which is not a sentence.
+fn host_error(verb: &str, error: HostError) -> String {
+    match error {
+        HostError::Refused(detail) => format!("{verb} refused: {detail}"),
+        HostError::Failed(detail) => format!("{verb} failed: {detail}"),
+        HostError::Invalid(detail) => format!("{verb} invalid: {detail}"),
+    }
+}
 
 struct Guard;
 
 impl Tools for Guard {
-    fn definitions() -> Vec<Definition> {
+    async fn definitions() -> Vec<Definition> {
         // This extension only probes; it provides no tools.
         Vec::new()
     }
 
-    fn execute(name: String, _arguments_json: String) -> ToolResult {
+    async fn execute(name: String, _arguments_json: String) -> ToolResult {
         ToolResult {
             content: vec![ResultBlock::Text(format!("guard provides no tools (called: {name})"))],
             is_error: true,
@@ -50,93 +62,87 @@ impl Tools for Guard {
     }
 }
 
+/// The model's arguments object, as the probe sees it. Since 0.7.0 the
+/// tool call arrives typed (`types.tool-call`); the JSON leaf is the
+/// arguments object itself.
+fn argument_text(call: &ToolCall) -> Option<String> {
+    let parsed: serde_json::Value = serde_json::from_str(&call.arguments_json).ok()?;
+    parsed["text"].as_str().map(str::to_string)
+}
+
 impl Probes for Guard {
-    fn points() -> Vec<String> {
-        vec!["before_tool".into(), "session_start".into()]
+    fn points() -> Vec<Point> {
+        vec![Point::BeforeTool, Point::SessionStart]
     }
 
-    fn probe(point: String, payload_json: String) -> Verdict {
-        let continue_ = || Verdict {
-            action: Action::Continue,
-            payload_json: None,
-            reason: None,
-        };
-        if point == "session_start" {
-            // Observe-only: report the session through the host channel.
-            // The verdict is ignored by contract — this is pure notice.
-            let parsed: serde_json::Value =
-                serde_json::from_str(&payload_json).unwrap_or_default();
-            let session = parsed["session"].as_str().unwrap_or("?");
-            let model = parsed["model"].as_str().unwrap_or("?");
-            if let Err(e) = host::notify(
-                "info",
-                &[Content::Text(format!(
-                    "session_start: {session} (model {model})"
-                ))],
-            ) {
-                eprintln!("guard: notify failed: {e}");
-            }
-            return continue_();
-        }
-        if point != "before_tool" {
-            return continue_();
-        }
-        // before_tool payload: {"id": ..., "name": ..., "args": {...}}.
-        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&payload_json);
-        let text = parsed
-            .ok()
-            .and_then(|p| p["args"]["text"].as_str().map(str::to_string));
-        // A broken probe must degrade to continue, never wedge the run:
-        // this panic is the fixture that proves it end to end.
-        if text.as_deref().is_some_and(|t| t.contains("crash")) {
-            panic!("the guard blew up");
-        }
-        // The sandbox boundary, observable from inside: read an ambient
-        // env var. Default ambient WASI inherits the host env (block to
-        // prove the leak); --deny-wasi leaves the guest env empty.
-        if text.as_deref().is_some_and(|t| t.contains("wasicheck")) {
-            if std::env::var("TAU_AMBIENT").is_ok() {
-                return Verdict {
-                    action: Action::Block,
-                    payload_json: None,
-                    reason: Some("ambient env leaked into the guest".into()),
-                };
-            }
-            return continue_();
-        }
-        // Same boundary for the ambient filesystem: allow-all preopens
-        // `/` (unix) / every drive as `/<letter>` (Windows). Count how
-        // many candidate roots actually list — under allow-all at least
-        // one must, under --deny-wasi none can. (Regression: a host that
-        // preopened drives under mangled guest names failed this check —
-        // the preopens existed but at paths the guest never guesses.)
-        if text.as_deref().is_some_and(|t| t.contains("fscheck")) {
-            let mut reachable = std::fs::read_dir("/").is_ok() as usize;
-            for letter in b'a'..=b'z' {
-                if std::fs::read_dir(format!("/{}", letter as char)).is_ok() {
-                    reachable += 1;
+    /// The typed payload names its own point (the host guarantees the
+    /// pairing), so the old string dispatch on the point collapses into a
+    /// match on the payload arm.
+    fn probe(point: Point, payload: Payload) -> Verdict {
+        match payload {
+            Payload::SessionStart(facts) => {
+                // Observe-only: report the session through the host
+                // channel. The verdict is ignored by contract.
+                if let Err(e) = host::notify(
+                    Level::Info,
+                    &[Content::Text(format!(
+                        "session_start: {} (model {})",
+                        facts.session, facts.model
+                    ))],
+                ) {
+                    eprintln!("guard: notify failed: {}", host_error("notify", e));
                 }
+                Verdict::Continue
             }
-            if reachable > 0 {
-                return Verdict {
-                    action: Action::Block,
-                    payload_json: None,
-                    reason: Some(format!(
-                        "ambient fs leaked into the guest ({reachable} preopens reachable)"
-                    )),
-                };
+            Payload::BeforeTool(call) if point == Point::BeforeTool => {
+                decide(argument_text(&call).as_deref())
             }
-            return continue_();
+            _ => Verdict::Continue,
         }
-        if text.is_some_and(|text| text.contains("forbidden")) {
-            Verdict {
-                action: Action::Block,
-                payload_json: None,
-                reason: Some("the guard said no".into()),
-            }
-        } else {
-            continue_()
+    }
+}
+
+/// The verdict for one before_tool probe, spelled out so the fixture
+/// reads the same as it did on 0.6.0's JSON payload.
+fn decide(text: Option<&str>) -> Verdict {
+    // A broken probe must degrade to continue, never wedge the run: this
+    // panic is the fixture that proves it end to end.
+    if text.is_some_and(|t| t.contains("crash")) {
+        panic!("the guard blew up");
+    }
+    // The sandbox boundary, observable from inside: read an ambient env
+    // var. Default ambient WASI inherits the host env (block to prove the
+    // leak); --deny-wasi leaves the guest env empty.
+    if text.is_some_and(|t| t.contains("wasicheck")) {
+        if std::env::var("TAU_AMBIENT").is_ok() {
+            return Verdict::Block("ambient env leaked into the guest".into());
         }
+        return Verdict::Continue;
+    }
+    // Same boundary for the ambient filesystem: allow-all preopens
+    // `/` (unix) / every drive as `/<letter>` (Windows). Count how many
+    // candidate roots actually list — under allow-all at least one must,
+    // under --deny-wasi none can. (Regression: a host that preopened
+    // drives under mangled guest names failed this check — the preopens
+    // existed but at paths the guest never guesses.)
+    if text.is_some_and(|t| t.contains("fscheck")) {
+        let mut reachable = std::fs::read_dir("/").is_ok() as usize;
+        for letter in b'a'..=b'z' {
+            if std::fs::read_dir(format!("/{}", letter as char)).is_ok() {
+                reachable += 1;
+            }
+        }
+        if reachable > 0 {
+            return Verdict::Block(format!(
+                "ambient fs leaked into the guest ({reachable} preopens reachable)"
+            ));
+        }
+        return Verdict::Continue;
+    }
+    if text.is_some_and(|text| text.contains("forbidden")) {
+        Verdict::Block("the guard said no".into())
+    } else {
+        Verdict::Continue
     }
 }
 

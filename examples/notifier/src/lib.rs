@@ -1,10 +1,10 @@
-//! Example tau extension exercising the host channel (tau:extension@0.6.0).
+//! Example tau extension exercising the host channel (tau:extension@0.7.0).
 //!
 //! Tool `poke` does all three host calls in one shot, and its result
 //! reports each outcome — so the consent gate is observable in the tool
 //! transcript itself:
 //!
-//! - `host.notify("info", …)` — a user-visible fact. Always allowed.
+//! - `host.notify(info, …)` — a user-visible fact. Always allowed.
 //! - `host.emit({"poke": …})` — an extension-defined fact on the event
 //!   bus. Always allowed.
 //! - `host.steer(user message)` — a decision: inject the text into the
@@ -24,15 +24,27 @@ wit_bindgen::generate!({
     world: "extension",
 });
 
-use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
+use exports::tau::extension::probes::{Guest as Probes, Payload, Point, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
-use tau::extension::host;
-use tau::extension::types::{Content, Message, ResultBlock, Role};
+use tau::extension::host::{self, Level};
+use tau::extension::types::{Content, Error as HostError, Message, ResultBlock, Role};
+
+/// A host error as one report line: the typed kind picks the wording (a
+/// missing consent grant is a different situation from a dead peer), and
+/// the detail is the host's own sentence handed through verbatim — the
+/// contract says never to match on it, so this never does.
+fn host_error(verb: &str, error: HostError) -> String {
+    match error {
+        HostError::Refused(detail) => format!("{verb} refused: {detail}"),
+        HostError::Failed(detail) => format!("{verb} failed: {detail}"),
+        HostError::Invalid(detail) => format!("{verb} invalid: {detail}"),
+    }
+}
 
 struct Notifier;
 
 impl Tools for Notifier {
-    fn definitions() -> Vec<Definition> {
+    async fn definitions() -> Vec<Definition> {
         vec![Definition {
             name: "poke".into(),
             description: "Notify the user, emit a fact, and steer the run with the given text"
@@ -46,7 +58,7 @@ impl Tools for Notifier {
         }]
     }
 
-    fn execute(name: String, arguments_json: String) -> ToolResult {
+    async fn execute(name: String, arguments_json: String) -> ToolResult {
         if name != "poke" {
             return ToolResult {
                 content: vec![ResultBlock::Text(format!("unknown tool: {name}"))],
@@ -62,16 +74,16 @@ impl Tools for Notifier {
         let mut report = Vec::new();
 
         // Fact 1: user-visible notification (renderer draws it; never
-        // enters model history).
-        match host::notify("info", &[Content::Text(format!("poke: {text}"))]) {
+        // enters model history). The level is an enum since 0.7.0.
+        match host::notify(Level::Info, &[Content::Text(format!("poke: {text}"))]) {
             Ok(()) => report.push("notify ok".to_string()),
-            Err(e) => report.push(format!("notify refused: {e}")),
+            Err(error) => report.push(host_error("notify", error)),
         }
 
         // Fact 2: extension-defined event on the bus (observe-only).
         match host::emit(&serde_json::json!({"poke": text}).to_string()) {
             Ok(()) => report.push("emit ok".to_string()),
-            Err(e) => report.push(format!("emit refused: {e}")),
+            Err(error) => report.push(host_error("emit", error)),
         }
 
         // Decision: steer the run. Consent-gated — the refusal text is
@@ -82,7 +94,7 @@ impl Tools for Notifier {
         };
         match host::steer(&message) {
             Ok(()) => report.push("steer queued".to_string()),
-            Err(e) => report.push(format!("steer refused: {e}")),
+            Err(error) => report.push(host_error("steer", error)),
         }
 
         ToolResult {
@@ -93,16 +105,12 @@ impl Tools for Notifier {
 }
 
 impl Probes for Notifier {
-    fn points() -> Vec<String> {
+    fn points() -> Vec<Point> {
         Vec::new()
     }
 
-    fn probe(_point: String, _payload_json: String) -> Verdict {
-        Verdict {
-            action: Action::Continue,
-            payload_json: None,
-            reason: None,
-        }
+    fn probe(_point: Point, _payload: Payload) -> Verdict {
+        Verdict::Continue
     }
 }
 

@@ -1,0 +1,4 @@
+#pragma once
+// The generated bindings include <cassert> (the C++ spelling); the shim
+// has assert.h — same empty assert, one include away.
+#include "assert.h"

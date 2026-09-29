@@ -5,14 +5,22 @@
 //! - inbound: `session_start` calls `ingress.listen("/im/whatsapp")`
 //!   (consent: --ingress <addr:port>); the platform POSTs each message
 //!   event to that route and the host pushes it into
-//!   `ingress-handler.handle-request` SYNCHRONOUSLY — no pump, no idle
-//!   window: the export steers the message into the session
-//!   (consent: --allow-inject) and its return value is the webhook's
-//!   HTTP response (the platform's ack).
+//!   `ingress-handler.handle-request` — no pump, no idle window: the
+//!   export steers the message into the session (consent:
+//!   --allow-inject) and its return value is the webhook's HTTP response
+//!   (the platform's ack).
 //! - outbound: `after_response` posts the assembled assistant message to
 //!   the platform's send API over the origin-allowlisted `http`
 //!   capability (TAU_MCP_URL + "/send" — WhatsApp's Graph API messages
 //!   endpoint stands behind that shape).
+//!
+//! 0.7.0 shape: the listener is a `registration` resource — dropping it
+//! stops serving the route, so the adapter HOLDS it (the state cell is a
+//! `thread_local` for exactly that reason: a resource is not `Sync`) —
+//! and the reply POST is an awaited `http.request`, which is why it lives
+//! in `bridge-io.turn` (a synchronously lowered export cannot await;
+//! docs/wit-redesign.md section 5). Inbound needs neither: `listen` is
+//! synchronous and `handle-request` is its own async export.
 //!
 //! Speaks the loopback protocol from docs/im-channels.md (JSON bodies
 //! standing in for WhatsApp's Cloud API shapes; scripts/wa_mock.py is
@@ -33,41 +41,60 @@ wit_bindgen::generate!({
     world: "bridge",
 });
 
-use std::sync::Mutex;
+use std::cell::RefCell;
 
-use exports::tau::extension::ingress_handler::{
-    Guest as IngressHandler, Request, Response,
-};
-use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
+use exports::tau::extension::bridge_io::Guest as BridgeIo;
+use exports::tau::extension::ingress_handler::{Guest as IngressHandler, Request, Response};
+use exports::tau::extension::probes::{Guest as Probes, Payload, Point, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
-use tau::extension::types::{Content, Message, Role};
-use tau::extension::{host, http, ingress};
+use tau::extension::host::{self, Level};
+use tau::extension::types::{Content, Error as HostError, Message, Role};
+use tau::extension::{http, ingress};
 
 /// The route this adapter serves (WhatsApp Cloud API's callback path
 /// shape). Fixed: the route is part of the adapter's protocol
 /// translation, not user configuration.
 const ROUTE: &str = "/im/whatsapp";
 
-/// Budget for one network wait: a reply POST's response headers, or a ws
-/// connect's handshake. The platform answers in seconds, so this is
-/// generous already — it exists so a peer that accepts the connection and
-/// then says nothing fails loudly instead of hanging the bridge
-/// (wit-review F11).
-const NET_MS: u32 = 30_000;
-
+/// Adapter state. A `thread_local` cell because the registration is a
+/// resource (not `Sync`) and the guest is single-threaded — the host
+/// serializes every export call (probes, tools, turn, webhooks) on this
+/// instance, so there is nothing to lock against.
 struct Adapter {
+    /// The registered route. Held for the component's life: dropping the
+    /// registration stops serving the route.
+    registration: Option<ingress::Registration>,
     /// The chat an inbound message came from (echoed in the reply).
     chat_id: Option<String>,
     /// A steered IM message is waiting for its assistant reply.
     awaiting_reply: bool,
 }
 
-static ADAPTER: Mutex<Adapter> = Mutex::new(Adapter {
-    chat_id: None,
-    awaiting_reply: false,
-});
+thread_local! {
+    static ADAPTER: RefCell<Adapter> = RefCell::new(Adapter {
+        registration: None,
+        chat_id: None,
+        awaiting_reply: false,
+    });
+}
 
 struct WhatsAppBridge;
+
+/// One user-visible line (renderer draws it; never enters model history).
+fn say(level: Level, text: String) {
+    let _ = host::notify(level, &[Content::Text(text)]);
+}
+
+/// A host error as one notice line: the typed kind picks the wording, the
+/// detail is the host's own sentence handed through verbatim (the contract
+/// says never to match on it, so this never does).
+fn host_error(verb: &str, error: HostError) -> String {
+    match error {
+        HostError::Refused(detail) => format!("{verb} refused: {detail}"),
+        HostError::Failed(detail) => format!("{verb} failed: {detail}"),
+        HostError::Invalid(detail) => format!("{verb} invalid: {detail}"),
+    }
+}
 
 /// Flat-JSON string extraction, same contract as the other examples
 /// (escapes and nesting out of scope; the loopback mock owns the shape).
@@ -82,18 +109,14 @@ fn json_get<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     Some(&rest[..end])
 }
 
-fn notify(level: &str, text: String) {
-    let _ = host::notify(level, &[Content::Text(text)]);
-}
-
 impl Tools for WhatsAppBridge {
-    fn definitions() -> Vec<Definition> {
+    async fn definitions() -> Vec<Definition> {
         // An IM adapter contributes no tools; the conversation IS the
         // interface.
         Vec::new()
     }
 
-    fn execute(name: String, _arguments_json: String) -> ToolResult {
+    async fn execute(name: String, _arguments_json: String) -> ToolResult {
         ToolResult {
             content: vec![tau::extension::types::ResultBlock::Text(format!(
                 "unknown tool: {name}"
@@ -104,73 +127,79 @@ impl Tools for WhatsAppBridge {
 }
 
 impl Probes for WhatsAppBridge {
-    fn points() -> Vec<String> {
-        vec!["session_start".into(), "after_response".into()]
+    fn points() -> Vec<Point> {
+        vec![Point::SessionStart, Point::AfterResponse]
     }
 
-    fn probe(point: String, payload_json: String) -> Verdict {
-        let continue_ = || Verdict {
-            action: Action::Continue,
-            payload_json: None,
-            reason: None,
-        };
-        match point.as_str() {
-            "session_start" => {
-                // Open the webhook listener. Failure is a notice, not a
-                // load error — without --ingress this bridge simply has
-                // no inbound leg (the notice names the missing consent).
-                if let Err(e) = ingress::listen(ROUTE) {
-                    notify("error", format!("wa: {e}"));
+    /// The one thing this adapter does at a point that does not wait:
+    /// registering its route (`listen` is synchronous, and the
+    /// registration must be held). The outbound POST waits, so it rides
+    /// `turn` below.
+    fn probe(point: Point, _payload: Payload) -> Verdict {
+        if point == Point::SessionStart {
+            // Failure is a notice, not a load error — without --ingress
+            // this bridge simply has no inbound leg (the notice names the
+            // missing consent).
+            match ingress::listen(ROUTE) {
+                Ok(registration) => {
+                    ADAPTER.with(|cell| cell.borrow_mut().registration = Some(registration))
                 }
+                Err(error) => say(Level::Error, host_error("wa: ingress", error)),
             }
-            "after_response" => {
-                // Post the assembled assistant message back to the
-                // platform's send API (outbound is the http capability,
-                // origin-consented via --mcp-url).
-                let mut adapter = ADAPTER.lock().unwrap_or_else(|e| e.into_inner());
-                if !adapter.awaiting_reply {
-                    return continue_();
-                }
-                let (Some(chat_id), Some(base)) = (
-                    adapter.chat_id.clone(),
-                    std::env::var("TAU_MCP_URL").ok(),
-                ) else {
-                    return continue_();
-                };
-                // The assistant text block: the message's first "text"
-                // member (Content's wire shape serializes the field
-                // before the "type" tag — never assume key order).
-                let Some(text) = json_get(&payload_json, "text") else {
-                    return continue_();
-                };
-                let url = format!("{base}/send");
-                let body = format!("{{\"chat_id\":\"{chat_id}\",\"text\":\"{text}\"}}");
-                match http::request(
-                    "POST",
-                    &url,
-                    &[("content-type".to_string(), "application/json".to_string())],
-                    &body.into_bytes(),
-                    NET_MS,
-                ) {
-                    Ok(h) => {
-                        let _ = http::status(h);
-                        http::close(h);
-                        adapter.awaiting_reply = false;
-                        notify("info", format!("wa: reply posted to {chat_id}"));
-                    }
-                    Err(e) => notify("error", format!("wa: reply POST failed: {e}")),
-                }
-            }
-            _ => {}
         }
-        continue_()
+        Verdict::Continue
+    }
+}
+
+impl BridgeIo for WhatsAppBridge {
+    async fn turn(point: Point, payload: Payload) {
+        if point == Point::AfterResponse {
+            post_reply(&payload).await;
+        }
+    }
+}
+
+/// Post the assembled assistant message back to the platform's send API
+/// (outbound is the http capability, origin-consented via --mcp-url). The
+/// text is the typed payload's first text block — 0.6.0 scraped the JSON
+/// payload for one.
+async fn post_reply(payload: &Payload) {
+    let pending = ADAPTER.with(|cell| {
+        let adapter = cell.borrow();
+        adapter.awaiting_reply.then(|| adapter.chat_id.clone()).flatten()
+    });
+    let Some(chat_id) = pending else { return };
+    let Some(base) = std::env::var("TAU_MCP_URL").ok() else { return };
+    let text = match payload {
+        Payload::AfterResponse(response) => {
+            response.message.content.iter().find_map(|block| match block {
+                Content::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+        }
+        _ => None,
+    };
+    let Some(text) = text else { return };
+    let url = format!("{base}/send");
+    // The body is built as JSON rather than interpolated: assistant text
+    // routinely contains quotes and newlines.
+    let body = serde_json::json!({ "chat_id": chat_id, "text": text }).to_string();
+    let headers = vec![("content-type".to_string(), "application/json".to_string())];
+    match http::request("POST".to_string(), url, headers, body.into_bytes()).await {
+        Ok(response) => {
+            let _ = response.status();
+            drop(response); // dropping closes the connection
+            ADAPTER.with(|cell| cell.borrow_mut().awaiting_reply = false);
+            say(Level::Info, format!("wa: reply posted to {chat_id}"));
+        }
+        Err(error) => say(Level::Error, host_error("wa: reply POST", error)),
     }
 }
 
 /// The webhook itself: the platform POSTs a message event, the host
-/// pushes it here synchronously, the return value is the HTTP response.
+/// pushes it here, the return value is the HTTP response.
 impl IngressHandler for WhatsAppBridge {
-    fn handle_request(request: Request) -> Response {
+    async fn handle_request(request: Request) -> Response {
         let ok = |body: &str| Response {
             status: 200,
             headers: vec![("content-type".to_string(), "application/json".to_string())],
@@ -208,11 +237,13 @@ impl IngressHandler for WhatsAppBridge {
         };
         match host::steer(&message) {
             Ok(()) => {
-                let mut adapter = ADAPTER.lock().unwrap_or_else(|e| e.into_inner());
-                adapter.chat_id = Some(chat_id.to_string());
-                adapter.awaiting_reply = true;
-                notify(
-                    "info",
+                ADAPTER.with(|cell| {
+                    let mut adapter = cell.borrow_mut();
+                    adapter.chat_id = Some(chat_id.to_string());
+                    adapter.awaiting_reply = true;
+                });
+                say(
+                    Level::Info,
                     format!("wa: inbound message from {user} steered into the session (chat {chat_id})"),
                 );
                 ok("{\"ok\":true}")
@@ -220,8 +251,8 @@ impl IngressHandler for WhatsAppBridge {
             // The ack is honest: 200 would tell the platform the message
             // landed when it did not (no inject consent) — 403 names the
             // refusal and the platform's retry is correct behavior.
-            Err(e) => {
-                notify("error", format!("wa: steer refused: {e}"));
+            Err(error) => {
+                say(Level::Error, host_error("wa: steer", error));
                 bad(403, "session injection not consented")
             }
         }

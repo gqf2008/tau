@@ -1,5 +1,5 @@
 //! Example tau extension exercising tool media results
-//! (tau:extension@0.6.0, docs/tool-media.md): the `dot_png` tool returns
+//! (tau:extension@0.7.0, docs/tool-media.md): the `dot_png` tool returns
 //! a text block plus a real image block — a 1x1 transparent PNG. Media
 //! bytes cross the ABI raw; the host persists them (inline base64 under
 //! the blob threshold) and materializes them at the provider edge.
@@ -16,7 +16,7 @@ wit_bindgen::generate!({
     world: "extension",
 });
 
-use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
+use exports::tau::extension::probes::{Guest as Probes, Payload, Point, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
 use tau::extension::types::{Media, MediaSource, ResultBlock};
 
@@ -32,7 +32,7 @@ const DOT_PNG: &[u8] = &[
 struct MediaTool;
 
 impl Tools for MediaTool {
-    fn definitions() -> Vec<Definition> {
+    async fn definitions() -> Vec<Definition> {
         vec![Definition {
             name: "dot_png".into(),
             description: "Return a 1x1 transparent PNG as an image block".into(),
@@ -40,7 +40,7 @@ impl Tools for MediaTool {
         }]
     }
 
-    fn execute(name: String, _arguments_json: String) -> ToolResult {
+    async fn execute(name: String, _arguments_json: String) -> ToolResult {
         if name != "dot_png" {
             return ToolResult {
                 content: vec![ResultBlock::Text(format!("unknown tool: {name}"))],
@@ -50,10 +50,11 @@ impl Tools for MediaTool {
         ToolResult {
             content: vec![
                 ResultBlock::Text("a 1x1 transparent dot. ".into()),
-                ResultBlock::Media(Media {
+                // The arm is the intent since 0.7.0: no MIME sniffing, and
+                // the filename lives on `file` (which this is not).
+                ResultBlock::Image(Media {
                     media_type: "image/png".into(),
                     source: MediaSource::Bytes(DOT_PNG.to_vec()),
-                    name: None,
                 }),
             ],
             is_error: false,
@@ -62,16 +63,12 @@ impl Tools for MediaTool {
 }
 
 impl Probes for MediaTool {
-    fn points() -> Vec<String> {
+    fn points() -> Vec<Point> {
         Vec::new()
     }
 
-    fn probe(_point: String, _payload_json: String) -> Verdict {
-        Verdict {
-            action: Action::Continue,
-            payload_json: None,
-            reason: None,
-        }
+    fn probe(_point: Point, _payload: Payload) -> Verdict {
+        Verdict::Continue
     }
 }
 

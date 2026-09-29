@@ -4,6 +4,14 @@
 //! request fails at call time and the component reports an error event
 //! (the Model contract: never trap).
 //!
+//! 0.7.0 moved every wait out of the guest: `request` is an async import
+//! awaited under the export, and the body is a stream the guest pulls
+//! until the host ends it. The 0.6.0 `idle=<ms>` URL token went with the
+//! guest-supplied `timeout-ms` parameter it fed — waiting is host policy
+//! now. The test knobs are `TAU_HTTP_REQUEST_TIMEOUT_MS` (headers) and
+//! `TAU_HTTP_IDLE_TIMEOUT_MS` (between body bytes); production values are
+//! the host's own `REQUEST_TIMEOUT` / `IDLE_TIMEOUT`.
+//!
 //! Build:
 //!   cargo build --manifest-path examples/http-provider/Cargo.toml \
 //!       --target wasm32-wasip2 --release
@@ -16,15 +24,10 @@ wit_bindgen::generate!({
     world: "provider",
 });
 
-use exports::tau::extension::models::{Guest, Info};
-use tau::extension::events::{self, ModelEvent, StopReason};
+use exports::tau::extension::models::{Auth, Event, Guest, Info, Request};
 use tau::extension::http;
-
-/// Idle budget for one network wait: the response headers, then each body
-/// read. The gateway answers promptly, so this is generous already — it
-/// exists so a half-open connection fails loudly instead of hanging the
-/// call (wit-review F9 for the body, F11 for the headers).
-const IDLE_MS: u32 = 30_000;
+use tau::extension::types::{Content, Error, Role, StopReason};
+use wit_bindgen::rt::async_support::{FutureReader, StreamReader, spawn_local};
 
 struct HttpProvider;
 
@@ -38,85 +41,105 @@ impl Guest for HttpProvider {
         }]
     }
 
-    fn run(request_json: String) {
+    async fn run(request: Request) -> (StreamReader<Event>, FutureReader<Result<(), Error>>) {
         // Test hook, mirroring the guard example's "crash": a trapped
         // provider must fail this run — and the host must rebuild the
-        // instance so the NEXT run still reaches a working guest.
-        if request_json.contains("crash") {
+        // instance so the NEXT run still reaches a working guest. Checked
+        // before anything is spawned, so the trap lands on the call itself
+        // exactly as the old synchronous `run` did.
+        if last_user_text(&request).is_some_and(|text| text.contains("crash")) {
             panic!("the provider blew up");
         }
-        match fetch(&request_json) {
-            Ok(text) => {
-                emit(ModelEvent::TextDelta(text));
-                emit(ModelEvent::Done(StopReason::Stop));
+        let (mut events, events_rx) = wit_stream::new::<Event>();
+        let (verdict, verdict_rx) = wit_future::new::<Result<(), Error>>(|| Ok(()));
+        spawn_local(async move {
+            // The writer must live under an async export for `spawn_local`
+            // to be scheduled at all (docs/wit-redesign.md §5): `run` is
+            // `async func`, so this task is driven.
+            let mut hung_up = None;
+            for event in fetch(&request).await {
+                if events.write_one(event).await.is_some() {
+                    // The host dropped the read end: a refusal or a
+                    // cancellation. Nothing is left to deliver.
+                    hung_up = Some(Error::Failed(
+                        "the host stopped reading the event stream".into(),
+                    ));
+                    break;
+                }
             }
-            Err(message) => {
-                emit(ModelEvent::Error(message));
-                emit(ModelEvent::Done(StopReason::Error));
-            }
-        }
+            // Dropping the writer ends the stream — the normal terminator
+            // after `done`/`error`, and harmless after a hang-up.
+            drop(events);
+            let value = match hung_up {
+                Some(error) => Err(error),
+                None => Ok(()),
+            };
+            let _ = verdict.write(value).await;
+        });
+        (events_rx, verdict_rx)
     }
 }
 
-fn fetch(request_json: &str) -> Result<String, String> {
-    let parsed: serde_json::Value =
-        serde_json::from_str(request_json).map_err(|e| format!("bad request json: {e}"))?;
-    let url = parsed["messages"]
-        .as_array()
-        .and_then(|messages| {
-            messages.iter().rev().find_map(|m| {
-                (m["role"].as_str() == Some("user"))
-                    .then(|| m["content"].as_array()?.first()?["text"].as_str())
-                    .flatten()
-            })
-        })
+/// The whole answer as an ordered event list: the fetch's text plus the
+/// terminal event, or the error pair (never a trap).
+async fn fetch(request: &Request) -> Vec<Event> {
+    match get(request).await {
+        Ok(text) => vec![Event::TextDelta(text), Event::Done(StopReason::Stop)],
+        Err(message) => vec![Event::Error(message), Event::Done(StopReason::Error)],
+    }
+}
+
+/// GET the URL in the last user message and return "STATUS <code>: <body>".
+async fn get(request: &Request) -> Result<String, String> {
+    let url = last_user_text(request)
         .ok_or("no user message found in request")?
         .trim()
         .to_string();
 
-    // Test hook (same spirit as `crash` above): a trailing "idle=<ms>"
-    // token overrides the idle budget, so the validation gate can exercise
-    // a short one instead of waiting out the production value.
-    let idle_override = url
-        .rsplit_once("idle=")
-        .and_then(|(head, digits)| {
-            digits
-                .trim()
-                .parse::<u32>()
-                .ok()
-                .map(|ms| (head.trim().to_string(), ms))
-        })
-        .filter(|(head, _)| !head.is_empty());
-    let (url, idle_ms) = idle_override.unwrap_or((url, IDLE_MS));
-
-    // The host injects a consented bearer token as {"auth": {"bearer": …}};
-    // forward it as the Authorization header.
-    let headers: Vec<(String, String)> = match parsed["auth"]["bearer"].as_str() {
-        Some(token) => vec![("authorization".into(), format!("Bearer {token}"))],
-        None => vec![],
+    // The host injects a consented bearer token as `auth`; forward it as
+    // the Authorization header.
+    let headers: Vec<(String, String)> = match &request.auth {
+        Some(Auth::Bearer(token)) => vec![("authorization".into(), format!("Bearer {token}"))],
+        None => Vec::new(),
     };
-    let authed = !headers.is_empty();
+    let marker = if headers.is_empty() { "" } else { " [auth]" };
 
-    let handle = http::request("GET", &url, &headers, &[], idle_ms)?;
-    let status = http::status(handle)?;
-    let mut body = String::new();
-    loop {
-        let (chunk, eof) = http::read_body(handle, 8192, idle_ms)?;
-        body.push_str(&String::from_utf8_lossy(&chunk));
-        if eof {
-            break;
-        }
-    }
-    http::close(handle);
-    let marker = if authed { " [auth]" } else { "" };
-    Ok(format!("STATUS {status}{marker}: {}", body.trim()))
+    let response = http::request("GET".into(), url, headers, Vec::new())
+        .await
+        .map_err(describe)?;
+    let status = response.status();
+    // Dropping the read end abandons the rest of the body and closes the
+    // connection; `collect` reads to the end of it, which for this
+    // example's finite bodies is the same thing.
+    let body = response.body().collect().await;
+    Ok(format!(
+        "STATUS {status}{marker}: {}",
+        String::from_utf8_lossy(&body).trim()
+    ))
 }
 
-/// Push one event; host-side rejections are loud on inherited stderr.
-fn emit(event: ModelEvent) {
-    if let Err(e) = events::emit(&event) {
-        eprintln!("http-provider: host rejected event: {e}");
+/// The contract's three-way error, spelled the way the host spells it.
+fn describe(error: http::Error) -> String {
+    match error {
+        http::Error::Refused(detail) => format!("refused: {detail}"),
+        http::Error::Failed(detail) => format!("failed: {detail}"),
+        http::Error::Invalid(detail) => format!("invalid: {detail}"),
     }
+}
+
+/// The last user message's first text block.
+fn last_user_text(request: &Request) -> Option<String> {
+    request
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::User)
+        .and_then(|message| {
+            message.content.iter().find_map(|block| match block {
+                Content::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+        })
 }
 
 export!(HttpProvider);

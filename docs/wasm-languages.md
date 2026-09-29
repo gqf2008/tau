@@ -5,7 +5,11 @@
 ——工具名 `upper`，把入参 `text` 转大写——用七种主流语言各写一个最小
 扩展，并用同一条验收命令**真加载**验证。
 
-契约版本 `tau:extension@0.6.0`（0.1.0 → 0.2.0：`hooks` 接口正名
+契约版本 `tau:extension@0.7.0`（0.6.0 → 0.7.0：`tools.definitions` /
+`tools.execute` 与四个 world 的桥接口改为
+`async func`，`probes` 的 `point` / `payload` / `verdict` 从 JSON 字符串改为类型化
+变体，`bridge` world 新增 `bridge-io` 接口——见 docs/wit-redesign.md；
+0.1.0 → 0.2.0：`hooks` 接口正名
 `probes`，extension world 新增 `host` import；0.2.0 → 0.3.0：
 `tool-result.content` 从 `string` 改为 `list<result-block>`——
 工具可返回媒体块，见 docs/tool-media.md；0.3.0 → 0.4.0：
@@ -16,7 +20,11 @@
 `timeout-ms` 并改为返回**已收下**的字节数（客座自持偏移续写，短返回是
 常态），见 docs/bridges.md）。
 旧契约产物会被宿主
-点名拒载（版本错配写进 load 错误），重建即迁移。各语言的
+点名拒载（版本错配写进 load 错误），重建即迁移。
+0.7.0 的 async 形状按语言各不相同：C 是生成器给的回调 ABI（先
+`…_return(...)` 再 `CALLBACK_CODE_EXIT`），C++ 的生成器根本不生成这两个导出，
+Python 是 `async def`，JS/TS 是 `async` 方法 + `{ tag: ... }` 变体，Go 是
+`witAsync.Run` 包裹。各语言的
 result-block 构造：C 填 tag+union，C++ 用 variant 转换构造
 （cxxshim 已补），Python `ResultBlock_Text(...)`，
 JS/TS `{ tag: "text", val: ... }`，Go `MakeResultBlockText(...)`。
@@ -41,12 +49,12 @@ transcript 必须同时出现：
 
 | 语言 | 工具链 / 版本 | 产物 | 构建命令 | tau 加载 | 断点或依据 |
 |---|---|---|---|---|---|
-| C | wit-bindgen 0.62（c）+ clang 22.1.8 + wasm-tools 1.259 | `c_upper.wasm` 8.0 KB | `bash examples/c-upper/build.sh` | ✅ 跑通 | — |
-| C++ | wit-bindgen 0.62（cpp）+ clang++ 22.1.8 + wasm-tools 1.259 | `cpp_upper.wasm` 8.6 KB | `bash examples/cpp-upper/build.sh` | ✅ 跑通 | 0.2.0 需 -std=c++23 + 新增 expected/variant 垫片；生成代码要实例化**值形态** `expected<T, E>`（与契约版本无关，见下文），垫片到 0.4.0 复验才补齐 |
-| Python | componentize-py 0.25.1（pip） | `py_upper.wasm` 18.4 MB | `bash examples/python-upper/build.sh` | ✅ 跑通 | 实现类命名坑，见下文 |
-| JavaScript | jco 1.35.0（npx，node 22.14） | `js_upper.wasm` 12.8 MB | `bash examples/js-upper/build.sh` | ✅ 跑通 | 必须 `--disable http fetch-event` |
-| TypeScript | jco 1.35.0（npx，node 22.14） | `ts_upper.wasm` 12.8 MB | `bash examples/ts-upper/build.sh` | ✅ 跑通 | 同上 |
-| Go | TinyGo 0.42 + go 1.25.7 + wit-bindgen 0.62（go）+ Binaryen 133 + preview1 reactor adapter 48.0.3 | `go_upper.wasm` 3.3 MB | `bash examples/go-upper/build.sh`（需 env，见下文） | ✅ 跑通 | 四处补丁 + reactor 构建模式，见下文；0.2.0 实现包改名 `export_tau_extension_probes`；0.4.0 复验重建通过（须显式给 `TINYGO`/`WASMOPT`/`ADAPTER`） |
+| C | wit-bindgen 0.62（c）+ clang 22.1.8 + wasm-tools 1.259 | `c_upper.wasm` 22.4 KB | `bash examples/c-upper/build.sh` | ✅ 跑通（0.7.0 重建） | 0.7.0：async 导出靠生成器给的回调 ABI，手写即可（见下文） |
+| C++ | wit-bindgen 0.62（cpp）+ clang++ 22.1.8 + wasm-tools 1.259 | `cpp_upper.wasm` 8.6 KB（0.6.0 遗留，本轮未重建） | `bash examples/cpp-upper/build.sh` | ❌ 生成器无 async 导出 | 0.2.0 需 -std=c++23 + 新增 expected/variant 垫片；生成代码要实例化**值形态** `expected<T, E>`（与契约版本无关，见下文），垫片到 0.4.0 复验才补齐 |
+| Python | componentize-py 0.25.1（pip） | `py_upper.wasm` 19.7 MB | `bash examples/python-upper/build.sh` | ✅ 跑通（0.7.0 重建） | 实现类命名坑，见下文；0.7.0 生成器直接出 `async def` |
+| JavaScript | jco 1.35.0（npx，node 22.14） | `js_upper.wasm` 12.8 MB（0.6.0 遗留，本轮未重建） | `bash examples/js-upper/build.sh` | ❌ splicer 无 async 导出 | 必须 `--disable http fetch-event` |
+| TypeScript | jco 1.35.0（npx，node 22.14） | `ts_upper.wasm` 12.8 MB（0.6.0 遗留，本轮未重建） | `bash examples/ts-upper/build.sh` | ❌ 同上（jco 同一处 panic） | 同上 |
+| Go | TinyGo 0.42 + go 1.25.7 + wit-bindgen 0.62（go）+ Binaryen 133 + preview1 reactor adapter 48.0.3 | `go_upper.wasm` 3.3 MB（0.6.0 遗留，本轮未重建） | `bash examples/go-upper/build.sh`（需 env，见下文） | ❌ 运行时缺 `runtime.wasiOnIdle` | 四处补丁 + reactor 构建模式，见下文；0.2.0 实现包改名 `export_tau_extension_probes`；0.4.0 复验重建通过（须显式给 `TINYGO`/`WASMOPT`/`ADAPTER`） |
 | Java | — | — | — | ❌ 无可用路径 | 权威依据见下文 |
 
 Rust 本体（`examples/upper` 等 5 个既有示例）不在本轮范围内，由
@@ -91,13 +99,52 @@ C / C++ / Python / JS / TS 一次通过（C++ 的垫片仍在），Go 仍须显�
 `extension` world，语义一字未动——**重建是版本门禁的要求**（导出名里带版本，
 旧产物必被拒载），不是矩阵本身出了变化。
 
+**0.7.0 复验（2026-09-29）**：本轮与前五轮**性质不同**——0.7.0 把
+`tools.definitions` / `tools.execute` 改成 `async func`（同步降低的导出既
+不能等待、也不驱动 `spawn` 出的任务，见 docs/wit-redesign.md §5），于是
+「这语言能不能写扩展」第一次卡在**工具链能不能生成 async 导出**上，而不是
+语言本身。六格重建结果分两档：
+
+- **通过（真加载验收）**：C（`c_upper.wasm` 22.4 KB，`wit-bindgen c` 的
+  async 导出是回调 ABI，手写可得）与 Python（`py_upper.wasm` 19.7 MB，
+  生成器直接出 `async def`）。两条都跑出本文要求的两行 transcript。
+- **工具链缺口（源码已改到 0.7.0 形状、本轮无新产物）**：C++（生成器不生成
+  这两个导出）、JavaScript / TypeScript（jco splicer 无 async 导出）、
+  Go（运行时缺 `runtime.wasiOnIdle`）。各格原始报错逐字记在下文对应节里
+  ——下一轮先看这几个字符串有没有变。
+
+**target/ 里那四格仍放着 0.6.0 的产物**（Sep 28 构建），0.7.0 宿主按名拒载。
+本轮实测（拿 `js_upper.wasm` 喂 0.7.0 宿主）：
+
+```
+Error: loading examples/js-upper/target/js_upper.wasm
+
+Caused by:
+    extension examples/js-upper/target/js_upper.wasm: instantiation failed (does it
+    import capabilities the host does not grant?): component imports instance
+    `tau:extension/host@0.6.0`, but a matching implementation was not found in the
+    linker (function implementation is missing) [component targets
+    tau:extension@0.6.0; this host requires @0.7.0; rebuild with the 0.7.0 bindings
+    (wit/tau.wit), see CHANGELOG.md]
+```
+
+版本门禁两个方向都硬（0.4.0 轮已留过反向实录），所以**「产物还在」不等于
+「能跑」**：矩阵的 ✅ 只在被重建的那一轮成立。
+
 ## C —— 零依赖 freestanding 路线
 
 不需要任何 wasi sysroot：clang 直出 freestanding 核心模块
 （`--target=wasm32-unknown-unknown -nostdlib -mexec-model=reactor
 -Wl,--no-entry`），`src/shim.c` 提供最小 libc（1 MiB arena first-fit
 分配器 + mem*/str*），`wit-bindgen c` 生成绑定，`wasm-tools component new`
-包装成组件。产物不 import 任何 WASI 接口，7 KB。
+包装成组件。产物不 import 任何 WASI 接口（0.6.0 时 8.0 KB）。
+
+**0.7.0**：`tools.definitions` / `tools.execute` 是 async 导出，
+`wit-bindgen c` 给的形状是**回调 ABI**——导出把答案交给
+`exports_…_return(ret)`，再返回 `EXTENSION_CALLBACK_CODE_EXIT`；另有一对
+`…_callback` 函数，本示例从不等待，它们只是「没有要续的事」的答案。
+`probes` 仍是同步导出，但签名类型化（`point` enum + `payload` variant +
+`verdict`）。产物 22.4 KB，多出来的部分是类型化载荷的编解码。
 
 ## C++ —— 同一路线加最小 std 垫片
 
@@ -126,6 +173,23 @@ wit-bindgen 0.62 重建报同一个错，缺口的时点是「生成器要值形
 构建不出来。同族教训见
 `LESSON_契约版本升级后示例夹具须先重建再跑测试_版本拒绝报错点名修复`。
 
+**0.7.0 复验缺口（本轮，工具链事实）**：`wit-bindgen cpp` 0.62 没有
+async 导出的实现（`FunctionKind::AsyncFreestanding`、`AbiVariant::GuestExportAsync`
+等 7 处 `todo!()`，见 registry 里 `wit-bindgen-cpp-0.62.0/src/lib.rs`），生成的
+`gen/extension_cpp.h` 里 `exports::tau::extension::tools` 命名空间**没有**
+`Definitions` / `Execute` 两个声明（同一份 WIT 的同步 `probes` 正常生成，类型也
+已是 0.7.0 的 `Point` / `Payload` / `Verdict`），于是 `clang++` 报：
+
+```
+src/upper.cpp:61:39: error: out-of-line definition of 'Definitions' does not match
+  any declaration in namespace 'exports::tau::extension::tools'
+src/upper.cpp:71:26: error: out-of-line definition of 'Execute' does not match any
+  declaration in namespace 'exports::tau::extension::tools'
+```
+
+缺的是**声明**不是标准库，垫片补不了。源码已改到 0.7.0 形状并保留，等生成器
+跟上后重建即可。
+
 ## Python —— componentize-py 的类命名契约
 
 ```bash
@@ -141,6 +205,10 @@ app 模块里必须定义名字恰为 `Tools` / `Hooks` 的类，分别继承
 `/world/wit_world`，`-p src` 一个路径即可，不需要本地预生成绑定。
 产物 18.4 MB（内嵌 CPython 运行时）。
 
+**0.7.0**：`definitions` / `execute` 写成 `async def`（生成器就是这么声明的；
+同步降低的导出不能等待），`points()` / `probe()` 保持同步但类型化——
+`Point` 值进、`Verdict_Continue()` 出，不再拼 JSON 字符串。产物 19.7 MB。
+
 ## JavaScript / TypeScript —— jco（StarlingMonkey）
 
 ```bash
@@ -155,6 +223,14 @@ kebab-case → camelCase（`parametersJson`、`isError`），action enum →
 **必须 `--disable http fetch-event`**：否则 StarlingMonkey 默认链接
 `wasi:http/types@0.2.10`，tau 的 ambient-WASI linker 不提供该接口，
 实例化直接失败。产物 12.8 MB（内嵌 SpiderMonkey）。
+
+**0.7.0 阻塞**：jco 1.35 的 splicer 不支持 async 导出——
+`spidermonkey-embedding-splicer/src/bindgen.rs:506: not yet implemented`，
+外层是 `(jco componentize) RuntimeError: unreachable`。用最小 WIT（一个同步
+导出 + 一个 async 导出，其余全砍）二分确认：同步导出能构建、换成 async 就
+panic ⇒ 与 tau 的契约形状无关，是 splicer 的实现缺口。源码已改到 0.7.0 形状
+（`async definitions` / `async execute`、`probe` 返回 `{ tag: "continue" }`）
+并保留。
 
 ## Go —— TinyGo core-module 路线（四处补丁 + reactor 构建模式）
 
@@ -198,6 +274,23 @@ asyncify 调度器不可关：`scheduler=none` 下 reactor 入口里的
 scheduler"）。另外 TinyGo 的 `-target=wasip2` 不会 lift 自定义导出
 （留在核心层），所以走 core-module + embed + adapt 路线。
 
+**0.7.0 阻塞**：`wit-bindgen go` 0.62 会为 async 导出生成胶水
+（`witAsync.Run` + `[callback]` + `[task-return]`，见 `wit_exports.go`），TinyGo
+侧**编译通过**，但 vendored `go.bytecodealliance.org/pkg`（v0.2.3）的 async 支持
+里写着 `//go:linkname wasiOnIdle runtime.wasiOnIdle`，而该包自己的注释说明它
+「不是 upstream Go 的一部分，需要这个 patch（dicej/go@40fc123）」；TinyGo 0.42.0
+的 runtime 里没有这个符号（`src/runtime/` 里只有 `sleepTicks` / `waitForEvents`），
+于是链接期报：
+
+```
+wasm-ld: error: main.lto..o: undefined symbol: runtime.wasiOnIdle
+```
+
+这个钩子的语义是「调度器无事可做时通知宿主交还控制权」，**不是能垫空的 stub**
+（垫成空函数会让 `Run` 永远阻塞在 `<-state.channel` 上）。本格记为 ❌，等 TinyGo
+的 runtime 提供该钩子再重建。两个 `impl.go`（`Points` / `Probe` 的类型化签名）
+已改到 0.7.0 形状并编译通过。
+
 ## Java —— 今天无可用路径（权威依据）
 
 1. **wit-bindgen 0.62.0 没有 java 生成器。** `wit-bindgen --help` 的
@@ -222,7 +315,7 @@ wasm-tools 1.259.0、clang/clang++ 22.1.8、componentize-py 0.25.1
 （0.17.2 亦验证通过，机制相同）、jco 1.35.0 + node v22.14.0、
 TinyGo 0.42.0 + go 1.25.7 + Binaryen 133、
 wasi-preview1-component-adapter-provider 48.0.3（reactor adapter）。
-六条跑通路线的 transcript 尾部一致：
+六条跑通路线的 transcript 尾部一致（**0.7.0 起只剩 C / Python 两条**，见上文 0.7.0 复验）：
 
 ```
 [tau] loaded extension: <lang>_upper

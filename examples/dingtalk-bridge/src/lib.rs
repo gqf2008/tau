@@ -8,20 +8,26 @@
 //!    CALLBACK frame ON THE SAME ws connection
 //!    (`{"code":200,"headers":{...},"message":"OK","data":...}`) — an
 //!    unacked frame is redelivered by the platform. The feishu loopback
-//!    never sends; this is the first real `ws::send` user.
+//!    never sends; this is the first real `ws.send` user.
 //! 2. **double-encoded JSON**: the frame's `data` field is a STRING
 //!    holding escaped JSON — decode the outer frame, unescape `data`,
 //!    then parse the inner message body (`msgtype`/`text.content`/
 //!    `senderStaffId`).
 //!
 //! - inbound: `session_start` opens the ws long connection
-//!   (TAU_MCP_URL; origin consent via --mcp-url); later probe call
-//!   points drain frames (the synchronous-guest pump, same semantics
-//!   as feishu-bridge), ack the CALLBACK, steer the inner text into
-//!   the session (consent: --allow-inject).
+//!   (TAU_MCP_URL; origin consent via --mcp-url); later call points
+//!   drain frames, ack the CALLBACK, steer the inner text into the
+//!   session (consent: --allow-inject).
 //! - outbound: `after_response` posts the assembled assistant text to
 //!   the robot send API shape (`{ws-origin}/reply`, same origin as the
 //!   ws consent).
+//!
+//! 0.7.0 shape: the connection is a resource, the ack is an awaited
+//! `send` (so "sent" means on the wire — print mode may exit right after
+//! this call), and the whole waiting half lives in `bridge-io.turn`,
+//! because a synchronously lowered export cannot await anything
+//! (docs/wit-redesign.md section 5). The drain itself never waits:
+//! `ws.connection.poll` returns what has arrived.
 //!
 //! Honestly NOT simulated (recorded in the doc): the gateway handshake
 //! (POST /v1.0/gateway/connections exchanges credentials for the wss
@@ -41,26 +47,22 @@ wit_bindgen::generate!({
     world: "bridge",
 });
 
-use std::sync::Mutex;
+use std::cell::RefCell;
 
-use exports::tau::extension::ingress_handler::{
-    Guest as IngressHandler, Request, Response,
-};
-use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
+use exports::tau::extension::bridge_io::Guest as BridgeIo;
+use exports::tau::extension::ingress_handler::{Guest as IngressHandler, Request, Response};
+use exports::tau::extension::probes::{Guest as Probes, Payload, Point, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
-use tau::extension::types::{Content, Message, Role};
-use tau::extension::{host, http, ws};
+use tau::extension::host::{self, Level};
+use tau::extension::types::{Content, Error as HostError, Message, Role};
+use tau::extension::{http, ws};
 
-/// Budget for one network wait: a reply POST's response headers, or a ws
-/// connect's handshake. The platform answers in seconds, so this is
-/// generous already — it exists so a peer that accepts the connection and
-/// then says nothing fails loudly instead of hanging the bridge
-/// (wit-review F11).
-const NET_MS: u32 = 30_000;
-
+/// Adapter state. A `thread_local` cell since 0.7.0 (the connection is a
+/// resource, and the guest is single-threaded — the host serializes every
+/// export call on this instance, so a lock would only be uncontended).
 struct Adapter {
-    /// Open ws handle to the platform (None until session_start).
-    ws: Option<u64>,
+    /// Open connection to the platform (None until session_start).
+    connection: Option<ws::Connection>,
     /// The user an inbound message came from (echoed in the reply).
     user: Option<String>,
     /// A steered IM message is waiting for its assistant reply.
@@ -70,17 +72,31 @@ struct Adapter {
     steered: bool,
 }
 
-static ADAPTER: Mutex<Adapter> = Mutex::new(Adapter {
-    ws: None,
-    user: None,
-    awaiting_reply: false,
-    steered: false,
-});
+thread_local! {
+    static ADAPTER: RefCell<Adapter> = RefCell::new(Adapter {
+        connection: None,
+        user: None,
+        awaiting_reply: false,
+        steered: false,
+    });
+}
 
 struct DingtalkBridge;
 
-fn notify(level: &str, text: String) {
+/// One user-visible line (renderer draws it; never enters model history).
+fn say(level: Level, text: String) {
     let _ = host::notify(level, &[Content::Text(text)]);
+}
+
+/// A host error as one notice line: the typed kind picks the wording, the
+/// detail is the host's own sentence handed through verbatim (the contract
+/// says never to match on it, so this never does).
+fn host_error(verb: &str, error: HostError) -> String {
+    match error {
+        HostError::Refused(detail) => format!("{verb} refused: {detail}"),
+        HostError::Failed(detail) => format!("{verb} failed: {detail}"),
+        HostError::Invalid(detail) => format!("{verb} invalid: {detail}"),
+    }
 }
 
 /// Flat-JSON string extraction, escape-UNaware (fine for flat values —
@@ -156,37 +172,58 @@ fn reply_url(ws_url: &str) -> Option<String> {
     Some(format!("{httpish}://{authority}/reply"))
 }
 
-/// Drain one inbound frame: ack the CALLBACK on the same connection
-/// (the dingtalk increment #1), decode the double-encoded `data` (the
-/// increment #2), steer the inner text into the session. Runs at probe
-/// call points — the synchronous guest model means the pump only moves
-/// when the host calls us (docs/im-channels.md 同步 guest 模型下的入站泵).
-fn pump_inbound(adapter: &mut Adapter) {
-    if adapter.steered {
+/// Open the platform's long connection, once. The gateway handshake
+/// (endpoint+ticket exchange) only OBTAINS this URL — the loopback
+/// connects directly.
+async fn connect() {
+    if ADAPTER.with(|cell| cell.borrow().connection.is_some()) {
         return;
     }
-    let Some(handle) = adapter.ws else { return };
-    // One short-timeout recv per call point: no frame is normal (the
-    // platform is just quiet), a frame is drained and handled.
-    let frame = match ws::recv(handle, 1000) {
-        Ok(frame) => frame,
-        Err(_) => return,
-    };
-    let ws::Frame::Text(text) = frame else { return };
-    if json_get(&text, "type") != Some("CALLBACK") {
+    let url = std::env::var("TAU_MCP_URL").unwrap_or_default();
+    match ws::Connection::connect(url).await {
+        Ok(connection) => ADAPTER.with(|cell| cell.borrow_mut().connection = Some(connection)),
+        Err(error) => say(Level::Error, host_error("dingtalk: ws connect", error)),
+    }
+}
+
+/// Drain what the platform sent since the last call point: ack each
+/// CALLBACK frame and steer the inner text into the session. Never waits
+/// (`poll` returns what has arrived); the ack's `send` IS awaited, so
+/// "acked" means written to the socket — an unacked frame is redelivered
+/// by the platform, and redelivery would re-steer the message.
+async fn pump_inbound(connection: &ws::Connection) {
+    if ADAPTER.with(|cell| cell.borrow().steered) {
         return;
+    }
+    let frames = match connection.poll() {
+        Ok(frames) => frames,
+        Err(error) => return say(Level::Warn, host_error("dingtalk: ws poll", error)),
+    };
+    for frame in frames {
+        if handle_frame(connection, frame).await {
+            return;
+        }
+    }
+}
+
+/// Handle one drained frame. Returns true when it was a CALLBACK this pump
+/// is done with (acked and steered, or noted and dropped).
+async fn handle_frame(connection: &ws::Connection, frame: ws::Frame) -> bool {
+    let ws::Frame::Text(text) = frame else { return false };
+    if json_get(&text, "type") != Some("CALLBACK") {
+        return false;
     }
     // Ack FIRST, on the same connection — an unacked frame is
     // redelivered, and redelivery would re-steer the message.
     let ack = "{\"code\":200,\"headers\":{\"contentType\":\"application/json\"},\"message\":\"OK\",\"data\":\"{}\"}";
-    if let Err(e) = ws::send(handle, &ws::Frame::Text(ack.to_string())) {
-        notify("error", format!("dingtalk: ack send failed: {e}"));
-        return;
+    if let Err(error) = connection.send(ws::Frame::Text(ack.to_string())).await {
+        say(Level::Error, host_error("dingtalk: ack send", error));
+        return false;
     }
     // `data` is a string holding escaped JSON — decode the second layer.
-    let Some(inner) = json_get_escaped(&text, "data") else { return };
+    let Some(inner) = json_get_escaped(&text, "data") else { return false };
     if json_get(&inner, "msgtype") != Some("text") {
-        return; // cards/rich media: beyond the text loopback (doc says so)
+        return true; // cards/rich media: beyond the text loopback (doc says so)
     }
     // The inner body is flat JSON once `data` is unescaped;
     // "content" (inside the text object) appears exactly once — the
@@ -195,71 +232,78 @@ fn pump_inbound(adapter: &mut Adapter) {
         json_get(&inner, "senderStaffId"),
         json_get(&inner, "content"),
     ) else {
-        return;
+        return false;
     };
-    let message = Message {
-        role: Role::User,
-        content: vec![Content::Text(format!("[IM dingtalk {user}] {body}"))],
-    };
-    match host::steer(&message) {
-        Ok(()) => {
-            adapter.user = Some(user.to_string());
-            adapter.awaiting_reply = true;
-            adapter.steered = true;
-            notify(
-                "info",
-                format!("dingtalk: inbound message from {user} acked and steered into the session"),
-            );
+    let notice = ADAPTER.with(|cell| {
+        let mut adapter = cell.borrow_mut();
+        let message = Message {
+            role: Role::User,
+            content: vec![Content::Text(format!("[IM dingtalk {user}] {body}"))],
+        };
+        match host::steer(&message) {
+            Ok(()) => {
+                adapter.user = Some(user.to_string());
+                adapter.awaiting_reply = true;
+                adapter.steered = true;
+                (
+                    Level::Info,
+                    format!("dingtalk: inbound message from {user} acked and steered into the session"),
+                )
+            }
+            // A refused steer leaves `awaiting_reply` false, so no reply
+            // can leave over a channel the user did not consent to.
+            Err(error) => (Level::Error, host_error("dingtalk: steer", error)),
         }
-        Err(e) => notify("error", format!("dingtalk: steer refused: {e}")),
-    }
+    });
+    let (level, line) = notice;
+    say(level, line);
+    true
 }
 
-/// Post the assembled assistant message back over the robot send API
-/// shape (same origin as the ws consent).
-fn post_reply(adapter: &mut Adapter, payload_json: &str) {
-    if !adapter.awaiting_reply {
-        return;
-    }
-    let (Some(user), Some(ws_url)) = (
-        adapter.user.clone(),
-        std::env::var("TAU_MCP_URL").ok(),
-    ) else {
-        return;
-    };
-    // The assistant text block: the message's first "text" member (the
-    // Content wire shape serializes the field before the "type" tag).
-    let Some(text) = json_get(payload_json, "text") else {
-        return;
-    };
-    let Some(url) = reply_url(&ws_url) else {
-        notify("error", format!("dingtalk: cannot derive reply URL from {ws_url}"));
-        return;
-    };
-    let body = format!("{{\"user\":\"{user}\",\"text\":\"{text}\"}}");
-    match http::request(
-        "POST",
-        &url,
-        &[("content-type".to_string(), "application/json".to_string())],
-        &body.into_bytes(),
-        NET_MS,
-    ) {
-        Ok(h) => {
-            let _ = http::status(h);
-            http::close(h);
-            adapter.awaiting_reply = false;
-            notify("info", format!("dingtalk: reply posted to {user}"));
+/// Post the assembled assistant text back over the robot send API shape
+/// (same origin as the ws consent). The text is the typed payload's first
+/// text block — 0.6.0 scraped the JSON payload for one.
+async fn post_reply(payload: &Payload) {
+    let pending = ADAPTER.with(|cell| {
+        let adapter = cell.borrow();
+        adapter.awaiting_reply.then(|| adapter.user.clone()).flatten()
+    });
+    let Some(user) = pending else { return };
+    let text = match payload {
+        Payload::AfterResponse(response) => {
+            response.message.content.iter().find_map(|block| match block {
+                Content::Text(text) => Some(text.clone()),
+                _ => None,
+            })
         }
-        Err(e) => notify("error", format!("dingtalk: reply POST failed: {e}")),
+        _ => None,
+    };
+    let Some(text) = text else { return };
+    let Some(ws_url) = std::env::var("TAU_MCP_URL").ok() else { return };
+    let Some(url) = reply_url(&ws_url) else {
+        return say(Level::Error, format!("dingtalk: cannot derive reply URL from {ws_url}"));
+    };
+    // The body is built as JSON rather than interpolated: assistant text
+    // routinely contains quotes and newlines.
+    let body = serde_json::json!({ "user": user, "text": text }).to_string();
+    let headers = vec![("content-type".to_string(), "application/json".to_string())];
+    match http::request("POST".to_string(), url, headers, body.into_bytes()).await {
+        Ok(response) => {
+            let _ = response.status();
+            drop(response); // dropping closes the connection
+            ADAPTER.with(|cell| cell.borrow_mut().awaiting_reply = false);
+            say(Level::Info, format!("dingtalk: reply posted to {user}"));
+        }
+        Err(error) => say(Level::Error, host_error("dingtalk: reply POST", error)),
     }
 }
 
 impl Tools for DingtalkBridge {
-    fn definitions() -> Vec<Definition> {
+    async fn definitions() -> Vec<Definition> {
         Vec::new()
     }
 
-    fn execute(name: String, _arguments_json: String) -> ToolResult {
+    async fn execute(name: String, _arguments_json: String) -> ToolResult {
         ToolResult {
             content: vec![tau::extension::types::ResultBlock::Text(format!(
                 "unknown tool: {name}"
@@ -270,36 +314,39 @@ impl Tools for DingtalkBridge {
 }
 
 impl Probes for DingtalkBridge {
-    fn points() -> Vec<String> {
-        vec!["session_start".into(), "after_response".into()]
+    fn points() -> Vec<Point> {
+        vec![Point::SessionStart, Point::AfterResponse]
     }
 
-    fn probe(point: String, payload_json: String) -> Verdict {
-        let mut adapter = ADAPTER.lock().unwrap_or_else(|e| e.into_inner());
-        match point.as_str() {
-            "session_start" => {
-                // Open the ws long connection to the platform. The
-                // gateway handshake (endpoint+ticket exchange) only
-                // OBTAINS this URL — the loopback connects directly.
-                let url = std::env::var("TAU_MCP_URL").unwrap_or_default();
-                match ws::connect(&url, NET_MS) {
-                    Ok(handle) => adapter.ws = Some(handle),
-                    Err(e) => notify("error", format!("dingtalk: ws connect failed: {e}")),
+    /// Neither point is a decision for this adapter — everything it does
+    /// at them is I/O that waits (connect, ack, post), which no
+    /// synchronously lowered export can do. The probe answers `continue`
+    /// and the work rides `turn`; declaring the points is what makes the
+    /// host call it.
+    fn probe(_point: Point, _payload: Payload) -> Verdict {
+        Verdict::Continue
+    }
+}
+
+impl BridgeIo for DingtalkBridge {
+    async fn turn(point: Point, payload: Payload) {
+        match point {
+            Point::SessionStart => connect().await,
+            Point::AfterResponse => {
+                // The connection is taken out for the awaits (a borrow
+                // cannot be held across them) and put back whatever
+                // happens — dropping it would close the connection.
+                let connection = ADAPTER.with(|cell| cell.borrow_mut().connection.take());
+                if let Some(connection) = connection.as_ref() {
+                    // Drain first (an inbound frame may be waiting), then
+                    // reply if a steered message is outstanding — the pump
+                    // order that makes the loopback close within one turn.
+                    pump_inbound(connection).await;
+                    post_reply(&payload).await;
                 }
-            }
-            "after_response" => {
-                // Drain first (an inbound frame may be waiting), then
-                // reply if a steered message is outstanding — the pump
-                // order that makes the loopback close within one turn.
-                pump_inbound(&mut adapter);
-                post_reply(&mut adapter, &payload_json);
+                ADAPTER.with(|cell| cell.borrow_mut().connection = connection);
             }
             _ => {}
-        }
-        Verdict {
-            action: Action::Continue,
-            payload_json: None,
-            reason: None,
         }
     }
 }
@@ -307,7 +354,7 @@ impl Probes for DingtalkBridge {
 /// No webhook leg (钉钉 stream is a client connection, not a callback)
 /// — the contract makes the export mandatory, so it stubs 501.
 impl IngressHandler for DingtalkBridge {
-    fn handle_request(_request: Request) -> Response {
+    async fn handle_request(_request: Request) -> Response {
         Response {
             status: 501,
             headers: Vec::new(),

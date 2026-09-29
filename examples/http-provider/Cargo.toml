@@ -8,7 +8,6 @@ description = "Example tau wasm provider: fetches a URL over consent-gated http"
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "0.46"
-serde_json = "1"
+wit-bindgen = { version = "0.62", features = ["async-spawn"] }
 
 [workspace]

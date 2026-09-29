@@ -13,6 +13,18 @@
 # patch_tinygo.py fixes TinyGo-incompatible bits in the generated code
 # (runtime.Pinner / AddCleanup / sbrk linkname / pre-heap GC allocs —
 # see the script).
+#
+# 0.7.0 BLOCKER (2026-09-29): the contract's tools.definitions / tools.execute
+# are `async func`, and `wit-bindgen go` 0.62 emits async glue for them
+# (witAsync.Run + [callback] + [task-return] in wit_exports.go). That glue
+# pull-linknames runtime.wasiOnIdle, which the vendored
+# go.bytecodealliance.org/pkg async support documents as requiring a patched
+# Go runtime (dicej/go@40fc123); TinyGo 0.42.0 has no such symbol, so the
+# link fails with `undefined symbol: runtime.wasiOnIdle`. A stub is not an
+# option (Run would block on <-state.channel forever) — it has to come from
+# the runtime. The two impl.go files (export_tau_extension_tools/,
+# export_tau_extension_probes/) are already 0.7.0-shaped (typed
+# Point/Payload/Verdict) and compile; only the link is missing.
 set -euo pipefail
 cd "$(dirname "$0")"
 TINYGO="${TINYGO:-tinygo}"

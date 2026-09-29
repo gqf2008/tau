@@ -8,6 +8,7 @@ description = "Example tau bridge: dingtalk-shaped IM adapter — ws stream inbo
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "0.46"
+wit-bindgen = "0.62"
+serde_json = "1"
 
 [workspace]

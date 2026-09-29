@@ -1,4 +1,9 @@
 // Implementation of tau:extension/tools for the Go upper example.
+//
+// 0.7.0: `definitions` and `execute` are `async func`s, so the generated
+// glue wraps each call in `witAsync.Run` (TinyGo's asyncify scheduler
+// carries the suspension). This example awaits nothing, so the bodies
+// below are ordinary functions.
 package export_tau_extension_tools
 
 import (

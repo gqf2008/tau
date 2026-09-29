@@ -8,6 +8,6 @@ description = "Example tau extension: a tool that returns a media block (a 1x1 P
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "0.46"
+wit-bindgen = "0.62"
 
 [workspace]

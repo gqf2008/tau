@@ -1,5 +1,5 @@
 //! Example tau extension exercising the high-frequency stream
-//! subscription (tau:extension@0.6.0, docs/stream-subscribe.md — F2's
+//! subscription (tau:extension@0.7.0, docs/stream-subscribe.md — F2's
 //! high-frequency observation leg): at `session_start` it subscribes to
 //! `text-delta`; at `before_run_end` it polls the backlog and notifies
 //! what it saw. The guest pulls — the host never calls into the
@@ -18,25 +18,42 @@ wit_bindgen::generate!({
     world: "extension",
 });
 
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::cell::RefCell;
 
-use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
+use exports::tau::extension::probes::{Guest as Probes, Payload, Point, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
-use tau::extension::host::{self, StreamEvent};
-use tau::extension::types::Content;
+use tau::extension::host::{self, Level, StreamEvent, Subscription, Topic};
+use tau::extension::types::{Content, Error as HostError};
 
-/// The subscription handle, or u64::MAX before `session_start` wires it.
-/// Guests are single-threaded; an atomic is the simplest shared cell.
-static SUBSCRIPTION: AtomicU64 = AtomicU64::new(u64::MAX);
+thread_local! {
+    /// The subscription opened at `session_start`. A resource since
+    /// 0.7.0: the guest owns it, and replacing it drops the old one —
+    /// dropping IS the unsubscribe (0.6.0 kept a u64 handle in an atomic
+    /// and closed it explicitly). Guests are single-threaded; the cell is
+    /// only ever touched from a probe call.
+    static SUBSCRIPTION: RefCell<Option<Subscription>> = const { RefCell::new(None) };
+}
+
+/// A host error as one line: the typed kind picks the wording (the contract
+/// says the variant is what a guest branches on), the detail is the host's
+/// own sentence handed through verbatim. `{e}` would print the Debug form
+/// of the variant, which is not a sentence.
+fn host_error(verb: &str, error: HostError) -> String {
+    match error {
+        HostError::Refused(detail) => format!("{verb} refused: {detail}"),
+        HostError::Failed(detail) => format!("{verb} failed: {detail}"),
+        HostError::Invalid(detail) => format!("{verb} invalid: {detail}"),
+    }
+}
 
 struct Streamer;
 
 impl Tools for Streamer {
-    fn definitions() -> Vec<Definition> {
+    async fn definitions() -> Vec<Definition> {
         Vec::new()
     }
 
-    fn execute(name: String, _arguments_json: String) -> ToolResult {
+    async fn execute(name: String, _arguments_json: String) -> ToolResult {
         ToolResult {
             content: vec![tau::extension::types::ResultBlock::Text(format!(
                 "unknown tool: {name}"
@@ -47,26 +64,28 @@ impl Tools for Streamer {
 }
 
 impl Probes for Streamer {
-    fn points() -> Vec<String> {
-        vec!["session_start".into(), "before_run_end".into()]
+    fn points() -> Vec<Point> {
+        vec![Point::SessionStart, Point::BeforeRunEnd]
     }
 
-    fn probe(point: String, _payload_json: String) -> Verdict {
-        match point.as_str() {
-            "session_start" => match host::subscribe(&["text-delta".to_string()]) {
-                Ok(handle) => SUBSCRIPTION.store(handle, Ordering::Relaxed),
+    fn probe(_point: Point, payload: Payload) -> Verdict {
+        match payload {
+            Payload::SessionStart(_) => match host::subscribe(&[Topic::TextDelta]) {
+                Ok(subscription) => {
+                    SUBSCRIPTION.with(|cell| *cell.borrow_mut() = Some(subscription));
+                }
                 Err(e) => {
                     let _ = host::notify(
-                        "warn",
-                        &[Content::Text(format!("stream subscribe refused: {e}"))],
+                        Level::Warn,
+                        &[Content::Text(host_error("stream subscribe", e))],
                     );
                 }
             },
-            "before_run_end" => {
-                let handle = SUBSCRIPTION.load(Ordering::Relaxed);
-                if handle != u64::MAX
-                    && let Ok(events) = host::poll(handle)
-                {
+            Payload::BeforeRunEnd(_) => {
+                let events = SUBSCRIPTION.with(|cell| {
+                    cell.borrow().as_ref().map(Subscription::poll)
+                });
+                if let Some(events) = events {
                     let mut deltas = 0u64;
                     let mut chars = 0usize;
                     let mut lagged = 0u64;
@@ -86,7 +105,7 @@ impl Probes for Streamer {
                         String::new()
                     };
                     let _ = host::notify(
-                        "info",
+                        Level::Info,
                         &[Content::Text(format!(
                             "stream observed: {deltas} text deltas, {chars} chars{suffix}"
                         ))],
@@ -95,11 +114,7 @@ impl Probes for Streamer {
             }
             _ => {}
         }
-        Verdict {
-            action: Action::Continue,
-            payload_json: None,
-            reason: None,
-        }
+        Verdict::Continue
     }
 }
 

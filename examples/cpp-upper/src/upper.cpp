@@ -4,6 +4,15 @@
 //! ../c-upper/src/shim.c.
 //!
 //! Build: ./build.sh  (wit-bindgen + clang++ wasm32 + wasm-tools only)
+//!
+//! 0.7.0 断点（实测，docs/wasm-languages.md 语言矩阵）：`wit-bindgen cpp`
+//! 0.62 **不为 async 导出生成任何声明**（生成器里逐字是
+//! `FunctionKind::AsyncFreestanding => todo!()`，`AbiVariant::GuestExportAsync
+//! => todo!()`），而 0.7.0 的 `tools.definitions` / `tools.execute` 都是
+//! `async func`。因此本文件下方的 `tools::Definitions` / `tools::Execute`
+//! 在 0.7.0 契约下编译不过（头文件里没有对应声明），这一格在生成器补上
+//! 异步导出之前只能是 ❌。`probes` 仍是同步导出，已按 0.7.0 的类型化
+//! 形状更新（`Point` 枚举 + `Payload` variant）。
 
 #include "extension_cpp.h"
 
@@ -77,12 +86,12 @@ tools::ToolResult tools::Execute(wit::string name, wit::string arguments_json) {
     return ret;
 }
 
-wit::vector<wit::string> probes::Points() {
-    return wit::vector<wit::string>();
+wit::vector<probes::Point> probes::Points() {
+    return wit::vector<probes::Point>();
 }
 
-probes::Verdict probes::Probe(wit::string, wit::string) {
-    return {probes::Action::kContinue, std::nullopt, std::nullopt};
+probes::Verdict probes::Probe(probes::Point, probes::Payload) {
+    return {probes::Verdict::Continue{}};
 }
 
 } // namespace exports::tau::extension

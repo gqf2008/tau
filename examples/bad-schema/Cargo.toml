@@ -8,6 +8,6 @@ description = "Negative fixture: a tau extension whose parameters-json is invali
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "0.46"
+wit-bindgen = "0.62"
 
 [workspace]

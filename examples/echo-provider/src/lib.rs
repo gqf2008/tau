@@ -1,22 +1,31 @@
 //! Example tau provider component: no network, echoes the last user
-//! message back word by word through the push channel (events.emit).
-//! Keywords: "probe" reports the received request's length + checksum,
-//! "env NAME" probes the WASI env policy, "audio" emits audio deltas.
+//! message back word by word through the request's event stream.
+//! Keywords: "probe" reports the media bytes it received (length +
+//! checksum), "env NAME" probes the WASI env policy, "audio" emits audio
+//! deltas.
+//!
+//! 0.7.0 turned the push channel into a pull stream: `run` returns
+//! `(stream<event>, future<result<(), error>>)` instead of the component
+//! calling `events.emit`. The guest keeps the writer, hands the host the
+//! reader, and the write awaits when the host is slow — backpressure
+//! instead of a dropped-buffer compromise. When the host hangs up early
+//! (a cancellation), the next write returns the unwritten value.
 //!
 //! Build:
 //!   cargo build --manifest-path examples/echo-provider/Cargo.toml \
 //!       --target wasm32-wasip2 --release
 //! Use:
 //!   tau --provider-wasm examples/echo-provider/target/wasm32-wasip2/release/echo_provider.wasm \
-//!       --model echo -p "hello push mode"
+//!       --model echo -p "hello pull mode"
 
 wit_bindgen::generate!({
     path: "../../wit/tau.wit",
     world: "provider",
 });
 
-use exports::tau::extension::models::{Guest, Info};
-use tau::extension::events::{self, AudioDelta, ModelEvent, StopReason};
+use exports::tau::extension::models::{AudioDelta, Event, Guest, Info, Request};
+use tau::extension::types::{Content, Error, MediaSource, Role, StopReason};
+use wit_bindgen::rt::async_support::{FutureReader, StreamReader, spawn_local};
 
 struct Echo;
 
@@ -30,84 +39,128 @@ impl Guest for Echo {
         }]
     }
 
-    fn run(request_json: String) {
-        let parsed: Result<serde_json::Value, _> = serde_json::from_str(&request_json);
-        let last_user_text = parsed
-            .ok()
-            .and_then(|req| {
-                req["messages"].as_array().and_then(|messages| {
-                    messages.iter().rev().find_map(|m| {
-                        (m["role"].as_str() == Some("user")).then(|| {
-                            m["content"]
-                                .as_array()
-                                .and_then(|c| c.first())
-                                .and_then(|b| b["text"].as_str().map(str::to_string))
-                        })
-                    })
-                })
-            })
-            .flatten();
-
-        match last_user_text {
-            // "probe" reports what the guest actually received: the byte
-            // length and a FNV-1a checksum of the whole request JSON.
-            // The host-side test recomputes both over the exact string it
-            // sent, so truncation or corruption at the component boundary
-            // (multi-MiB media inflates the JSON far past the usual few
-            // KiB) shows up as a mismatch.
-            Some(text) if text == "probe" => {
-                emit(ModelEvent::TextDelta(format!(
-                    "probe bytes={} fnv1a={:016x}",
-                    request_json.len(),
-                    fnv1a(request_json.as_bytes()),
-                )));
-                emit(ModelEvent::Done(StopReason::Stop));
-            }
-            // "env NAME" reports whether the ambient env var is visible —
-            // demos the host's WASI policy (allow-all inherits, deny-all
-            // sees nothing).
-            Some(text) if text.starts_with("env ") => {
-                let name = text.trim_start_matches("env ").trim();
-                let value = std::env::var(name).unwrap_or_default();
-                emit(ModelEvent::TextDelta(format!("{name}={value}")));
-                emit(ModelEvent::Done(StopReason::Stop));
-            }
-            // "audio …" demos the realtime-style channel: two audio
-            // chunks then a text note.
-            Some(text) if text.starts_with("audio") => {
-                // Typed in 0.2.0: raw bytes cross the ABI, no base64.
-                for data in [vec![1u8, 2, 3], vec![4u8, 5]] {
-                    emit(ModelEvent::AudioDelta(AudioDelta {
-                        data,
-                        media_type: "audio/pcm;rate=24000".into(),
-                    }));
+    /// The typed request replaces 0.6.0's JSON parse: the last user
+    /// message's first text block is the prompt.
+    async fn run(request: Request) -> (StreamReader<Event>, FutureReader<Result<(), Error>>) {
+        let (mut events, events_rx) = wit_stream::new::<Event>();
+        let (verdict, verdict_rx) = wit_future::new::<Result<(), Error>>(|| Ok(()));
+        spawn_local(async move {
+            // The writer must live under an async export for `spawn_local`
+            // to be scheduled at all (docs/wit-redesign.md §5, leg 1b/1d):
+            // `run` is `async func`, so this task is driven.
+            let mut hung_up = None;
+            for event in respond(&request) {
+                if events.write_one(event).await.is_some() {
+                    // The host dropped the read end: a refusal or a
+                    // cancellation. Nothing is left to deliver.
+                    hung_up = Some(Error::Failed(
+                        "the host stopped reading the event stream".into(),
+                    ));
+                    break;
                 }
-                emit(ModelEvent::TextDelta("(two audio chunks emitted)".into()));
-                emit(ModelEvent::Done(StopReason::Stop));
             }
-            Some(text) => {
-                for word in text.split_inclusive(' ') {
-                    emit(ModelEvent::TextDelta(word.to_string()));
-                }
-                emit(ModelEvent::Done(StopReason::Stop));
-            }
-            None => {
-                emit(ModelEvent::Error(
-                    "no user message found in request".into(),
-                ));
-                emit(ModelEvent::Done(StopReason::Error));
-            }
-        }
+            // Dropping the writer ends the stream — the normal terminator
+            // after `done`/`error`, and harmless after a hang-up.
+            drop(events);
+            let value = match hung_up {
+                Some(error) => Err(error),
+                None => Ok(()),
+            };
+            let _ = verdict.write(value).await;
+        });
+        (events_rx, verdict_rx)
     }
 }
 
-/// Push one event. `emit` returns a result in 0.2.0: a host-side
-/// rejection is loud on the guest's inherited stderr instead of
-/// vanishing into a silent skip.
-fn emit(event: ModelEvent) {
-    if let Err(e) = events::emit(&event) {
-        eprintln!("echo-provider: host rejected event: {e}");
+/// The whole response as an ordered event list. Small by construction:
+/// this provider has nothing to wait for.
+fn respond(request: &Request) -> Vec<Event> {
+    let Some(text) = last_user_text(request) else {
+        return vec![
+            Event::Error("no user message found in request".into()),
+            Event::Done(StopReason::Error),
+        ];
+    };
+
+    // "probe" reports what the guest actually received: the byte length
+    // and FNV-1a checksum of every inline media byte, in order. The
+    // host-side test recomputes both over the very bytes it sent, so
+    // truncation or corruption at the component boundary (multi-MiB
+    // media in one message) shows up as a mismatch.
+    if text == "probe" {
+        let bytes = media_bytes(request);
+        return vec![
+            Event::TextDelta(format!("probe bytes={} fnv1a={:016x}", bytes.len(), fnv1a(&bytes))),
+            Event::Done(StopReason::Stop),
+        ];
     }
+
+    // "env NAME" reports whether the ambient env var is visible — demos
+    // the host's WASI policy (allow-all inherits, deny-all sees nothing).
+    if let Some(name) = text.strip_prefix("env ") {
+        let name = name.trim();
+        let value = std::env::var(name).unwrap_or_default();
+        return vec![
+            Event::TextDelta(format!("{name}={value}")),
+            Event::Done(StopReason::Stop),
+        ];
+    }
+
+    // "audio …" demos the realtime-style channel: two audio chunks then a
+    // text note.
+    if text.starts_with("audio") {
+        let mut events = Vec::new();
+        for data in [vec![1u8, 2, 3], vec![4u8, 5]] {
+            events.push(Event::AudioDelta(AudioDelta {
+                data,
+                media_type: "audio/pcm;rate=24000".into(),
+            }));
+        }
+        events.push(Event::TextDelta("(two audio chunks emitted)".into()));
+        events.push(Event::Done(StopReason::Stop));
+        return events;
+    }
+
+    let mut events: Vec<Event> = text
+        .split_inclusive(' ')
+        .map(|word| Event::TextDelta(word.to_string()))
+        .collect();
+    events.push(Event::Done(StopReason::Stop));
+    events
+}
+
+/// The last user message's first text block.
+fn last_user_text(request: &Request) -> Option<String> {
+    request
+        .messages
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::User)
+        .and_then(|message| {
+            message.content.iter().find_map(|block| match block {
+                Content::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+        })
+}
+
+/// Every inline media byte in the request, in message/block order.
+/// Blob and URL references are not bytes and contribute nothing.
+fn media_bytes(request: &Request) -> Vec<u8> {
+    let mut out = Vec::new();
+    for message in &request.messages {
+        for block in &message.content {
+            let media = match block {
+                Content::Image(media) | Content::Audio(media) | Content::Video(media) => media,
+                Content::File(file) => &file.media,
+                _ => continue,
+            };
+            if let MediaSource::Bytes(bytes) = &media.source {
+                out.extend_from_slice(bytes);
+            }
+        }
+    }
+    out
 }
 
 /// FNV-1a 64-bit — dependency-free checksum for the "probe" keyword.

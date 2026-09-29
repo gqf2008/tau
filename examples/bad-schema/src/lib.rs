@@ -12,14 +12,14 @@ wit_bindgen::generate!({
     world: "extension",
 });
 
-use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
+use exports::tau::extension::probes::{Guest as Probes, Payload, Point, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
 use tau::extension::types::ResultBlock;
 
 struct BadSchema;
 
 impl Tools for BadSchema {
-    fn definitions() -> Vec<Definition> {
+    async fn definitions() -> Vec<Definition> {
         vec![Definition {
             name: "bad_schema".into(),
             description: "Declares an invalid parameters-json on purpose".into(),
@@ -27,7 +27,7 @@ impl Tools for BadSchema {
         }]
     }
 
-    fn execute(_name: String, _arguments_json: String) -> ToolResult {
+    async fn execute(_name: String, _arguments_json: String) -> ToolResult {
         ToolResult {
             content: vec![ResultBlock::Text("unreachable: the host refuses to load this component".into())],
             is_error: true,
@@ -36,16 +36,12 @@ impl Tools for BadSchema {
 }
 
 impl Probes for BadSchema {
-    fn points() -> Vec<String> {
+    fn points() -> Vec<Point> {
         Vec::new()
     }
 
-    fn probe(_point: String, _payload_json: String) -> Verdict {
-        Verdict {
-            action: Action::Continue,
-            payload_json: None,
-            reason: None,
-        }
+    fn probe(_point: Point, _payload: Payload) -> Verdict {
+        Verdict::Continue
     }
 }
 

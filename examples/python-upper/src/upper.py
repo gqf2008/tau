@@ -2,7 +2,14 @@
 examples/upper (Rust). Build: ./build.sh (componentize-py).
 
 The runtime discovers exported-interface implementations by module
-attribute name: `Tools` for tau:extension/tools, `Probes` for probes."""
+attribute name: `Tools` for tau:extension/tools, `Probes` for probes.
+
+0.7.0: `definitions` / `execute` are `async def` (the generated protocol
+says so — a synchronously lowered export cannot wait for anything, and a
+bridge's tool list lives on a remote server). This tool awaits nothing,
+so the `async` keyword is the whole change. The `probes` pair stays
+synchronous but is typed now: `points()` returns `Point` values and
+`probe()` answers with a `Verdict` variant — no JSON strings."""
 
 import json
 
@@ -11,7 +18,7 @@ from wit_world.imports.types import ResultBlock_Text
 
 
 class Tools(_exports.Tools):
-    def definitions(self):
+    async def definitions(self):
         return [
             _exports.tools.Definition(
                 name="upper",
@@ -20,7 +27,7 @@ class Tools(_exports.Tools):
             )
         ]
 
-    def execute(self, name, arguments_json):
+    async def execute(self, name, arguments_json):
         if name != "upper":
             return _exports.tools.ToolResult(
                 content=[ResultBlock_Text("unknown tool: " + name)], is_error=True
@@ -43,7 +50,5 @@ class Probes(_exports.Probes):
     def points(self):
         return []
 
-    def probe(self, point, payload_json):
-        return _exports.probes.Verdict(
-            action=_exports.probes.Action.CONTINUE, payload_json=None, reason=None
-        )
+    def probe(self, point, payload):
+        return _exports.probes.Verdict_Continue()

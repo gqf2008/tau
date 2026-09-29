@@ -1,11 +1,12 @@
 //! Example tau bridge: a feishu-shaped IM adapter (docs/im-channels.md),
-//! exercising all three legs of the bridge world since 0.3.0:
+//! exercising all three legs of the bridge world:
 //!
 //! - inbound: `session_start` opens the ws long connection (TAU_MCP_URL,
-//!   a ws(s) URL); later probe calls drain frames and `host::steer` the
-//!   IM message into the session (consent: --allow-inject). Components
-//!   only run when called — the pump rides existing probe call points,
-//!   the host's ws actor keeps the connection alive between them.
+//!   a ws(s) URL); later calls drain the frames the platform sent and
+//!   `host::steer` the IM message into the session (consent:
+//!   --allow-inject). Components only run when called — the pump rides
+//!   existing call points, and the host's ws actor keeps the connection
+//!   alive between them.
 //! - outbound: `after_response` posts the assembled assistant message
 //!   back over the origin-allowlisted `http` capability (the reply API,
 //!   derived from the ws URL: same origin, `/reply`).
@@ -14,6 +15,21 @@
 //!   TAU_IM_CONFIG via ambient WASI — endpoint cross-checked against the
 //!   consented TAU_MCP_URL, unknown chats ignored, users.allow is
 //!   fail-closed (identity is a consent question).
+//!
+//! 0.7.0 shape, and the shape this adapter is made of is now split in two
+//! on purpose: both of its obligations WAIT (`ws.connect` and
+//! `http.request` are `async func`s since 0.7.0), and a synchronously
+//! lowered export cannot await them — nor appoint a task to do it (a task
+//! spawned from a sync export is never polled; docs/wit-redesign.md
+//! section 5). So the waiting half lives in `bridge-io.turn`, the host
+//! calls it right after `probe` for the same point, and the sync probe
+//! stays what the contract says it is: the decision point. This adapter
+//! makes no decisions at either point, so its probe is `continue` — the
+//! points are declared to make the host call `turn`.
+//!
+//! The pump itself never waits: `ws.connection.poll` drains what has
+//! arrived and returns, which is what a pump must do (an awaited frame
+//! read would hold the run open on the platform's silence).
 //!
 //! Speaks the loopback protocol from docs/im-channels.md (JSON frames
 //! standing in for feishu's proprietary binary frames — the translation
@@ -31,16 +47,16 @@ wit_bindgen::generate!({
     world: "bridge",
 });
 
-use std::sync::Mutex;
+use std::cell::RefCell;
 
+use exports::tau::extension::bridge_io::Guest as BridgeIo;
 use exports::tau::extension::ingress_handler::{Guest as IngressHandler, Request, Response};
-use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
+use exports::tau::extension::probes::{Guest as Probes, Payload, Point, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
-use tau::extension::types::{Content, Message, Role};
-use tau::extension::{host, http, ws};
+use tau::extension::host::{self, Level};
+use tau::extension::types::{Content, Error as HostError, Message, Role};
+use tau::extension::{http, ws};
 
-/// Adapter state. Lives in statics because probe calls are plain
-/// function calls — there is no per-instance object on the guest side.
 /// The channel's slice of the mapping config (the channel whose
 /// `endpoint` equals the consented TAU_MCP_URL governs this run).
 struct ChannelConfig {
@@ -52,21 +68,18 @@ struct ChannelConfig {
     users_allow: Vec<String>,
 }
 
-/// Budget for one network wait: a reply POST's response headers, or a ws
-/// connect's handshake. The platform answers in seconds, so this is
-/// generous already — it exists so a peer that accepts the connection and
-/// then says nothing fails loudly instead of hanging the bridge
-/// (wit-review F11).
-const NET_MS: u32 = 30_000;
-
+/// Adapter state. A `thread_local` cell since 0.7.0 rather than the 0.6.0
+/// `Mutex` in a static: the connection is a resource now (not `Sync`), and
+/// the guest is single-threaded anyway — the host serializes every export
+/// call on this instance, so the lock would only ever be uncontended.
 struct Adapter {
-    /// Open ws handle to the platform (None until session_start).
-    ws: Option<u64>,
+    /// Open connection to the platform (None until session_start).
+    connection: Option<ws::Connection>,
     /// The chat an inbound message came from (echoed in the reply).
     chat_id: Option<String>,
     /// A steered IM message is waiting for its assistant reply.
     awaiting_reply: bool,
-    /// The ws drain already consumed its one demo message.
+    /// The drain already consumed its one demo message.
     steered: bool,
     /// Channel config: None = not loaded yet; Some governs; a failed
     /// load is fail-closed (config_error set, nothing is ever steered).
@@ -74,16 +87,35 @@ struct Adapter {
     config_error: bool,
 }
 
-static ADAPTER: Mutex<Adapter> = Mutex::new(Adapter {
-    ws: None,
-    chat_id: None,
-    awaiting_reply: false,
-    steered: false,
-    config: None,
-    config_error: false,
-});
+thread_local! {
+    static ADAPTER: RefCell<Adapter> = RefCell::new(Adapter {
+        connection: None,
+        chat_id: None,
+        awaiting_reply: false,
+        steered: false,
+        config: None,
+        config_error: false,
+    });
+}
 
 struct FeishuBridge;
+
+/// One user-visible line (renderer draws it; never enters model history).
+fn say(level: Level, text: String) {
+    let _ = host::notify(level, &[Content::Text(text)]);
+}
+
+/// A host error as one notice line. The typed kind picks the wording — a
+/// missing consent grant is a different situation from a dead peer — and
+/// the detail is the host's own sentence, handed through verbatim (the
+/// contract says never to match on it, so this never does).
+fn host_error(verb: &str, error: HostError) -> String {
+    match error {
+        HostError::Refused(detail) => format!("{verb} refused: {detail}"),
+        HostError::Failed(detail) => format!("{verb} failed: {detail}"),
+        HostError::Invalid(detail) => format!("{verb} invalid: {detail}"),
+    }
+}
 
 /// Flat-JSON string extraction, same contract as the other examples
 /// (escapes and nesting out of scope; the loopback mock owns the shape).
@@ -118,7 +150,7 @@ fn load_config(adapter: &mut Adapter) {
     }
     let fail = |adapter: &mut Adapter, reason: String| {
         adapter.config_error = true;
-        let _ = host::notify("error", &[Content::Text(format!("feishu: config: {reason}"))]);
+        let _ = host::notify(Level::Error, &[Content::Text(format!("feishu: config: {reason}"))]);
     };
     let Ok(path) = std::env::var("TAU_IM_CONFIG") else {
         return fail(adapter, "TAU_IM_CONFIG not set — identity is fail-closed".into());
@@ -178,131 +210,160 @@ fn load_config(adapter: &mut Adapter) {
     adapter.config = Some(ChannelConfig { chats, users_allow });
 }
 
-/// Drain one inbound frame; on an IM message event, steer it into the
-/// session. Runs at probe call points — the synchronous guest model
-/// means the pump only moves when the host calls us (docs/im-channels.md
-/// 同步 guest 模型下的入站泵).
-fn pump_inbound(adapter: &mut Adapter) {
-    if adapter.steered {
+/// Open the platform's long connection, once. Failure is a notice, not a
+/// load error — the platform may simply be down.
+async fn connect() {
+    if ADAPTER.with(|cell| cell.borrow().connection.is_some()) {
         return;
     }
-    load_config(adapter);
-    let Some(handle) = adapter.ws else { return };
-    // One short-timeout recv per call point: no frame is normal (the
-    // platform is just quiet), a frame is drained and injected.
-    let frame = match ws::recv(handle, 1000) {
-        Ok(frame) => frame,
-        Err(_) => return,
-    };
-    let ws::Frame::Text(text) = frame else { return };
-    if json_get(&text, "type") != Some("message") {
+    let Ok(url) = std::env::var("TAU_MCP_URL") else { return };
+    match ws::Connection::connect(url).await {
+        Ok(connection) => ADAPTER.with(|cell| cell.borrow_mut().connection = Some(connection)),
+        Err(error) => say(Level::Error, host_error("feishu: ws connect", error)),
+    }
+}
+
+/// Drain what the platform sent since the last call point and steer the
+/// first IM message in the batch. Never waits: `poll` is the
+/// drain-without-waiting shape (an awaited frame read would hold the run
+/// open until the platform spoke or the host closed the connection).
+fn pump_inbound() {
+    if ADAPTER.with(|cell| cell.borrow().steered) {
         return;
+    }
+    ADAPTER.with(|cell| load_config(&mut cell.borrow_mut()));
+    let drained =
+        ADAPTER.with(|cell| cell.borrow().connection.as_ref().map(ws::Connection::poll));
+    let frames = match drained {
+        // An error here is the connection's end (reported once by the
+        // actor and repeated by `poll` until the resource is dropped), or
+        // the contract's `invalid` if something else already owns the
+        // frames — this adapter never calls `receive`, so that cannot be it.
+        Some(Err(error)) => return say(Level::Warn, host_error("feishu: ws poll", error)),
+        Some(Ok(frames)) => frames,
+        None => return,
+    };
+    for frame in frames {
+        if handle_frame(frame) {
+            return;
+        }
+    }
+}
+
+/// Handle one drained frame. Returns true when it was a message-typed
+/// frame this pump is done with (steered, noted and dropped, or refused) —
+/// a platform that sends anything else (a pong the actor already answered,
+/// a binary frame, an unknown event) simply gets drained past.
+fn handle_frame(frame: ws::Frame) -> bool {
+    let ws::Frame::Text(text) = frame else { return false };
+    if json_get(&text, "type") != Some("message") {
+        return false;
     }
     let (Some(chat_id), Some(user), Some(body)) = (
         json_get(&text, "chat_id"),
         json_get(&text, "user"),
         json_get(&text, "text"),
     ) else {
-        return;
+        return false;
     };
     // Identity + mapping gate (fail-closed, docs/im-channels.md): the
     // chat must be configured and the user allowlisted; anything else is
-    // consumed, noted, and never steered.
-    let Some(config) = adapter.config.as_ref() else { return };
-    let session = config.chats.get(chat_id);
-    let allowed = config.users_allow.iter().any(|u| u == user);
-    if session.is_none() || !allowed {
-        adapter.steered = true; // consumed — do not re-litigate
-        let _ = host::notify(
-            "info",
-            &[Content::Text(format!(
-                "feishu: ignored message (chat {chat_id} configured: {}, user {user} allowed: {})",
-                session.is_some(),
-                allowed
-            ))],
-        );
-        return;
-    }
-    let session = session.cloned().unwrap_or_default();
-    let message = Message {
-        role: Role::User,
-        content: vec![Content::Text(format!(
-            "[IM chat {chat_id} from {user}] {body}"
-        ))],
-    };
-    match host::steer(&message) {
-        Ok(()) => {
-            adapter.chat_id = Some(chat_id.to_string());
-            adapter.awaiting_reply = true;
-            adapter.steered = true;
-            let _ = host::notify(
-                "info",
-                &[Content::Text(format!(
-                    "feishu: inbound message from {user} steered into the session (chat {chat_id} → {session})"
-                ))],
+    // consumed, noted, and never steered. The notice is built inside the
+    // borrow and printed outside it (the host import must not run with the
+    // adapter borrowed — `say` is a call back into the host).
+    let notice = ADAPTER.with(|cell| {
+        let mut adapter = cell.borrow_mut();
+        let (configured, allowed, session) = match adapter.config.as_ref() {
+            Some(config) => (
+                config.chats.contains_key(chat_id),
+                config.users_allow.iter().any(|u| u == user),
+                config.chats.get(chat_id).cloned(),
+            ),
+            None => (false, false, None),
+        };
+        let Some(session) = session.filter(|_| allowed) else {
+            adapter.steered = true; // consumed — do not re-litigate
+            return (
+                Level::Info,
+                format!(
+                    "feishu: ignored message (chat {chat_id} configured: {configured}, user {user} allowed: {allowed})"
+                ),
             );
+        };
+        let message = Message {
+            role: Role::User,
+            content: vec![Content::Text(format!("[IM chat {chat_id} from {user}] {body}"))],
+        };
+        match host::steer(&message) {
+            Ok(()) => {
+                adapter.chat_id = Some(chat_id.to_string());
+                adapter.awaiting_reply = true;
+                adapter.steered = true;
+                (
+                    Level::Info,
+                    format!(
+                        "feishu: inbound message from {user} steered into the session (chat {chat_id} → {session})"
+                    ),
+                )
+            }
+            // A refused steer leaves `awaiting_reply` false, so no reply
+            // can leave over a channel the user did not consent to.
+            Err(error) => (Level::Error, host_error("feishu: steer", error)),
         }
-        Err(e) => {
-            let _ = host::notify(
-                "error",
-                &[Content::Text(format!("feishu: steer refused: {e}"))],
-            );
-        }
-    }
+    });
+    let (level, text) = notice;
+    say(level, text);
+    true
 }
 
 /// Post the assembled assistant message back to the platform's reply API.
-fn post_reply(adapter: &mut Adapter, payload_json: &str) {
-    if !adapter.awaiting_reply {
-        return;
-    }
-    let (Some(chat_id), Some(handle_ws_url)) = (
-        adapter.chat_id.clone(),
-        std::env::var("TAU_MCP_URL").ok(),
-    ) else {
+/// The text is the typed payload's first text block — 0.6.0 scraped the
+/// JSON payload for one; `after-response` now carries the message itself.
+async fn post_reply(payload: &Payload) {
+    let pending = ADAPTER.with(|cell| {
+        let adapter = cell.borrow();
+        adapter.awaiting_reply.then(|| adapter.chat_id.clone()).flatten()
+    });
+    let Some(chat_id) = pending else { return };
+    let text = match payload {
+        Payload::AfterResponse(response) => {
+            response.message.content.iter().find_map(|block| match block {
+                Content::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+        }
+        _ => None,
+    };
+    let Some(text) = text else { return };
+    let Some(url) = std::env::var("TAU_MCP_URL").ok().and_then(|url| reply_url(&url)) else {
         return;
     };
-    // The assistant text block: the message's first "text" member (the
-    // Content wire shape serializes the field before the "type" tag).
-    let Some(text) = json_get(payload_json, "text") else {
-        return;
-    };
-    let Some(url) = reply_url(&handle_ws_url) else { return };
-    let body = format!("{{\"chat_id\":\"{chat_id}\",\"text\":\"{text}\"}}");
-    let result = http::request(
-        "POST",
-        &url,
-        &[("content-type".to_string(), "application/json".to_string())],
-        &body.into_bytes(),
-        NET_MS,
-    );
-    match result {
-        Ok(h) => {
-            let _ = http::status(h);
-            http::close(h);
-            adapter.awaiting_reply = false;
-            let _ = host::notify(
-                "info",
-                &[Content::Text(format!("feishu: reply posted to {chat_id}"))],
-            );
+    // The body is built as JSON rather than interpolated: assistant text
+    // routinely contains quotes and newlines.
+    let body = serde_json::json!({ "chat_id": chat_id, "text": text }).to_string();
+    let headers = vec![("content-type".to_string(), "application/json".to_string())];
+    match http::request("POST".to_string(), url, headers, body.into_bytes()).await {
+        Ok(response) => {
+            // The host returns once the response headers are in, which is
+            // all this POST needs to have landed; dropping the response
+            // closes the connection.
+            let _ = response.status();
+            drop(response);
+            ADAPTER.with(|cell| cell.borrow_mut().awaiting_reply = false);
+            say(Level::Info, format!("feishu: reply posted to {chat_id}"));
         }
-        Err(e) => {
-            let _ = host::notify(
-                "error",
-                &[Content::Text(format!("feishu: reply POST failed: {e}"))],
-            );
-        }
+        Err(error) => say(Level::Error, host_error("feishu: reply POST", error)),
     }
 }
 
 impl Tools for FeishuBridge {
-    fn definitions() -> Vec<Definition> {
+    async fn definitions() -> Vec<Definition> {
         // An IM adapter contributes no tools; the conversation IS the
         // interface.
         Vec::new()
     }
 
-    fn execute(name: String, _arguments_json: String) -> ToolResult {
+    async fn execute(name: String, _arguments_json: String) -> ToolResult {
         ToolResult {
             content: vec![tau::extension::types::ResultBlock::Text(format!(
                 "unknown tool: {name}"
@@ -313,54 +374,42 @@ impl Tools for FeishuBridge {
 }
 
 impl Probes for FeishuBridge {
-    fn points() -> Vec<String> {
-        vec!["session_start".into(), "after_response".into()]
+    fn points() -> Vec<Point> {
+        vec![Point::SessionStart, Point::AfterResponse]
     }
 
-    fn probe(point: String, payload_json: String) -> Verdict {
-        let continue_ = || Verdict {
-            action: Action::Continue,
-            payload_json: None,
-            reason: None,
-        };
-        let mut adapter = ADAPTER.lock().unwrap_or_else(|e| e.into_inner());
-        match point.as_str() {
-            "session_start" => {
-                // Open the long connection. Failure is a notice, not a
-                // load error — the platform may simply be down.
-                if adapter.ws.is_none()
-                    && let Ok(url) = std::env::var("TAU_MCP_URL")
-                {
-                    match ws::connect(&url, NET_MS) {
-                        Ok(handle) => adapter.ws = Some(handle),
-                        Err(e) => {
-                            let _ = host::notify(
-                                "error",
-                                &[Content::Text(format!("feishu: ws connect failed: {e}"))],
-                            );
-                        }
-                    }
-                }
-            }
-            "after_response" => {
-                // Reply first: the response to a steered IM message is
-                // the turn AFTER the injection. Pumping after the post
-                // means this call's payload answers the previous
-                // injection, not the one this call just made.
-                post_reply(&mut adapter, &payload_json);
-                pump_inbound(&mut adapter);
-            }
-            _ => {}
-        }
-        continue_()
+    /// The sync half of the two points this adapter declares. Neither is a
+    /// decision — everything this adapter does at them is I/O that waits —
+    /// so the probe answers `continue` and the work rides `turn` below.
+    /// Declaring the points is what makes the host call it.
+    fn probe(_point: Point, _payload: Payload) -> Verdict {
+        Verdict::Continue
     }
 }
 
-// The 0.3.0 bridge world makes ingress-handler a mandatory export. This
-// adapter has no webhook leg (it never calls ingress.listen), so nothing
-// can invoke this — the stub is explicit, not dead weight.
+impl BridgeIo for FeishuBridge {
+    async fn turn(point: Point, payload: Payload) {
+        match point {
+            Point::SessionStart => connect().await,
+            Point::AfterResponse => {
+                // Reply first: the response to a steered IM message is the
+                // turn AFTER the injection, so this call's payload answers
+                // the previous injection. Pumping after the post also
+                // keeps the reply from being sent to a chat the pump has
+                // just switched the adapter to.
+                post_reply(&payload).await;
+                pump_inbound();
+            }
+            _ => {}
+        }
+    }
+}
+
+// The bridge world makes ingress-handler a mandatory export. This adapter
+// has no webhook leg (it never calls ingress.listen), so nothing can
+// invoke this — the stub is explicit, not dead weight.
 impl IngressHandler for FeishuBridge {
-    fn handle_request(_request: Request) -> Response {
+    async fn handle_request(_request: Request) -> Response {
         Response {
             status: 501,
             headers: Vec::new(),

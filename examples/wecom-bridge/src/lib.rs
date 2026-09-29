@@ -29,6 +29,13 @@
 //!   whole turn synchronously, conflicting with the push model's
 //!   instance-lock semantics.
 //!
+//! 0.7.0 shape: the listener is a `registration` resource, so the adapter
+//! HOLDS it (state lives in a `thread_local` cell because a resource is
+//! not `Sync`), and the reply POST is an awaited `http.request` — a wait,
+//! so it lives in `bridge-io.turn` (a synchronously lowered export cannot
+//! await; docs/wit-redesign.md section 5). The crypto legs need neither:
+//! `listen` is synchronous and `handle-request` is its own async export.
+//!
 //! Loopback only: scripts/wecom_mock.py is the platform (real crypto,
 //! NIST-self-tested AES). Identity mapping stays feishu-bridge's
 //! demonstration; this example's new ground is the crypto gate.
@@ -47,20 +54,20 @@ wit_bindgen::generate!({
     world: "bridge",
 });
 
-use std::sync::Mutex;
+use std::cell::RefCell;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as B64;
 use cbc::cipher::block_padding::NoPadding;
 use cbc::cipher::{BlockDecryptMut, KeyIvInit};
-use exports::tau::extension::ingress_handler::{
-    Guest as IngressHandler, Request, Response,
-};
-use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
+use exports::tau::extension::bridge_io::Guest as BridgeIo;
+use exports::tau::extension::ingress_handler::{Guest as IngressHandler, Request, Response};
+use exports::tau::extension::probes::{Guest as Probes, Payload, Point, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
 use sha1::{Digest, Sha1};
-use tau::extension::types::{Content, Message, Role};
-use tau::extension::{host, http, ingress};
+use tau::extension::host::{self, Level};
+use tau::extension::types::{Content, Error as HostError, Message, Role};
+use tau::extension::{http, ingress};
 
 /// The route this adapter serves (wecom calls it the callback URL).
 /// Fixed: the route is part of the adapter's protocol translation,
@@ -75,31 +82,47 @@ struct WecomCrypto {
     corpid: String,
 }
 
-static CRYPTO: Mutex<Option<WecomCrypto>> = Mutex::new(None);
-
-/// Budget for one network wait: a reply POST's response headers, or a ws
-/// connect's handshake. The platform answers in seconds, so this is
-/// generous already — it exists so a peer that accepts the connection and
-/// then says nothing fails loudly instead of hanging the bridge
-/// (wit-review F11).
-const NET_MS: u32 = 30_000;
-
+/// Adapter state. A `thread_local` cell since 0.7.0: the registration is
+/// a resource (not `Sync`), and the guest is single-threaded — the host
+/// serializes every export call (probes, tools, turn, webhooks) on this
+/// instance, so there is nothing to lock against.
 struct Adapter {
+    /// The callback crypto material (None until session_start).
+    crypto: Option<WecomCrypto>,
+    /// The registered route. Held for the component's life: dropping the
+    /// registration stops serving the route.
+    registration: Option<ingress::Registration>,
     /// The user an inbound message came from (echoed in the reply).
     user: Option<String>,
     /// A steered IM message is waiting for its assistant reply.
     awaiting_reply: bool,
 }
 
-static ADAPTER: Mutex<Adapter> = Mutex::new(Adapter {
-    user: None,
-    awaiting_reply: false,
-});
+thread_local! {
+    static ADAPTER: RefCell<Adapter> = RefCell::new(Adapter {
+        crypto: None,
+        registration: None,
+        user: None,
+        awaiting_reply: false,
+    });
+}
 
 struct WecomBridge;
 
-fn notify(level: &str, text: String) {
+/// One user-visible line (renderer draws it; never enters model history).
+fn say(level: Level, text: String) {
     let _ = host::notify(level, &[Content::Text(text)]);
+}
+
+/// A host error as one notice line: the typed kind picks the wording, the
+/// detail is the host's own sentence handed through verbatim (the contract
+/// says never to match on it, so this never does).
+fn host_error(verb: &str, error: HostError) -> String {
+    match error {
+        HostError::Refused(detail) => format!("{verb} refused: {detail}"),
+        HostError::Failed(detail) => format!("{verb} failed: {detail}"),
+        HostError::Invalid(detail) => format!("{verb} invalid: {detail}"),
+    }
 }
 
 /// Lowercase hex, no dependency.
@@ -209,24 +232,12 @@ fn decrypt_frame(key: &[u8; 32], b64: &str) -> Result<(Vec<u8>, String), String>
     Ok((msg, receiveid))
 }
 
-/// Flat-JSON string extraction for the after_response payload, same
-/// contract as the other examples (the loopback mock owns the shape).
-fn json_get<'a>(json: &'a str, key: &str) -> Option<&'a str> {
-    let pat = format!("\"{key}\":");
-    let start = json.find(&pat)? + pat.len();
-    let rest = json[start..]
-        .trim_start_matches(|c: char| c.is_whitespace())
-        .strip_prefix('"')?;
-    let end = rest.find('"')?;
-    Some(&rest[..end])
-}
-
 impl Tools for WecomBridge {
-    fn definitions() -> Vec<Definition> {
+    async fn definitions() -> Vec<Definition> {
         Vec::new()
     }
 
-    fn execute(name: String, _arguments_json: String) -> ToolResult {
+    async fn execute(name: String, _arguments_json: String) -> ToolResult {
         ToolResult {
             content: vec![tau::extension::types::ResultBlock::Text(format!(
                 "unknown tool: {name}"
@@ -237,102 +248,103 @@ impl Tools for WecomBridge {
 }
 
 impl Probes for WecomBridge {
-    fn points() -> Vec<String> {
-        vec!["session_start".into(), "after_response".into()]
+    fn points() -> Vec<Point> {
+        vec![Point::SessionStart, Point::AfterResponse]
     }
 
-    fn probe(point: String, payload_json: String) -> Verdict {
-        let continue_ = || Verdict {
-            action: Action::Continue,
-            payload_json: None,
-            reason: None,
-        };
-        match point.as_str() {
-            "session_start" => {
-                // Read the crypto material and open the webhook
-                // listener. Failure is a notice, not a load error —
-                // without --ingress (or without the env) this bridge
-                // simply has no inbound leg.
-                let crypto = match (
-                    std::env::var("WECOM_TOKEN"),
-                    std::env::var("WECOM_ENCODING_AES_KEY"),
-                    std::env::var("WECOM_CORP_ID"),
-                ) {
-                    (Ok(token), Ok(aes_key), Ok(corpid)) => {
-                        match B64.decode(format!("{aes_key}=")) {
-                            Ok(k) if k.len() == 32 => {
-                                let mut key = [0u8; 32];
-                                key.copy_from_slice(&k);
-                                WecomCrypto { token, key, corpid }
-                            }
-                            _ => {
-                                notify(
-                                    "error",
-                                    "wecom: WECOM_ENCODING_AES_KEY is not a 43-char base64 key"
-                                        .into(),
-                                );
-                                return continue_();
-                            }
-                        }
-                    }
-                    _ => {
-                        notify(
-                            "error",
-                            "wecom: WECOM_TOKEN/WECOM_ENCODING_AES_KEY/WECOM_CORP_ID env required; not listening"
-                                .into(),
-                        );
-                        return continue_();
-                    }
-                };
-                *CRYPTO.lock().unwrap_or_else(|e| e.into_inner()) = Some(crypto);
-                if let Err(e) = ingress::listen(ROUTE) {
-                    notify("error", format!("wecom: {e}"));
-                }
-            }
-            "after_response" => {
-                // Post the assembled assistant text to the send API
-                // (plain JSON with access_token — the crypto only
-                // guards the inbound callback).
-                let mut adapter = ADAPTER.lock().unwrap_or_else(|e| e.into_inner());
-                if !adapter.awaiting_reply {
-                    return continue_();
-                }
-                let (Some(user), Some(base)) = (
-                    adapter.user.clone(),
-                    std::env::var("TAU_MCP_URL").ok(),
-                ) else {
-                    return continue_();
-                };
-                // The assistant text block: the message's first "text"
-                // member (Content's wire shape serializes the field
-                // before the "type" tag — never assume key order).
-                let Some(text) = json_get(&payload_json, "text") else {
-                    return continue_();
-                };
-                let url =
-                    format!("{base}/cgi-bin/message/send?access_token=loopback-access-token");
-                let body = format!(
-                    "{{\"touser\":\"{user}\",\"msgtype\":\"text\",\"agentid\":\"1000002\",\"text\":{{\"content\":\"{text}\"}}}}"
-                );
-                match http::request(
-                    "POST",
-                    &url,
-                    &[("content-type".to_string(), "application/json".to_string())],
-                    &body.into_bytes(),
-                    NET_MS,
-                ) {
-                    Ok(h) => {
-                        let _ = http::status(h);
-                        http::close(h);
-                        adapter.awaiting_reply = false;
-                        notify("info", format!("wecom: reply posted to {user}"));
-                    }
-                    Err(e) => notify("error", format!("wecom: reply POST failed: {e}")),
-                }
-            }
-            _ => {}
+    /// The one thing this adapter does at a point that does not wait:
+    /// reading the crypto material and registering its route (`listen` is
+    /// synchronous, and the registration must be held). The outbound POST
+    /// waits, so it rides `turn` below.
+    fn probe(point: Point, _payload: Payload) -> Verdict {
+        if point != Point::SessionStart {
+            return Verdict::Continue;
         }
-        continue_()
+        // Failure is a notice, not a load error — without --ingress (or
+        // without the env) this bridge simply has no inbound leg.
+        let crypto = match (
+            std::env::var("WECOM_TOKEN"),
+            std::env::var("WECOM_ENCODING_AES_KEY"),
+            std::env::var("WECOM_CORP_ID"),
+        ) {
+            (Ok(token), Ok(aes_key), Ok(corpid)) => match B64.decode(format!("{aes_key}=")) {
+                Ok(k) if k.len() == 32 => {
+                    let mut key = [0u8; 32];
+                    key.copy_from_slice(&k);
+                    Ok(WecomCrypto { token, key, corpid })
+                }
+                _ => Err("wecom: WECOM_ENCODING_AES_KEY is not a 43-char base64 key"),
+            },
+            _ => Err(
+                "wecom: WECOM_TOKEN/WECOM_ENCODING_AES_KEY/WECOM_CORP_ID env required; not listening",
+            ),
+        };
+        let crypto = match crypto {
+            Ok(crypto) => crypto,
+            Err(reason) => {
+                say(Level::Error, reason.into());
+                return Verdict::Continue;
+            }
+        };
+        ADAPTER.with(|cell| cell.borrow_mut().crypto = Some(crypto));
+        match ingress::listen(ROUTE) {
+            Ok(registration) => {
+                ADAPTER.with(|cell| cell.borrow_mut().registration = Some(registration))
+            }
+            Err(error) => say(Level::Error, host_error("wecom: ingress", error)),
+        }
+        Verdict::Continue
+    }
+}
+
+impl BridgeIo for WecomBridge {
+    async fn turn(point: Point, payload: Payload) {
+        if point == Point::AfterResponse {
+            post_reply(&payload).await;
+        }
+    }
+}
+
+/// Post the assembled assistant text to the send API (plain JSON with
+/// access_token — the crypto only guards the inbound callback). The text
+/// is the typed payload's first text block — 0.6.0 scraped the JSON
+/// payload for one.
+async fn post_reply(payload: &Payload) {
+    let pending = ADAPTER.with(|cell| {
+        let adapter = cell.borrow();
+        adapter.awaiting_reply.then(|| adapter.user.clone()).flatten()
+    });
+    let Some(user) = pending else { return };
+    let Some(base) = std::env::var("TAU_MCP_URL").ok() else { return };
+    let text = match payload {
+        Payload::AfterResponse(response) => {
+            response.message.content.iter().find_map(|block| match block {
+                Content::Text(text) => Some(text.clone()),
+                _ => None,
+            })
+        }
+        _ => None,
+    };
+    let Some(text) = text else { return };
+    let url = format!("{base}/cgi-bin/message/send?access_token=loopback-access-token");
+    // The body is built as JSON rather than interpolated: assistant text
+    // routinely contains quotes and newlines.
+    let body = serde_json::json!({
+        "touser": user,
+        "msgtype": "text",
+        "agentid": "1000002",
+        "text": { "content": text },
+    })
+    .to_string();
+    let headers = vec![("content-type".to_string(), "application/json".to_string())];
+    match http::request("POST".to_string(), url, headers, body.into_bytes()).await {
+        Ok(response) => {
+            let _ = response.status();
+            drop(response); // dropping closes the connection
+            ADAPTER.with(|cell| cell.borrow_mut().awaiting_reply = false);
+            say(Level::Info, format!("wecom: reply posted to {user}"));
+        }
+        Err(error) => say(Level::Error, host_error("wecom: reply POST", error)),
     }
 }
 
@@ -340,7 +352,7 @@ impl Probes for WecomBridge {
 /// body trust — a bad msg_signature is a 403 and nothing is decrypted,
 /// steered, or replied.
 impl IngressHandler for WecomBridge {
-    fn handle_request(request: Request) -> Response {
+    async fn handle_request(request: Request) -> Response {
         let ok = |body: &str| Response {
             status: 200,
             headers: vec![("content-type".to_string(), "text/plain".to_string())],
@@ -356,8 +368,17 @@ impl IngressHandler for WecomBridge {
             headers: Vec::new(),
             body: body.as_bytes().to_vec(),
         };
-        let crypto = CRYPTO.lock().unwrap_or_else(|e| e.into_inner());
-        let Some(crypto) = crypto.as_ref() else {
+        // The crypto material is snapshotted out of the state cell rather
+        // than borrowed: the handler makes host calls below, and no borrow
+        // should span one.
+        let crypto = ADAPTER.with(|cell| {
+            let adapter = cell.borrow();
+            adapter
+                .crypto
+                .as_ref()
+                .map(|c| (c.token.clone(), c.key, c.corpid.clone()))
+        });
+        let Some((token, key, corpid)) = crypto else {
             return bad(503, "wecom crypto not configured (session_start never ran)");
         };
         let (Some(sig), Some(timestamp), Some(nonce)) = (
@@ -374,11 +395,11 @@ impl IngressHandler for WecomBridge {
                 let Some(echostr) = query_get(&request.query, "echostr") else {
                     return bad(400, "missing echostr");
                 };
-                if msg_signature(&crypto.token, &timestamp, &nonce, &echostr) != sig {
+                if msg_signature(&token, &timestamp, &nonce, &echostr) != sig {
                     return bad(403, "invalid signature");
                 }
-                match decrypt_frame(&crypto.key, &echostr) {
-                    Ok((msg, receiveid)) if receiveid == crypto.corpid => ok_bytes(msg),
+                match decrypt_frame(&key, &echostr) {
+                    Ok((msg, receiveid)) if receiveid == corpid => ok_bytes(msg),
                     Ok(_) => bad(403, "receiveid is not this corp"),
                     Err(e) => bad(400, &format!("echostr: {e}")),
                 }
@@ -390,14 +411,14 @@ impl IngressHandler for WecomBridge {
                 let Some(encrypt) = xml_get(&body, "Encrypt") else {
                     return bad(400, "envelope has no Encrypt element");
                 };
-                if msg_signature(&crypto.token, &timestamp, &nonce, &encrypt) != sig {
+                if msg_signature(&token, &timestamp, &nonce, &encrypt) != sig {
                     return bad(403, "invalid signature");
                 }
-                let (msg, receiveid) = match decrypt_frame(&crypto.key, &encrypt) {
+                let (msg, receiveid) = match decrypt_frame(&key, &encrypt) {
                     Ok(pair) => pair,
                     Err(e) => return bad(400, &format!("message: {e}")),
                 };
-                if receiveid != crypto.corpid {
+                if receiveid != corpid {
                     return bad(403, "receiveid is not this corp");
                 }
                 let Ok(inner) = String::from_utf8(msg) else {
@@ -421,11 +442,13 @@ impl IngressHandler for WecomBridge {
                 };
                 match host::steer(&message) {
                     Ok(()) => {
-                        let mut adapter = ADAPTER.lock().unwrap_or_else(|e| e.into_inner());
-                        adapter.user = Some(user.clone());
-                        adapter.awaiting_reply = true;
-                        notify(
-                            "info",
+                        ADAPTER.with(|cell| {
+                            let mut adapter = cell.borrow_mut();
+                            adapter.user = Some(user.clone());
+                            adapter.awaiting_reply = true;
+                        });
+                        say(
+                            Level::Info,
                             format!("wecom: inbound message from {user} steered into the session"),
                         );
                         ok("success")
@@ -433,8 +456,8 @@ impl IngressHandler for WecomBridge {
                     // Honest ack, same rule as whatsapp-bridge: 200
                     // would tell the platform the message landed when
                     // it did not.
-                    Err(e) => {
-                        notify("error", format!("wecom: steer refused: {e}"));
+                    Err(error) => {
+                        say(Level::Error, host_error("wecom: steer", error));
                         bad(403, "session injection not consented")
                     }
                 }
