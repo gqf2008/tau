@@ -11,14 +11,22 @@
 //! make a dead connection indistinguishable from a quiet one.
 //! Reconnect and catch-up are the component's job.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::io;
 use std::net::TcpStream;
-use std::sync::mpsc;
+use std::sync::{mpsc, Arc};
 use std::time::{Duration, Instant};
 
 use tungstenite::stream::MaybeTlsStream;
 use tungstenite::{Message, WebSocket};
+
+/// The inbound frame queue: the receiver half of the connection actor's
+/// channel. The stream handed to the guest's `receive` and the synchronous
+/// `poll` drain are two readings of this one queue, so both name it -- and
+/// naming it once keeps `clippy::type_complexity` out of every signature
+/// that carries it.
+pub(crate) type InboundQueue =
+    Arc<std::sync::Mutex<tokio::sync::mpsc::UnboundedReceiver<Result<WsFrame, String>>>>;
 
 /// Ping cadence and death verdict (see the module docs).
 const PING_INTERVAL: Duration = Duration::from_secs(30);
@@ -34,55 +42,200 @@ pub(crate) enum WsFrame {
     Binary(Vec<u8>),
 }
 
-enum WsCommand {
-    /// Send carries a confirmation channel: the caller blocks until the
-    /// actor has WRITTEN the frame to the socket (Ok = on the wire, not
+pub(crate) enum WsCommand {
+    /// Send carries a confirmation channel: the caller awaits it until
+    /// the actor has WRITTEN the frame to the socket (Ok = on the wire,
+    /// not
     /// merely queued — the dingtalk ack lesson: in print mode the
     /// process can exit within one actor read tick, and a queued-only
     /// ack provably never reaches the platform).
-    Send(WsFrame, mpsc::Sender<Result<(), String>>),
+    Send(WsFrame, tokio::sync::oneshot::Sender<Result<(), String>>),
     Close,
 }
 
-/// One open connection: an actor thread owns the socket; commands go in,
-/// frames (or the terminal error) come out.
-struct WsConnection {
-    cmd: mpsc::Sender<WsCommand>,
-    rx: mpsc::Receiver<Result<WsFrame, String>>,
+/// Why a ws call failed, in the contract's own three-way split
+/// (`types.error`) -- same shape and same reason as `http::HttpError`: the
+/// variant is what a guest branches on, the detail is for the log.
+#[derive(Debug)]
+pub(crate) enum WsError {
+    /// No consent covers this origin: the URL is not in the allowlist.
+    Refused(String),
+    /// Consent covered it and the call failed: no handshake within the
+    /// host's budget, the peer is gone, the actor stopped.
+    Failed(String),
+    /// The call is not valid here: not a ws(s) URL, or a connection whose
+    /// actor is already gone.
+    Invalid(String),
 }
 
-/// Handle-issuing registry, generation-fenced like `ProcessRegistry`
-/// (wit-review F8): a handle from before a trap rebuild errors instead
-/// of aliasing a newer connection.
-pub(crate) struct WsRegistry {
-    generation: u32,
-    next: u32,
-    connections: HashMap<u64, WsConnection>,
-    /// Consented origins in http(s) form (ws:→http:, wss:→https:).
-    /// Empty = deny all.
-    origins: HashSet<String>,
+impl std::fmt::Display for WsError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(detail) => write!(f, "refused: {detail}"),
+            Self::Failed(detail) => write!(f, "failed: {detail}"),
+            Self::Invalid(detail) => write!(f, "invalid: {detail}"),
+        }
+    }
+}
+
+/// One open connection, owned by the guest as `ws.connection` since
+/// 0.7.0: the actor thread owns the socket, this handle holds the command
+/// channel plus the inbound frame queue the guest's `receive` stream
+/// drains. Dropping it closes the connection -- 0.6.0's handle table, its
+/// generation fence and its explicit `close` all collapse into ownership
+/// (the table dies with the store, so a rebuilt instance cannot alias a
+/// stale handle).
+#[derive(Debug)]
+pub struct HostConnection {
+    cmd: mpsc::Sender<WsCommand>,
+    frames: InboundQueue,
+    /// Who owns the inbound queue. The contract allows exactly one consumer:
+    /// the `receive` stream (async guests) or `poll` (the sync pump a
+    /// bridge's probe runs). Nothing is ever split between them.
+    inbound: Inbound,
+    /// The connection's terminal reason, recorded by `poll` when it meets
+    /// the end of the queue and reported on the NEXT call -- so the frames
+    /// that arrived before the end are delivered instead of being traded
+    /// away for the error.
+    ended: Option<String>,
+}
+
+/// The inbound queue's owner, decided by whichever method was called first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Inbound {
+    Free,
+    Stream,
+    Poll,
+}
+
+impl HostConnection {
+    /// The inbound frame queue, handed out once, to `receive`'s stream.
+    /// `None` when a consumer already has it (the stream is then an
+    /// immediately-ended one, which is the shape this interface has always
+    /// used for "there is nothing to hand you": `receive` has no error
+    /// channel).
+    pub(crate) fn take_inbound(&mut self) -> Option<InboundQueue> {
+        if self.inbound != Inbound::Free {
+            return None;
+        }
+        self.inbound = Inbound::Stream;
+        Some(Arc::clone(&self.frames))
+    }
+
+    /// Drain what has arrived, without waiting -- the sync pump's shape.
+    /// `Err` when the queue already belongs to the `receive` stream (the
+    /// contract's `invalid`), otherwise the frames so far plus, on a later
+    /// call, the connection's terminal reason.
+    pub(crate) fn poll_inbound(&mut self) -> Result<Vec<WsFrame>, String> {
+        if self.inbound == Inbound::Stream {
+            return Err("receive() already owns this connection's frames (one consumer per connection)".into());
+        }
+        self.inbound = Inbound::Poll;
+        if let Some(why) = self.ended.take() {
+            return Err(why);
+        }
+        let frames = Arc::clone(&self.frames);
+        let mut queue = frames.lock().unwrap_or_else(|e| e.into_inner());
+        let mut out = Vec::new();
+        loop {
+            match queue.try_recv() {
+                Ok(Ok(frame)) => out.push(frame),
+                // The actor reported a failure: the frames drained so far
+                // are still delivered, and the reason surfaces next call.
+                Ok(Err(why)) => {
+                    self.ended = Some(why);
+                    break;
+                }
+                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => break,
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => {
+                    self.ended = Some("the connection's actor is gone".into());
+                    break;
+                }
+            }
+        }
+        Ok(out)
+    }
+
+    /// The command channel to the actor. The guest path clones this out of
+    /// the resource table and awaits [`send_frame`]; holding the sender is
+    /// what keeps the actor's command loop alive, so it never leaves the
+    /// handle.
+    pub(crate) fn commands(&self) -> mpsc::Sender<WsCommand> {
+        self.cmd.clone()
+    }
+}
+
+/// How long [`send_frame`] waits for the actor's write confirmation.
+/// Bounded by one read tick in the worst case; the generous margin is for
+/// a wedged actor, which must surface as an error and never as a hang.
+const SEND_CONFIRM_BUDGET: Duration = Duration::from_secs(5);
+
+/// Send one frame and await the actor's write confirmation -- the dingtalk
+/// ack lesson: an awaited send means the frame was WRITTEN to the socket,
+/// not merely queued.
+pub(crate) async fn send_frame(
+    commands: mpsc::Sender<WsCommand>,
+    frame: WsFrame,
+) -> Result<(), WsError> {
+    let (confirm_tx, confirm_rx) = tokio::sync::oneshot::channel();
+    commands
+        .send(WsCommand::Send(frame, confirm_tx))
+        .map_err(|_| WsError::Invalid("ws.send: connection closed".into()))?;
+    match tokio::time::timeout(SEND_CONFIRM_BUDGET, confirm_rx).await {
+        Ok(Ok(result)) => result.map_err(WsError::Failed),
+        Ok(Err(_)) => Err(WsError::Failed(
+            "ws.send: the actor stopped without confirming (connection closed)".into(),
+        )),
+        Err(_) => Err(WsError::Failed(format!(
+            "ws.send: no write confirmation within {}s (wedged actor)",
+            SEND_CONFIRM_BUDGET.as_secs()
+        ))),
+    }
+}
+
+impl Drop for HostConnection {
+    fn drop(&mut self) {
+        let _ = self.cmd.send(WsCommand::Close);
+    }
+}
+
+/// Connect budget when the contract has none: since 0.7.0 the handshake
+/// wait is not a parameter any more ("waiting is no longer a parameter"),
+/// so how long a connect may take is the host's own policy -- and there is
+/// no way for a caller to ask for "forever".
+pub(crate) const CONNECT_TIMEOUT_MS: u32 = 30_000;
+
+/// The connect budget in force: [`CONNECT_TIMEOUT_MS`], or the test knob
+/// `TAU_WS_CONNECT_TIMEOUT_MS`.
+pub(crate) fn connect_timeout_ms() -> u32 {
+    let default = Duration::from_millis(u64::from(CONNECT_TIMEOUT_MS));
+    crate::budget("TAU_WS_CONNECT_TIMEOUT_MS", default).as_millis() as u32
 }
 
 /// Consent origin of a ws(s) URL, in the http(s) form the allowlist
-/// holds (ws:→http:, wss:→https:). Public so the CLI can build a
+/// holds (ws:->http:, wss:->https:). Public so the CLI can build a
 /// consent allowlist from ws URLs.
 pub fn origin_of(url: &str) -> Option<String> {
     WsRegistry::origin_of(url)
 }
 
+/// The consent allowlist. Since 0.7.0 the connections themselves live in
+/// the guest's resource table, not here: what is left is the one thing the
+/// registry could never delegate -- who is allowed to connect at all.
+pub(crate) struct WsRegistry {
+    /// Consented origins in http(s) form (ws:->http:, wss:->https:).
+    /// Empty = deny all.
+    origins: HashSet<String>,
+}
+
 impl WsRegistry {
-    pub(crate) fn new(generation: u32, origins: HashSet<String>) -> Self {
-        Self {
-            generation,
-            next: 0,
-            connections: HashMap::new(),
-            origins,
-        }
+    pub(crate) fn new(origins: HashSet<String>) -> Self {
+        Self { origins }
     }
 
     /// Consent origin of a ws(s) URL, in the http(s) form the allowlist
-    /// holds: ws:→http:, wss:→https:, then the same authority parsing as
-    /// http (userinfo stripped, authority ends at the first delimiter —
+    /// holds: ws:->http:, wss:->https:, then the same authority parsing as
+    /// http (userinfo stripped, authority ends at the first delimiter --
     /// the check must see the same host the client will dial).
     pub fn origin_of(url: &str) -> Option<String> {
         let (scheme, rest) = url.split_once("://")?;
@@ -94,20 +247,27 @@ impl WsRegistry {
         crate::http::HttpRegistry::origin_of(&format!("{httpish}://{rest}"))
     }
 
-    pub(crate) fn connect(&mut self, url: &str, timeout_ms: u32) -> Result<u64, String> {
-        if timeout_ms == 0 {
-            return Err(
-                "ws.connect: timeout-ms must be > 0 — a connect that can wait forever hides a dead peer (wit-review F11)"
-                    .into(),
-            );
-        }
+    /// Connect with the host's own budget (see `CONNECT_TIMEOUT_MS`), or
+    /// the test knob `TAU_WS_CONNECT_TIMEOUT_MS`.
+    pub(crate) fn connect(&self, url: &str) -> Result<HostConnection, WsError> {
+        self.connect_with_timeout(url, connect_timeout_ms())
+    }
+
+    /// Connect, bounded by `timeout_ms`. The tests drive this directly;
+    /// the contract itself no longer carries a timeout.
+    pub(crate) fn connect_with_timeout(
+        &self,
+        url: &str,
+        timeout_ms: u32,
+    ) -> Result<HostConnection, WsError> {
         let origin =
-            Self::origin_of(url).ok_or_else(|| format!("ws.connect: not a ws(s) URL: {url:?}"))?;
+            Self::origin_of(url)
+                .ok_or_else(|| WsError::Invalid(format!("ws.connect: not a ws(s) URL: {url:?}")))?;
         if !self.origins.contains(&origin) {
-            return Err(format!(
+            return Err(WsError::Refused(format!(
                 "ws.connect: origin {origin} not consented (bridge endpoints are consented \
                  like http origins — the host CLI passes them, e.g. --mcp-url)"
-            ));
+            )));
         }
         // tungstenite::connect does TCP + TLS + the upgrade handshake in one
         // blocking call with no bound of its own: a peer that accepts and then
@@ -123,81 +283,34 @@ impl WsRegistry {
         let (mut socket, _response) =
             match rx.recv_timeout(Duration::from_millis(u64::from(timeout_ms))) {
                 Ok(Ok(pair)) => pair,
-                Ok(Err(e)) => return Err(format!("ws.connect {origin}: {e}")),
+                Ok(Err(e)) => {
+                    return Err(WsError::Failed(format!("ws.connect {origin}: {e}")));
+                }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
-                    return Err(format!("ws.connect: no handshake within {timeout_ms}ms"));
+                    return Err(WsError::Failed(format!(
+                        "ws.connect: no handshake within {timeout_ms}ms"
+                    )));
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
-                    return Err(format!("ws.connect {origin}: the connect thread died"));
+                    return Err(WsError::Failed(format!(
+                        "ws.connect {origin}: the connect thread died"
+                    )));
                 }
             };
         set_read_tick(&mut socket);
         let (cmd_tx, cmd_rx) = mpsc::channel::<WsCommand>();
-        let (frame_tx, frame_rx) = mpsc::channel();
+        // Unbounded on purpose: the actor thread must never block on a guest
+        // that stopped reading `receive` (the actor still has commands and
+        // keepalives to service); a guest that does not read grows this
+        // queue until it drops the connection.
+        let (frame_tx, frame_rx) = tokio::sync::mpsc::unbounded_channel();
         std::thread::spawn(move || actor(socket, cmd_rx, frame_tx));
-        let handle = ((self.generation as u64) << 32) | (self.next as u64);
-        self.next += 1;
-        self.connections.insert(
-            handle,
-            WsConnection {
-                cmd: cmd_tx,
-                rx: frame_rx,
-            },
-        );
-        Ok(handle)
-    }
-
-    fn get(&self, handle: u64) -> Result<&WsConnection, String> {
-        if (handle >> 32) as u32 != self.generation {
-            return Err(format!(
-                "stale ws handle {handle} (the instance was rebuilt; reconnect)"
-            ));
-        }
-        self.connections
-            .get(&handle)
-            .ok_or_else(|| format!("unknown ws handle {handle}"))
-    }
-
-    pub(crate) fn send(&mut self, handle: u64, frame: WsFrame) -> Result<(), String> {
-        let (confirm_tx, confirm_rx) = mpsc::channel();
-        self.get(handle)?
-            .cmd
-            .send(WsCommand::Send(frame, confirm_tx))
-            .map_err(|_| "ws.send: connection closed".to_string())?;
-        // Wait for the actor's write confirmation — bounded by one read
-        // tick in the worst case, generous margin here against a wedged
-        // actor (a wedged actor must surface as an error, not a hang).
-        confirm_rx
-            .recv_timeout(Duration::from_secs(5))
-            .map_err(|_| "ws.send: actor did not confirm within 5s (wedged?)".to_string())?
-    }
-
-    pub(crate) fn recv(&mut self, handle: u64, timeout_ms: u32) -> Result<WsFrame, String> {
-        if timeout_ms == 0 {
-            return Err(
-                "ws.recv: timeout-ms must be > 0 — a recv that can block forever \
-                 hides a dead connection (wit-review F9)"
-                    .into(),
-            );
-        }
-        let conn = self.get(handle)?;
-        match conn.rx.recv_timeout(Duration::from_millis(u64::from(timeout_ms))) {
-            Ok(Ok(frame)) => Ok(frame),
-            Ok(Err(e)) => Err(e),
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                Err(format!("ws.recv: no frame within {timeout_ms}ms"))
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => {
-                Err("ws.recv: connection closed".into())
-            }
-        }
-    }
-
-    pub(crate) fn close(&mut self, handle: u64) -> Result<(), String> {
-        self.get(handle)?;
-        let conn = self.connections.remove(&handle).expect("checked above");
-        let _ = conn.cmd.send(WsCommand::Close);
-        Ok(())
+        Ok(HostConnection {
+            cmd: cmd_tx,
+            frames: Arc::new(std::sync::Mutex::new(frame_rx)),
+            inbound: Inbound::Free,
+            ended: None,
+        })
     }
 }
 
@@ -220,7 +333,7 @@ fn set_read_tick(socket: &mut WebSocket<MaybeTlsStream<TcpStream>>) {
 fn actor(
     mut socket: WebSocket<MaybeTlsStream<TcpStream>>,
     cmd: mpsc::Receiver<WsCommand>,
-    frames: mpsc::Sender<Result<WsFrame, String>>,
+    frames: tokio::sync::mpsc::UnboundedSender<Result<WsFrame, String>>,
 ) {
     let mut last_inbound = Instant::now();
     let mut last_ping = Instant::now();
@@ -306,6 +419,60 @@ fn actor(
 mod tests {
     use super::*;
 
+    /// One open connection's inbox, no socket needed: the frames' owner is
+    /// exclusive, and the sync drain loses nothing -- the frames that
+    /// arrived before the end are delivered, and the end surfaces on the
+    /// next call.
+    #[test]
+    fn the_inbox_has_one_consumer_and_the_drain_is_lossless() {
+        fn connection() -> (
+            HostConnection,
+            tokio::sync::mpsc::UnboundedSender<Result<WsFrame, String>>,
+        ) {
+            let (cmd, _commands) = mpsc::channel::<WsCommand>();
+            let (frames, queue) = tokio::sync::mpsc::unbounded_channel();
+            (
+                HostConnection {
+                    cmd,
+                    frames: Arc::new(std::sync::Mutex::new(queue)),
+                    inbound: Inbound::Free,
+                    ended: None,
+                },
+                frames,
+            )
+        }
+
+        // The async stream takes the inbox: `receive` is handed out once,
+        // and a `poll` after it is refused rather than silently splitting
+        // the frames between two consumers.
+        let (mut stream_owner, _frames) = connection();
+        assert!(stream_owner.take_inbound().is_some(), "the first take wins");
+        assert!(stream_owner.take_inbound().is_none(), "handed out twice");
+        assert!(stream_owner.poll_inbound().is_err(), "poll took a taken inbox");
+
+        // The sync drain: everything queued, nothing when the peer is
+        // quiet, and the terminal reason only after the frames it follows.
+        let (mut poller, frames) = connection();
+        frames.send(Ok(WsFrame::Text("one".into()))).unwrap();
+        frames.send(Ok(WsFrame::Binary(vec![2]))).unwrap();
+        assert_eq!(
+            poller.poll_inbound().unwrap(),
+            vec![WsFrame::Text("one".into()), WsFrame::Binary(vec![2])]
+        );
+        assert!(poller.poll_inbound().unwrap().is_empty(), "an empty inbox is not an end");
+        frames.send(Ok(WsFrame::Text("three".into()))).unwrap();
+        frames.send(Err("ws: peer closed the connection".into())).unwrap();
+        assert_eq!(
+            poller.poll_inbound().unwrap(),
+            vec![WsFrame::Text("three".into())],
+            "the frames before the end must not be traded away for the error"
+        );
+        assert_eq!(
+            poller.poll_inbound().unwrap_err(),
+            "ws: peer closed the connection"
+        );
+    }
+
     #[test]
     fn ws_origin_maps_to_http_form() {
         assert_eq!(
@@ -327,21 +494,15 @@ mod tests {
 
     #[test]
     fn unconsented_origin_and_bad_url_fail_loud() {
-        let mut registry = WsRegistry::new(1, HashSet::new());
-        let err = registry.connect("ws://127.0.0.1:9/", 1_000).unwrap_err();
-        assert!(err.contains("not consented"), "{err}");
-        let err = registry.connect("ftp://x.test/", 1_000).unwrap_err();
-        assert!(err.contains("not a ws(s) URL"), "{err}");
-    }
-
-    #[test]
-    fn connect_rejects_zero_timeout() {
-        // 0 would mean "wait for the handshake forever" — refused before the
-        // URL is even parsed (wit-review F11).
-        let mut registry = WsRegistry::new(1, HashSet::new());
-        let err = registry.connect("ws://127.0.0.1:9/", 0).unwrap_err();
-        assert!(err.contains("must be > 0"), "{err}");
-        assert!(err.contains("wait forever"), "{err}");
+        let registry = WsRegistry::new(HashSet::new());
+        let err = registry
+            .connect_with_timeout("ws://127.0.0.1:9/", 1_000)
+            .unwrap_err();
+        assert!(err.to_string().contains("not consented"), "{err}");
+        let err = registry
+            .connect_with_timeout("ftp://x.test/", 1_000)
+            .unwrap_err();
+        assert!(err.to_string().contains("not a ws(s) URL"), "{err}");
     }
 
     #[test]
@@ -359,12 +520,12 @@ mod tests {
             drop(stream);
         });
         let origin = format!("http://127.0.0.1:{port}");
-        let mut registry = WsRegistry::new(1, [origin].into_iter().collect());
+        let registry = WsRegistry::new([origin].into_iter().collect());
         let started = std::time::Instant::now();
         let err = registry
-            .connect(&format!("ws://127.0.0.1:{port}/x"), 300)
+            .connect_with_timeout(&format!("ws://127.0.0.1:{port}/x"), 300)
             .unwrap_err();
-        assert!(err.contains("no handshake within 300ms"), "{err}");
+        assert!(err.to_string().contains("no handshake within 300ms"), "{err}");
         assert!(
             started.elapsed() < std::time::Duration::from_millis(1200),
             "connect outlived its budget: {:?}",
@@ -373,14 +534,13 @@ mod tests {
     }
 
     #[test]
-    fn recv_requires_a_timeout_and_fences_stale_handles() {
-        let mut registry = WsRegistry::new(1, HashSet::new());
-        let err = registry.recv(0, 0).unwrap_err();
-        assert!(err.contains("must be > 0"), "{err}");
-        let handle = (9u64 << 32) | 3; // generation 9, this registry is 1
-        let err = registry.recv(handle, 100).unwrap_err();
-        assert!(err.contains("stale ws handle"), "{err}");
-        let err = registry.recv((1 << 32) | 3, 100).unwrap_err();
-        assert!(err.contains("unknown ws handle"), "{err}");
+    fn the_connect_budget_is_always_bounded() {
+        // The contract has no timeout parameter any more, so the host's own
+        // budget is the only bound there is: it has to be a real one
+        // (wit-review F11 -- a connect that can wait forever hides a dead
+        // peer).
+        const { assert!(CONNECT_TIMEOUT_MS > 0) };
+        const { assert!(CONNECT_TIMEOUT_MS <= 60_000) };
     }
+
 }

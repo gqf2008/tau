@@ -1,13 +1,14 @@
 //! The host's three-way error, the projection of `types.error` in the
-//! 0.7.0 contract (`wit/next/tau.wit`).
+//! 0.7.0 contract (`wit/tau.wit`, `interface types`).
 //!
 //! Three arms, because that is the split a guest actually branches on:
 //! nobody agreed to this call (`Refused`), they agreed and it broke
-//! (`Failed`), or the call was never valid here (`Invalid`). The 0.6.0
-//! ABI answers every host call with `result<_, string>`, so the detail
-//! string stays and [`From<HostError> for String`] is the edge — but a
-//! guest matching on English prose is not an interface, and the arm is
-//! what it should match on.
+//! (`Failed`), or the call was never valid here (`Invalid`). The contract
+//! carries the arm since 0.7.0 (`crates/tau-ext/src/lib.rs` projects it
+//! into the generated type); the detail string stays for the human reading
+//! the log, and [`From<HostError> for String`] is what the paths that
+//! predate the arm still use — a guest matching on English prose is not an
+//! interface, and the arm is what it should match on.
 
 use std::fmt;
 

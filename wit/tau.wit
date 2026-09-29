@@ -1,12 +1,56 @@
-package tau:extension@0.6.0;
+package tau:extension@0.7.0;
+
+/// ---- 0.7.0: the async / stream / resource redesign (docs/wit-redesign.md) ----
+///
+/// Shape change only: the feature set is 0.6.0's, minus the parts whose only
+/// reason to exist was the synchronous ABI. Nothing here is a new capability.
+///
+///   * `u64` handles and their host-side generation table become `resource`.
+///     Ownership replaces the whole "unknown handle / stale handle after a
+///     trap rebuild" error family, and dropping a resource IS the close.
+///   * Bounded-wait polling (`process.read-stdout(.., max, timeout-ms)`,
+///     `http.read-body(.., max, timeout-ms)`, `ws.recv(handle, timeout-ms)`,
+///     `process.write-stdin(..) -> taken`) becomes `stream<T>` and
+///     `future<result<_, error>>`. Backpressure is the stream's capacity,
+///     cancellation is dropping it, and no call parks a host thread — so
+///     "0 is rejected, because block-forever is not a contract" stops being
+///     a contract question and becomes the transport's default.
+///   * The push channel (`interface events`) becomes a returned stream: the
+///     provider hands the host a `stream<model-event>` and the host pulls at
+///     the pace it can consume. `interface events` no longer exists.
+///   * Payloads whose schema tau owns are typed — probe points, probe
+///     payloads and verdicts, the model request, the session config,
+///     notification levels, subscription topics. JSON stays at the leaves
+///     tau does not own the schema for: tool arguments, JSON Schema,
+///     extension-defined facts. That is 0.6.0's stated convention; 0.6.0 had
+///     accumulated four exceptions to it, and this version applies it.
+///   * Host failures are classified (`types.error`: refused / failed /
+///     invalid) instead of arriving as an untyped string a guest must not
+///     pattern-match on.
+///
+/// Requires the Component Model async ABI on both sides: wasmtime 49+ (CM_ASYNC
+/// is on by default there — `component-model-async` is one of wasmtime's default
+/// crate features, so `wasm_component_model_async` + `concurrency_support` only
+/// pin it) and wit-bindgen 0.62+ for guests (the `async-spawn` feature where a
+/// guest produces a stream). It does NOT require WASI 0.3: the async ABI lives
+/// in the component model, and guests stay `wasm32-wasip2` with `wasi:*@0.2.x`
+/// imports. The evidence and the staged migration are in docs/wit-redesign.md.
+///
+/// Deliberately NOT here (each is a capability, not a shape):
+///   * streaming media sources (`media-source.stream`) — the blob arm
+///     already covers payloads too large to hold;
+///   * streaming request bodies (`http.request` body as a stream);
+///   * `process` env/cwd (the host's own filter and cwd are the consent
+///     story today, and argv is what the consent UX shows);
+///   * a stream for `host.subscribe` (see the interface comment).
 
 /// ---- Message trunk: tau owns this schema, so it is typed, not JSON ----
 ///
 /// Content blocks and messages shared by the host channel (see
 /// docs/host-channel.md). Convention (docs/extensions.md): payloads whose
 /// schema tau owns are WIT types; JSON survives only at leaves tau does
-/// not own the schema for (tool arguments, JSON Schema, probe payloads,
-/// extension-defined facts).
+/// not own the schema for (tool arguments, JSON Schema, extension-defined
+/// facts).
 interface types {
     /// Who produced a message. Mirrors tau_core::types::Role.
     enum role {
@@ -18,20 +62,56 @@ interface types {
         tool,
     }
 
-    /// A media payload: image, audio, video, or an arbitrary file. The
-    /// MIME major type carries the semantics (image/*, audio/*, video/*;
-    /// anything else is a file). Raw bytes cross the ABI — never base64.
+    /// Why a response ended. Mirrors tau_core::model::StopReason. Lives in
+    /// `types` since 0.7.0: probe payloads need it too (`after-response`,
+    /// `before-run-end`), and the interface that used to own it — `events` —
+    /// is gone.
+    enum stop-reason {
+        /// The model finished its turn.
+        stop,
+        /// The model wants tool calls executed.
+        tool-use,
+        /// Hit the output limit.
+        length,
+        /// Ended by a failure (a prior `error` event says what).
+        error,
+        /// Cancelled from outside (e.g. a steering interrupt).
+        aborted,
+    }
+
+    /// Why a host call failed. New in 0.7.0: the variant is the part a guest
+    /// branches on (a missing consent grant is a different situation from a
+    /// dead peer), and the string is the detail meant for the human reading
+    /// the log. Never match on the string.
+    variant error {
+        /// No consent covers this call: the origin is not in the allowlist,
+        /// the listen address is not consented, the argv was never approved.
+        /// The detail names what to grant.
+        refused(string),
+        /// Consent covers it and the call itself failed: network error, peer
+        /// gone, child exited, signature check failed. The detail is the
+        /// host's or the OS's own message.
+        failed(string),
+        /// The call is not valid here: unknown topic, size limit, wrong
+        /// state, already closed. A guest bug or a contract misuse.
+        invalid(string),
+    }
+
+    /// A media payload. Mirrors tau_core::types::Media: the media type and
+    /// where the bytes live, nothing else. Raw bytes cross the ABI — never
+    /// base64 (that exists only at tau's JSON edges: session file, provider
+    /// HTTP).
     record media {
         /// MIME type, e.g. "image/png", "audio/pcm;rate=24000".
         media-type: string,
         /// Where the bytes live.
         source: media-source,
-        /// Original filename — file semantics only. The host rejects a
-        /// name on image/audio/video media.
-        name: option<string>,
     }
 
     /// Where a media's bytes live. Mirrors tau_core::types::MediaSource.
+    /// 0.7.0 considered a `stream(list<u8>)` arm for payloads too large to
+    /// hold and left it out: the blob arm is content-addressed, already on
+    /// disk, and does not make every carrier of `content` a stream owner.
     variant media-source {
         /// Raw bytes.
         bytes(list<u8>),
@@ -39,6 +119,16 @@ interface types {
         url(string),
         /// Content-addressed blob store reference: "sha256:<hex>".
         blob(string),
+    }
+
+    /// An attachment that is not an image, audio or video clip. Mirrors
+    /// tau_core::types::Content::File, whose filename field lives on this
+    /// arm (as it does in Rust) rather than on `media`.
+    record file {
+        /// The file payload.
+        media: media,
+        /// Original filename, when known.
+        name: option<string>,
     }
 
     /// A tool invocation requested by the assistant.
@@ -51,19 +141,35 @@ interface types {
         arguments-json: string,
     }
 
-    /// A block of a tool result. A separate, non-recursive variant: a
-    /// tool result never contains tool calls or nested results (and
-    /// wasmtime's host bindgen rejects recursive types outright).
+    /// A block of a tool result: the non-recursive half of `content`.
+    ///
+    /// It has to be a separate variant, and that is a toolchain fact, not a
+    /// style choice: `content` reaching itself through a tool result is
+    /// refused — `wasm-tools component wit` answers
+    /// `error: type `content` depends on itself` (a recursive `json` for
+    /// arbitrary JSON fails the same way). Rust's
+    /// `Content::ToolResult { content: Vec<Content> }` is therefore wider
+    /// than the ABI; a tool result never carries a tool call or a nested
+    /// result, so the narrowing is semantic, not lossy. The arms mirror
+    /// `content`'s non-tool arms one for one, and keep mirroring them: the
+    /// host converter matches exhaustively, so an arm added to one and not
+    /// the other is a compile error, not a silent drift.
     variant result-block {
         /// A plain text block.
         text(string),
-        /// A media block (image, audio, video, file).
-        media(media),
+        /// An image (screenshot, photo, diagram).
+        image(media),
+        /// An audio clip.
+        audio(media),
+        /// A video clip.
+        video(media),
+        /// An arbitrary file attachment (PDF, archive, source bundle, ...).
+        file(file),
     }
 
     /// The outcome of one tool call, as conversation content. Multi-block
-    /// since 0.3.0 (docs/tool-media.md, wit-review F4): text and/or media;
-    /// media bytes cross the ABI raw, never base64.
+    /// since 0.3.0 (docs/tool-media.md, wit-review F4); media bytes cross
+    /// the ABI raw, never base64.
     record tool-result {
         /// The call this answers.
         call-id: string,
@@ -74,13 +180,21 @@ interface types {
     }
 
     /// One block of a message's content. Mirrors tau_core::types::Content
-    /// with image/audio/video/file collapsed into media (MIME major is
-    /// the semantics).
+    /// arm for arm — including the four media arms: a guest says which kind
+    /// of medium it is sending, instead of the host inferring it from the
+    /// MIME major type. (That inference, and its "naming an image is a
+    /// validation error" rule, are gone: the arm is the intent.)
     variant content {
         /// A plain text block.
         text(string),
-        /// A media block (image, audio, video, file).
-        media(media),
+        /// An image (screenshot, photo, diagram).
+        image(media),
+        /// An audio clip.
+        audio(media),
+        /// A video clip.
+        video(media),
+        /// An arbitrary file attachment (PDF, archive, source bundle, ...).
+        file(file),
         /// A tool invocation requested by the assistant.
         tool-call(tool-call),
         /// The outcome of one tool call.
@@ -110,71 +224,262 @@ interface tools {
     }
 
     record tool-result {
-        /// Result blocks handed back to the model: text and/or media
-        /// (multi-block since 0.3.0, docs/tool-media.md). The call-id is
-        /// paired host-side; the guest never sees it.
+        /// Result blocks handed back to the model: text and/or a media
+        /// block (image/audio/video/file — multi-block since 0.3.0,
+        /// docs/tool-media.md). The call-id is paired host-side, the guest
+        /// never sees it.
         content: list<result-block>,
         is-error: bool,
     }
 
-    /// Called once at load time to enumerate the tools this component provides.
-    definitions: func() -> list<definition>;
+    /// Called once at load time to enumerate the tools this component
+    /// provides.
+    ///
+    /// `async` since 0.7.0, and it is not decoration: a bridge whose tool
+    /// list lives on a remote server (examples/mcp-bridge) has to perform
+    /// its handshake HERE, and a synchronously lowered export cannot wait
+    /// for anything. Measured, not assumed — `block_on` inside a sync
+    /// export traps with "cannot block a synchronous task before
+    /// returning" (docs/wit-redesign.md §5, leg 5). An extension whose
+    /// list is a literal awaits nothing and reads exactly as it did.
+    definitions: async func() -> list<definition>;
 
     /// Execute one tool call. `arguments-json` is the model-produced JSON
     /// object matching the definition's schema.
-    execute: func(name: string, arguments-json: string) -> tool-result;
+    ///
+    /// `async` since 0.7.0: a tool that talks to the host (http, process,
+    /// ws) awaits those calls in place instead of parking a host thread
+    /// inside a synchronous guest invocation. The result is still whole —
+    /// tool *progress* streaming is a separate feature and is not smuggled
+    /// in through a stream of result blocks.
+    execute: async func(name: string, arguments-json: string) -> tool-result;
 }
 
 /// Probes: lifecycle points where an extension can observe and influence a
 /// run. See docs/probes.md for the point list and payload shapes.
 /// (Named `hooks` in 0.1.0; renamed to match the code, the docs, and the
 /// `tau probes` CLI — wit-review F7.)
+///
+/// Typed since 0.7.0. 0.6.0 passed `point: string` + `payload-json: string`:
+/// the point set and every payload shape are tau's, documented in
+/// docs/probes.md, so that was JSON on ground tau owns. A guest that trims
+/// context no longer parses the message trunk to do it.
+///
+/// Still synchronous on purpose: the harness pauses the loop and waits for
+/// the verdict, so a probe is a decision point, not an I/O opportunity. An
+/// `async` probe would let a component hold the run open on a network call;
+/// probes that need I/O should return quickly and do the I/O in a tool.
 interface probes {
-    enum action {
-        /// No opinion; run proceeds unchanged.
+    use types.{message, stop-reason, tool-call, tool-result, result-block};
+    use tools.{definition};
+
+    /// The probe points, named as docs/probes.md names them (the WIT arm is
+    /// kebab-case, the host's string form is snake_case: `before-tool` is
+    /// `before_tool` on the bus and in `tau probes`).
+    enum point {
+        /// 1. The user's prompt, before the run starts.
+        before-run,
+        /// 2. The assembled context (system prompt + messages).
+        transform-context,
+        /// 3. The final request: system, messages, tools.
+        before-request,
+        /// 4. The assembled assistant message and its stop reason.
+        after-response,
+        /// 5. A tool call, before it runs.
+        before-tool,
+        /// 6. A tool call's outcome.
+        after-tool,
+        /// 7. The run's produced messages and stop reason.
+        before-run-end,
+        /// 8. The message set a summarizer is about to see.
+        before-compaction,
+        /// 9. A branch navigation, before it happens.
+        before-navigation,
+        /// Observe-only: a session was created.
+        session-start,
+        /// Observe-only: a branch navigation was applied.
+        branch,
+        /// Observe-only: the session ended cleanly.
+        session-end,
+    }
+
+    /// The assembled context of point 2; `replace` may return either field
+    /// changed (`system: none` means "leave the system prompt alone").
+    record assembled-context {
+        system: option<string>,
+        messages: list<message>,
+    }
+
+    /// The final request of point 3, after context assembly.
+    record final-request {
+        system: option<string>,
+        messages: list<message>,
+        tools: list<definition>,
+    }
+
+    /// Point 4: the message the model produced and why it stopped.
+    record assembled-response {
+        message: message,
+        stop: stop-reason,
+    }
+
+    /// Point 6: the call as the model asked for it, and what came back.
+    record tool-outcome {
+        call: tool-call,
+        content: list<result-block>,
+        is-error: bool,
+    }
+
+    /// Point 7: what the run produced.
+    record run-end {
+        messages: list<message>,
+        stop: stop-reason,
+    }
+
+    /// Point 8. Reason values are the host's ("manual", "auto"), mirrored
+    /// from tau_core's compaction entry.
+    record compaction {
+        reason: string,
+        messages: list<message>,
+    }
+
+    /// Point 9: `target` is an entry id, `summary` its first line (what the
+    /// renderer would show).
+    record navigation {
+        target: string,
+        summary: string,
+    }
+
+    /// The observe-only points: same shape for `session-start`/`session-end`,
+    /// and `branch` names both ends of the navigation.
+    record session-facts {
+        session: string,
+        cwd: string,
+        model: string,
+    }
+
+    /// The entry navigated away from (the host's `from`; `from` is a WIT
+    /// keyword, so the field cannot carry the name), and the entry moved to.
+    record branch {
+        previous: option<string>,
+        to: string,
+    }
+
+    /// One arm per point, each carrying that point's payload. The host
+    /// validates the pairing: a `before-tool` probe cannot answer with a
+    /// `navigation` payload (that is `invalid`).
+    variant payload {
+        before-run(message),
+        transform-context(assembled-context),
+        before-request(final-request),
+        after-response(assembled-response),
+        before-tool(tool-call),
+        after-tool(tool-outcome),
+        before-run-end(run-end),
+        before-compaction(compaction),
+        before-navigation(navigation),
+        session-start(session-facts),
+        branch(branch),
+        session-end(session-facts),
+    }
+
+    /// The answer to a probe. `block` carries the reason handed back to the
+    /// model or the user; on the three observe-only points a `block` is
+    /// reported on the bus as ignored, never honored (docs/probes.md).
+    variant verdict {
+        /// No opinion; the run proceeds unchanged.
         continue,
-        /// Use payload-json as the replacement for the probed value.
-        replace,
-        /// Veto the action; reason is handed back to the model or user.
-        block,
+        /// Use this payload instead of the probed value — the same arm the
+        /// probe was called with, with the fields that changed replaced.
+        replace(payload),
+        /// Veto the action; the reason is the whole answer.
+        block(string),
     }
 
-    record verdict {
-        action: action,
-        /// Replacement payload for `replace`, point-specific JSON.
-        payload-json: option<string>,
-        /// Reason for `block`.
-        reason: option<string>,
-    }
+    /// Probe points this component handles, called once at load time.
+    /// Empty list = this component observes nothing.
+    points: func() -> list<point>;
 
-    /// Probe points this component handles (e.g. ["before_tool"]).
-    /// Empty list = observe nothing, called once at load time.
-    points: func() -> list<string>;
-
-    /// Synchronous probe call. The harness pauses until the verdict returns,
-    /// so handlers on the hot path must be fast.
-    probe: func(point: string, payload-json: string) -> verdict;
+    /// Synchronous probe call: point and payload in, verdict out. The
+    /// harness is paused, so handlers on the hot path must be fast.
+    probe: func(point: point, payload: payload) -> verdict;
 }
 
-/// Push channel from a provider component back to the host. Not a
-/// capability: the host always provides it. Typed in 0.2.0 — the
-/// model-event schema is tau-owned, and typing kills the base64 hot path
-/// audio-delta had on the 0.1.0 JSON envelope. `emit` returns a result so
-/// a host-side rejection reaches the guest instead of vanishing
-/// (wit-review F2/F6: the 0.1.0 silent-skip path is gone).
-interface events {
-    /// Why a response ended. Mirrors tau_core::model::StopReason.
-    enum stop-reason {
-        /// The model finished its turn.
-        stop,
-        /// The model wants tool calls executed.
-        tool-use,
-        /// Hit the output limit.
-        length,
-        /// Ended by a failure (a prior `error` event says what).
-        error,
-        /// Cancelled from outside (e.g. a steering interrupt).
-        aborted,
+
+/// The asynchronous half of a bridge's lifecycle.
+///
+/// `probes.probe` is synchronous and stays that way: for an extension it is a
+/// decision point on the agent's own hot path, and an `async` probe would let
+/// a component hold the whole run open on a network call. A bridge is where
+/// that reasoning lands differently, because its obligations sit on exactly
+/// those points: an IM adapter opens its long connection at `session-start`
+/// and posts the platform's reply at `after-response`, and since 0.7.0 both
+/// are `async func`s (`ws.connect`, `http.request`) that a synchronously
+/// lowered export cannot await at all — measured, and not fixable by
+/// spawning: a task spawned from a sync-lowered export is never polled
+/// (docs/wit-redesign.md section 5, legs 1b/1c).
+///
+/// So the host calls `turn` right after `probe` has answered for the same
+/// point, with the same payload, in a context where the component may await.
+/// A bridge with nothing to do at a point returns; a bridge whose I/O lives
+/// elsewhere (mcp-bridge does all of it in `definitions`) exports an empty
+/// body. The sync probe stays the decision, exactly as before.
+interface bridge-io {
+    use probes.{point, payload};
+
+    /// One probe call point, asynchronously. It returns nothing on purpose:
+    /// decisions are `probe`'s verdict, and what a bridge learns here it acts
+    /// on itself (steer, notify, post).
+    turn: async func(point: point, payload: payload);
+}
+
+/// A model provider. Streaming is pull-mode since 0.7.0: `run` returns a
+/// stream the host drains at its own pace, instead of the component pushing
+/// chunks through `events.emit`. What that buys:
+///
+///   * backpressure — a host that cannot keep up slows the provider's own
+///     reads (the guest's write awaits), so the ring-buffer `lagged`
+///     compromise has no place on this path;
+///   * cancellation at the source — the host drops the stream, the guest's
+///     next write returns the unwritten remainder, and the guest stops
+///     pulling from the vendor API;
+///   * one fewer interface: the terminal `done`/`error` events still travel
+///     in-band (they are the model's own story), while the returned future
+///     carries the host's verdict on the stream itself.
+///
+/// Producing the stream costs the guest a task (wit-bindgen's `async-spawn`:
+/// create the stream, spawn the writer, return the reader) — the shape WASI
+/// 0.3 itself uses for every `read-via-stream`.
+interface models {
+    use types.{error, message, stop-reason};
+    use tools.{definition};
+
+    record info {
+        /// Model id passed in requests (e.g. "gpt-5", "claude-sonnet-4-5").
+        id: string,
+        name: string,
+        context-window: u32,
+        max-output: u32,
+    }
+
+    /// The host's grant to this component for this request. Giving the token
+    /// IS the consent to place it in guest memory, and the host never
+    /// persists it (unchanged since 0.2.0; a variant so a future scheme —
+    /// API-key header, signed request — does not need a new field).
+    variant auth {
+        bearer(string),
+    }
+
+    /// One request. Typed since 0.7.0: this is tau's message trunk plus six
+    /// tau-owned fields, and 0.6.0's own convention called that a WIT type.
+    /// The provider still re-serializes into its vendor's wire format; it
+    /// just no longer parses tau's JSON to get there.
+    record request {
+        model: string,
+        system: option<string>,
+        messages: list<message>,
+        tools: list<definition>,
+        auth: option<auth>,
     }
 
     /// Incremental assistant audio (realtime-style providers). Chunks of
@@ -201,7 +506,9 @@ interface events {
     }
 
     /// One incremental model output. Mirrors tau_core::model::ModelEvent.
-    variant model-event {
+    /// (Named `model-event` while `interface events` owned it; `models.event`
+    /// says the same thing without the qualifier.)
+    variant event {
         /// Incremental assistant text.
         text-delta(string),
         /// Incremental tool-call data.
@@ -227,42 +534,24 @@ interface events {
         error(string),
     }
 
-    /// Push one model event. The result reports host-side rejection;
-    /// guests should treat an error as terminal for this stream.
-    emit: func(event: model-event) -> result<_, string>;
-}
-
-/// A model provider. Streaming is push-mode: the component calls
-/// `events.emit` per chunk and returns from `run` when the response is
-/// complete. Provider components typically need scoped network access
-/// (declared in metadata, granted by user consent); when the user hands
-/// the host a bearer token (`--provider-auth` / TAU_PROVIDER_AUTH), it
-/// arrives inside the request payload as "auth": {"bearer": token} —
-/// giving the token IS the consent to place it in guest memory, and the
-/// host never persists it.
-interface models {
-    record info {
-        /// Model id passed in requests (e.g. "gpt-5", "claude-sonnet-4-5").
-        id: string,
-        name: string,
-        context-window: u32,
-        max-output: u32,
-    }
-
     /// Models this provider can serve.
     list-models: func() -> list<info>;
 
-    /// Run one streaming request to completion, pushing events via `emit`.
-    /// request-json: {"model": string, "system": string|null,
-    ///   "messages": [...], "tools": [...],
-    ///   "auth"?: {"bearer": string}} using tau's message wire shape.
-    /// Stays JSON: the provider's job is translating to a vendor wire
-    /// format, which is JSON — it re-serializes regardless, and there is
-    /// no hot path here (unlike emit's audio-delta).
+    /// Run one streaming request. The returned stream carries the events in
+    /// order; the guest writes them and the host reads them. The stream ends
+    /// when the guest's writer is dropped (the normal end, after the terminal
+    /// `done`/`error` event) or when the host drops the read end — a refusal
+    /// or a cancellation, which the guest sees as its next write returning
+    /// the unwritten remainder.
+    ///
+    /// The future reports the host's verdict on the stream: `ok` when the
+    /// host consumed it to its end (whatever the provider reported in-band),
+    /// `err` when the host closed it early — the error says why.
+    ///
     /// Contract (same as the native Model trait): never trap for
-    /// request/transport failures; report via an error event followed by
-    /// done{stop:"error"}.
-    run: func(request-json: string);
+    /// request/transport failures; report them as an `error` event followed
+    /// by `done(error)`.
+    run: async func(request: request) -> tuple<stream<event>, future<result<_, error>>>;
 }
 
 /// Guest→host channel: an extension's active return path. Facts
@@ -274,7 +563,23 @@ interface models {
 /// after the in-flight tool results of the current turn, follow-up when
 /// the run finishes). See docs/host-channel.md 语义红线.
 interface host {
-    use types.{message, content};
+    use types.{message, content, error};
+
+    /// Severity of a notification. Typed since 0.7.0 (0.6.0 passed the
+    /// string "info" | "warn" | "error" and said so in a comment).
+    enum level {
+        info,
+        warn,
+        error,
+    }
+
+    /// The topics a subscription can carry (docs/stream-subscribe.md).
+    /// Typed since 0.7.0: an unknown topic used to be a string the host had
+    /// to refuse at call time, and is now unrepresentable.
+    enum topic {
+        text-delta,
+        audio-delta,
+    }
 
     /// A provider audio segment on the stream subscription. The bytes
     /// themselves never travel this channel (same rule as the bus: they
@@ -287,8 +592,7 @@ interface host {
         media-type: string,
     }
 
-    /// One high-frequency stream event drained by `poll`
-    /// (docs/stream-subscribe.md).
+    /// One high-frequency stream event drained by `poll`.
     variant stream-event {
         /// The subscription's ring overran: n events were dropped
         /// before the next event in this batch.
@@ -299,203 +603,234 @@ interface host {
         audio-delta(audio-segment),
     }
 
+    /// A subscription. A resource since 0.7.0: the handle's generation
+    /// table, the "unknown handle" error family and the explicit
+    /// unsubscribe all collapse into ownership — dropping it unsubscribes.
+    ///
+    /// Deliberately NOT a `stream<stream-event>` (the redesign's own
+    /// direction elsewhere): the bus publisher is the agent loop, and a
+    /// stream would make the run's progress hostage to the slowest guest —
+    /// the exact stall the bounded ring plus `lagged` exists to prevent.
+    /// `lagged` is not an artifact of polling; it is the honest answer to
+    /// "the guest was not reading", and it survives either carrier.
+    resource subscription {
+        /// Non-blocking drain of the backlog (empty when nothing
+        /// accumulated). The ring holds 1024 events (mirroring the bus);
+        /// on overrun the batch starts with lagged(n).
+        poll: func() -> list<stream-event>;
+    }
+
     /// User-visible notification; the renderer draws text blocks and a
     /// placeholder for media blocks. Not added to model history.
-    /// level: "info" | "warn" | "error".
-    notify: func(level: string, content: list<content>) -> result<_, string>;
+    notify: func(level: level, content: list<content>) -> result<_, error>;
 
     /// Publish an extension-defined fact to the event bus (observe-only).
     /// The fact's schema is external to tau, so this stays a JSON leaf;
     /// it must still be well-formed JSON, or the result says so.
-    emit: func(event-json: string) -> result<_, string>;
+    emit: func(event-json: string) -> result<_, error>;
 
     /// Steer the current run: the message is queued into the control
     /// channel and lands at the next checkpoint. Consent-gated; the host
     /// validates role==user and size limits and reports violations.
-    steer: func(message: message) -> result<_, string>;
+    steer: func(message: message) -> result<_, error>;
 
     /// Queue a message to run after the agent finishes. Same consent and
     /// validation as steer.
-    follow-up: func(message: message) -> result<_, string>;
+    follow-up: func(message: message) -> result<_, error>;
 
-    /// Subscribe to high-frequency stream events, returning a handle
-    /// (docs/stream-subscribe.md — F2's high-frequency leg). Topic
-    /// catalog: "text-delta", "audio-delta"; an unknown topic fails
-    /// loudly. Guests pull — the host never calls into a component
-    /// asynchronously, so the drain happens inside the guest's own
-    /// invocations and the subscription's granularity is the guest's
-    /// own call frequency. Outside a run (e.g. during definitions) the
-    /// bus is not wired and subscribe fails.
-    subscribe: func(topics: list<string>) -> result<u64, string>;
-
-    /// Non-blocking drain of a subscription's backlog (empty when
-    /// nothing accumulated). The ring holds 1024 events (mirroring the
-    /// bus); on overrun the batch starts with lagged(n). An unknown
-    /// handle — including one from before a trap rebuild, handles do
-    /// not survive it — is an error.
-    poll: func(subscription: u64) -> result<list<stream-event>, string>;
-
-    /// Unsubscribe and drop the backlog. An unknown handle is an error.
-    unsubscribe: func(subscription: u64) -> result<_, string>;
-}
-
-/// General extension: tools and/or probes, plus the host channel.
-/// Ambient WASI (fs/env/stdio/args/network) is granted by default —
-/// pass --deny-wasi to the host CLI to run components with no ambient
-/// capabilities.
-world extension {
-    import host;
-    export tools;
-    export probes;
-}
-
-/// Model provider extension. `events.emit` is the push channel. Network
-/// access comes from the same consent-gated `http` capability bridges
-/// use: always linked, granted empty by default, every request's origin
-/// checked against the per-component allowlist (remembered per signing
-/// fingerprint). With no consent, calls fail at call time.
-world provider {
-    import events;
-    import http;
-    export models;
+    /// Subscribe to high-frequency stream events (docs/stream-subscribe.md
+    /// — F2's high-frequency leg). Guests pull — the host never calls into
+    /// a component asynchronously on this path — so the drain happens
+    /// inside the guest's own invocations and the subscription's
+    /// granularity is the guest's own call frequency. Outside a run (e.g.
+    /// during definitions) the bus is not wired and subscribe fails.
+    subscribe: func(topics: list<topic>) -> result<subscription, error>;
 }
 
 /// Realtime session function group (docs/realtime-av.md; exported by
 /// the `realtime` world — interface named `session` to dodge the
-/// world/interface name collision in bindgen). One session
-/// per component instance: `open` is called once, right after
-/// instantiation; every method refuses at the door once closed.
+/// world/interface name collision in bindgen).
+///
+/// A resource since 0.7.0. 0.6.0's "open once, one session per component
+/// instance" was not a design decision about sessions, it was where the
+/// state could live: an interface has no instance state, a resource does.
+/// Sessions per instance are now the host's choice, and both media
+/// directions are streams:
+///
+///   * downlink (assistant audio, VAD, barge-in) is a returned
+///     `stream<models.event>`: the host drains it at playback pace;
+///   * uplink (microphone audio, camera frames) is a stream parameter: the
+///     host writes into it for as long as the session lives, and dropping
+///     the writable end is the end of the uplink.
+///
+/// Both replace a per-chunk call whose only justification was that the ABI
+/// could not carry a continuous flow.
+///
+/// The uplink direction (host writes, guest reads) was the last leg the
+/// migration spike drove, and it holds: the host produces the byte stream
+/// and the guest drains it from its own async export (leg 1 in
+/// docs/wit-redesign.md section 5). scripts/av_wasm_live_e2e.py exercises
+/// it end to end — microphone consent, VAD, the exact echo, and the close
+/// flush — so no fallback to 0.6.0's `push-audio` shape is needed.
+///
 /// Contract (same as the native RealtimeSession trait): never trap for
 /// request/transport failures — report via an error event.
 interface session {
-    /// Open the session. config-json: {"input-media-type": string,
-    ///   "output-media-type": string|null, "instructions": string|null}.
-    open: func(config-json: string) -> result<_, string>;
+    use types.{error};
+    use models.{event};
 
-    /// Uplink audio chunk in the session's input-media-type.
-    push-audio: func(data: list<u8>) -> result<_, string>;
+    record config {
+        /// Media type of what the host will push (e.g. "audio/pcm;rate=24000").
+        input-media-type: string,
+        /// Media type the provider should answer in, when it can choose.
+        output-media-type: option<string>,
+        /// System instructions for the session, when the provider takes them.
+        instructions: option<string>,
+    }
 
-    /// Uplink image frame (JPEG) — the video uplink, ~1fps or
-    /// scene-triggered.
-    push-image: func(jpeg: list<u8>) -> result<_, string>;
+    resource session {
+        /// Open the session. Fails (without a session) when the provider
+        /// cannot serve this config — a session that exists but refuses
+        /// every call was the 0.6.0 shape, and it is a worse one.
+        create: static async func(config: config) -> result<session, error>;
 
-    /// Barge-in: truncate the in-flight assistant response.
-    interrupt: func() -> result<_, string>;
+        /// Uplink audio, in the session's input media type. The guest reads
+        /// it as the host produces it; a slow provider suspends the host's
+        /// write instead of overrunning a buffer. Dropping the writable end
+        /// (or the whole session) ends the uplink.
+        /// `async` is load-bearing, not decoration: a task the guest spawns
+        /// from a *synchronously lowered* export is never scheduled, because
+        /// the executor that drains spawned tasks only runs inside the async
+        /// callback (measured: docs/wit-redesign.md §5, legs 1b/1c/1d —
+        /// sync `func(stream) -> future` hangs forever, `async func` does
+        /// not). Any declaration whose guest side must produce a stream or a
+        /// future while answering is therefore `async`.
+        uplink-audio: async func(audio: stream<u8>) -> future<result<_, error>>;
 
-    /// End the session; terminal events may still flush first.
-    close: func() -> result<_, string>;
-}
+        /// Uplink image frames (the video uplink, ~1fps or scene-triggered).
+        /// One element is one complete JPEG.
+        uplink-image: async func(jpeg: stream<list<u8>>) -> future<result<_, error>>;
 
-/// Realtime provider (docs/realtime-av.md): a persistent bidirectional
-/// session (the OpenAI Realtime / Gemini Live shape). Discovery and
-/// request/response stay — the component doubles as an ordinary
-/// provider. Downlink events push through `events.emit`, including the
-/// realtime model-event kinds. Microphone capture is performed BY THE
-/// HOST on the session's behalf and gated by the per-fingerprint
-/// `microphone` consent category; the `camera` category is registered
-/// but admits no capture path yet (always absent).
-world realtime {
-    import events;
-    import http;
-    export models;
-    export session;
+        /// Downlink: the assistant's audio and the VAD/barge-in facts, in
+        /// order. Same pull shape as `models.run`, same meaning for the
+        /// returned future — and the same `async`, for the same reason: the
+        /// guest produces this stream from a task it spawns.
+        downlink: async func() -> tuple<stream<event>, future<result<_, error>>>;
+
+        /// Barge-in: truncate the in-flight assistant response. Kept as a
+        /// call rather than "drop the downlink": a guest may have the
+        /// response assembled and still want its own playback flushed.
+        /// `async` for the same class of reason as the uplinks above: a
+        /// live session's store is being driven concurrently while its
+        /// downlink flows, and a synchronously lowered export needs the
+        /// store exclusively, so it could not be called at all. Through
+        /// the accessor it can (docs/wit-redesign.md section 5).
+        interrupt: async func() -> result<_, error>;
+    }
 }
 
 /// Spawn-with-pipes: a generic host capability for bridge components.
 /// NOT linked for ordinary extensions; the host grants it per component,
 /// per command, with explicit user consent (the consent UX shows argv).
 /// Deliberately plain-data: no wasi:io dependency, no MCP awareness.
+///
+/// Resource-based since 0.7.0, and that is most of the redesign's point:
+/// every `timeout-ms` parameter, the short-write accounting of
+/// `write-stdin` ("taken, not delivered" — a blocking write that times out
+/// cannot say how much it delivered, wit-review F12) and the handle
+/// generation table all existed because a synchronous call cannot say
+/// "not yet". A stream says it by waiting, and the guest's own await is
+/// where a deadline belongs.
 interface process {
-    /// Spawn argv[0] with args and a filtered environment.
-    /// Returns a handle or an error message.
-    spawn: func(argv: list<string>) -> result<u64, string>;
+    use types.{error};
 
-    /// Append bytes to the child's stdin.
-    ///
-    /// Returns how many bytes of `data` the host **took**: short returns are
-    /// normal and are not an error. Taken bytes are delivered to the child
-    /// in order and belong to the host from that moment, so a caller that
-    /// gets `taken < data.len()` continues with `data[taken..]` and never
-    /// resends what it already handed over. Nothing is ever delivered
-    /// twice; `0` means the child took nothing within the budget, which is
-    /// the caller's cue to retry with a fresh budget, hold the message back,
-    /// or kill the child.
-    ///
-    /// The host buffers a bounded amount of undelivered data; once that is
-    /// full the call waits up to `timeout-ms` for the child to drain it and
-    /// then returns what it could take. `timeout-ms` therefore bounds the
-    /// wait, and 0 is rejected like every other budget here. The count is
-    /// deliberately bytes **taken**, not bytes delivered: a blocking write
-    /// that times out cannot say how much it delivered (wit-review F12), and
-    /// a re-sent half message is worse than a hang.
-    ///
-    /// An error means no more bytes can be taken at all — the child's stdin
-    /// is closed or the child is gone. Whatever an earlier call took is
-    /// still the host's responsibility, but a broken pipe loses it; the
-    /// next `read-stdout` reports the child's exit.
-    write-stdin: func(handle: u64, data: list<u8>, timeout-ms: u32) -> result<u32, string>;
+    record options {
+        /// argv[0] is the program; the host resolves it and applies its
+        /// own environment policy (unchanged: the consent UX shows argv,
+        /// which is why env and cwd are not contract fields).
+        argv: list<string>,
+    }
 
-    /// Read up to `max` bytes from the child's stdout. Returns as soon as
-    /// at least one byte is available or the stream closes (eof = true).
-    /// The wait is bounded by `timeout-ms`: a child that hangs without
-    /// writing anything surfaces as an explicit error instead of parking
-    /// the host thread forever (wit-review F11 — the process half of the
-    /// invariant `read-body` and `ws.recv` already carry), and 0 is
-    /// rejected, because "block forever" is not a contract. A timeout
-    /// leaves the handle usable: retry with a longer budget, or kill the
-    /// child.
-    read-stdout: func(handle: u64, max: u32, timeout-ms: u32) -> result<tuple<list<u8>, bool>, string>;
+    record exit-status {
+        /// Exit code, when the process exited on its own.
+        code: option<u32>,
+        /// Signal that killed it, on platforms that have signals.
+        signal: option<string>,
+    }
 
-    /// Terminate the child and close the handle. Returns a result since
-    /// 0.2.0 — a kill failure is reported, not swallowed (wit-review F8).
-    /// Handles carry a host-side generation: a stale handle after close
-    /// errors instead of aliasing a newer child.
-    kill: func(handle: u64) -> result<_, string>;
+    resource child {
+        /// Spawn and return the child. Fails when the program cannot be
+        /// started (not found, not consented, permission denied).
+        spawn: static func(options: options) -> result<child, error>;
+
+        /// The child's stdin, as a stream the guest writes and the host
+        /// pumps. Dropping the writable end closes the pipe (EOF at the
+        /// child); the future resolves when the host has passed everything
+        /// on or the pipe broke, and its error says which.
+        stdin: func(data: stream<u8>) -> future<result<_, error>>;
+
+        /// The child's stdout, from the moment it is called (once per
+        /// child). The stream ends at EOF — and also when the child dies,
+        /// which is why the exit status comes from `wait`, not from the
+        /// stream's end.
+        stdout: func() -> stream<u8>;
+
+        /// The child's stderr, same contract as `stdout`.
+        stderr: func() -> stream<u8>;
+
+        /// Resolves when the child exits. Asking twice is not an error;
+        /// both futures resolve with the same status.
+        wait: func() -> future<exit-status>;
+
+        /// Terminate the child (its whole process tree) and release it.
+        /// Idempotent.
+        kill: func() -> result<_, error>;
+    }
 }
 
 /// HTTP requests: a scoped network capability for bridge components. The
 /// host holds an origin allowlist built from explicit user consent; every
 /// request's origin (scheme + host + port) is checked against it before
-/// sending, and redirects are never followed. Plain data, handle-based,
+/// sending, and redirects are never followed. Plain data, resource-based,
 /// same shape as `process` — no wasi:http dependency.
 interface http {
-    /// Start a request. Fails if the url's origin is not in the consent
-    /// allowlist. Returns a response handle. `method` is passed through
-    /// verbatim — send uppercase ("GET", "POST"); servers are
-    /// case-sensitive about method names. `timeout-ms` bounds the connect
-    /// and the wait for the response headers (0 rejected): a peer that
-    /// accepts the connection and then says nothing is indistinguishable
-    /// from a dead one, and used to park the host thread forever
-    /// (wit-review F11). The response BODY is deliberately not covered by
-    /// it — that pace belongs to `read-body`'s own budget.
-    request: func(method: string, url: string, headers: list<tuple<string, string>>, body: list<u8>, timeout-ms: u32) -> result<u64, string>;
+    use types.{error};
 
-    /// HTTP status code of a started response.
-    status: func(handle: u64) -> result<u16, string>;
+    /// A started response. Metadata is available as soon as `request`
+    /// returns (headers have arrived); the body is the stream.
+    resource response {
+        /// HTTP status code.
+        status: func() -> u16;
 
-    /// One response header value (e.g. content-type, mcp-session-id).
-    header: func(handle: u64, name: string) -> result<option<string>, string>;
+        /// One response header value (e.g. content-type, mcp-session-id).
+        header: func(name: string) -> option<string>;
 
-    /// Read up to `max` bytes of the response body. Returns as soon as at
-    /// least one byte is available or the stream ends (eof = true) — the
-    /// same incremental-consumption contract as process.read-stdout, so
-    /// SSE streams can be consumed incrementally and closed early. The wait is
-    /// bounded by `timeout-ms`: a quiet peer returns an explicit error
-    /// instead of blocking the call forever (a silently hung SSE is
-    /// indistinguishable from a dead connection — wit-review F9), and 0
-    /// is rejected, because "block forever" is not a contract.
-    read-body: func(handle: u64, max: u32, timeout-ms: u32) -> result<tuple<list<u8>, bool>, string>;
+        /// The response body, consumed incrementally. SSE streams are read
+        /// the same way as any other body: read what has arrived, stop
+        /// reading when done — dropping the stream abandons the rest and
+        /// closes the connection, which is the only cancellation an SSE
+        /// consumer needs. The host keeps its own idle policy on a silent
+        /// peer and reports it by ending the stream.
+        body: func() -> stream<u8>;
+    }
 
-    /// Close the response and release the handle.
-    close: func(handle: u64);
+    /// Start a request, returning once the response headers are in. Fails
+    /// if the url's origin is not in the consent allowlist. `method` is
+    /// passed through verbatim — send uppercase ("GET", "POST"); servers
+    /// are case-sensitive about method names. The body is a value, not a
+    /// stream: tau's requests carry MCP JSON-RPC messages and OAuth token
+    /// calls, none of which are large enough to be worth a second
+    /// direction of streaming.
+    request: async func(method: string, url: string, headers: list<tuple<string, string>>, body: list<u8>) -> result<response, error>;
 }
-
 
 /// WebSocket connections: a scoped network capability for bridge
 /// components (IM stream modes — docs/im-channels.md). The host is a
 /// frame pipe only: it never parses payloads. Origin consent shares the
 /// `http` allowlist (ws: matches http:, wss: matches https:).
 interface ws {
+    use types.{error};
+
     /// One wire frame. Text frames carry UTF-8 (IM stream protocols are
     /// text-frame JSON); the pipe is honest about the wire shape.
     variant frame {
@@ -503,65 +838,88 @@ interface ws {
         binary(list<u8>),
     }
 
-    /// Connect to a ws(s) URL. The origin must be in the consent
-    /// allowlist (same rule as http.request); a refusal names the
-    /// origin. `timeout-ms` bounds the TCP/TLS connect and the upgrade
-    /// handshake (0 rejected): a peer that accepts the connection and then
-    /// stalls is indistinguishable from a dead one, and used to park the
-    /// host thread forever (wit-review F11). Returns a handle.
-    connect: func(url: string, timeout-ms: u32) -> result<u64, string>;
+    resource connection {
+        /// Connect to a ws(s) URL. The origin must be in the consent
+        /// allowlist (same rule as http.request); a refusal names the
+        /// origin. Async since 0.7.0: the TCP/TLS connect and the upgrade
+        /// handshake are what this call waits for, and waiting is no longer
+        /// a parameter.
+        connect: static async func(url: string) -> result<connection, error>;
 
-    /// Send one frame. Ok means the frame was WRITTEN to the socket
-    /// (the connection actor confirms after writing), not merely
-    /// queued — an ack that returns Ok has been sent, even if the
-    /// process exits immediately after (the dingtalk ack lesson). The
-    /// call blocks until then (bounded by the actor's read tick).
-    send: func(handle: u64, frame: frame) -> result<_, string>;
+        /// Send one frame. Awaiting the call means the frame was WRITTEN to
+        /// the socket, not merely queued — an ack that has been sent stays
+        /// sent even if the process exits immediately after (the dingtalk
+        /// ack lesson), and an await says that as precisely as the old
+        /// blocking call did.
+        send: async func(frame: frame) -> result<_, error>;
 
-    /// Receive the next frame, waiting at most `timeout-ms` (must be
-    /// > 0 — a recv that can block forever makes a dead connection
-    /// indistinguishable from a quiet one, wit-review F9). On timeout
-    /// returns an explicit error. The host pings every 30s and closes
-    /// the connection after 60s without any inbound frame or pong;
-    /// that close surfaces here as an error naming the reason.
-    /// Reconnect and catch-up are the component's job.
-    recv: func(handle: u64, timeout-ms: u32) -> result<frame, string>;
+        /// The frames the peer sends, as they arrive. The host pings every
+        /// 30s and closes the connection after 60s without any inbound frame
+        /// or pong; that close ends the stream and the future's error names
+        /// the reason. Reconnect and catch-up are the component's job.
+        receive: func() -> tuple<stream<frame>, future<result<_, error>>>;
 
-    /// Close and release the handle. Handles carry a generation: a
-    /// stale handle after a trap rebuild errors instead of aliasing a
-    /// newer connection (same rule as process).
-    close: func(handle: u64) -> result<_, string>;
+        /// The frames that have arrived since the last call, without
+        /// waiting — for the guests that CANNOT await.
+        ///
+        /// A bridge's inbound pump runs inside a SYNCHRONOUS probe
+        /// (docs/im-channels.md, 同步 guest 模型下的入站泵): a sync-lowered
+        /// export cannot await a stream read at all, and it cannot appoint a
+        /// task to do it either — a task spawned from a synchronously
+        /// lowered export is never polled (measured twice:
+        /// docs/wit-redesign.md section 5, legs 1b/1c, and again for this
+        /// decision, with a positive control from an async export that did
+        /// run). The queue is therefore drainable in the only shape such a
+        /// guest has, a call.
+        ///
+        /// Same answer `host.subscribe` got, for the same reason: a stream
+        /// hands the pace to the other end, and this guest cannot wait in
+        /// the first place.
+        ///
+        /// One consumer per connection: `receive` and `poll` split nothing —
+        /// whichever is called second gets `invalid`. An empty list means
+        /// "nothing yet"; a connection whose actor is gone fails here, with
+        /// the frames that did arrive delivered first (they are not
+        /// discarded to report the end).
+        poll: func() -> result<list<frame>, error>;
+    }
 }
 
 /// Webhook ingress: a scoped LISTEN capability for bridge components
 /// (IM webhook platforms — WhatsApp Business Cloud, 企业微信 callback;
 /// docs/im-channels.md). WASI p2 has no listen, so the host runs the
 /// HTTP server and pushes each request into the component's
-/// `ingress-handler` export synchronously; the export's return value IS
-/// the HTTP response (the platform's ack / synchronous reply). The host
-/// is a pipe: method/path/headers/body pass through untouched, signature
-/// verification against platform secrets is the component's job (it
-/// holds the secret; the host never does). Consent is the listen
-/// ADDRESS (CLI --ingress), orthogonal to the origin allowlist.
+/// `ingress-handler` export; the export's return value IS the HTTP response
+/// (the platform's ack / synchronous reply). The host is a pipe:
+/// method/path/headers/body pass through untouched, signature verification
+/// against platform secrets is the component's job (it holds the secret;
+/// the host never does). Consent is the listen ADDRESS (CLI --ingress),
+/// orthogonal to the origin allowlist.
 interface ingress {
-    /// Register `route` (an absolute path, e.g. "/im/whatsapp") on the
-    /// consented listen address. Fails naming the address if no
-    /// --ingress consent covers it. One registration per route; a
-    /// duplicate errors instead of shadowing.
-    listen: func(route: string) -> result<_, string>;
+    use types.{error};
 
-    /// Stop serving `route` and release it. A route that was never
-    /// registered errors (same honesty as ws.close).
-    close: func(route: string) -> result<_, string>;
+    /// A registered route. A resource since 0.7.0: dropping it stops
+    /// serving the route, so "close a route that was never registered"
+    /// (an error 0.6.0 had to define) is not expressible.
+    resource registration;
+
+    /// Register `route` (an absolute path, e.g. "/im/whatsapp") on the
+    /// consented listen address. Fails naming the address if no --ingress
+    /// consent covers it. One registration per route; a duplicate errors
+    /// instead of shadowing.
+    listen: func(route: string) -> result<registration, error>;
 }
 
 /// The push half of webhook ingress: the host calls handle-request once
-/// per inbound HTTP request on a registered route, synchronously, under
-/// the instance lock (a component mid-tool-call queues the webhook —
-/// platforms retry, that is a fact of the platform, not a loss). The
-/// returned response is written back verbatim. A bridge with no webhook
-/// leg still exports this (the 0.3.0 world makes it mandatory) with a
-/// stub returning 501 — nothing calls it unless the component listened.
+/// per inbound HTTP request on a registered route, under the instance lock
+/// (a component mid-tool-call queues the webhook — platforms retry, that is
+/// a fact of the platform, not a loss). The host still serializes per
+/// instance; `async` since 0.7.0 means a handler that needs to call out
+/// (http, process) awaits in place instead of parking a host thread for the
+/// length of the platform's timeout. The returned response is written back
+/// verbatim. A bridge with no webhook leg still exports this (the 0.3.0
+/// world makes it mandatory) with a stub returning 501 — nothing calls it
+/// unless the component listened.
 interface ingress-handler {
     /// One inbound HTTP request.
     record request {
@@ -591,9 +949,43 @@ interface ingress-handler {
         body: list<u8>,
     }
 
-    handle-request: func(request: request) -> response;
+    handle-request: async func(request: request) -> response;
 }
 
+
+/// General extension: tools and/or probes, plus the host channel.
+/// Ambient WASI (fs/env/stdio/args/network) is granted by default —
+/// pass --deny-wasi to the host CLI to run components with no ambient
+/// capabilities.
+world extension {
+    import host;
+    export tools;
+    export probes;
+}
+
+/// Model provider extension. `models.run` returns the event stream. Network
+/// access comes from the same consent-gated `http` capability bridges use:
+/// always linked, granted empty by default, every request's origin checked
+/// against the per-component allowlist (remembered per signing fingerprint).
+/// With no consent, calls fail at call time.
+world provider {
+    import http;
+    export models;
+}
+
+/// Realtime provider (docs/realtime-av.md): a persistent bidirectional
+/// session (the OpenAI Realtime / Gemini Live shape), plus ordinary
+/// provider duties — the component doubles as a provider, and discovery and
+/// request/response are unchanged. Downlink events travel on the session
+/// resource's `downlink` stream. Microphone capture is performed BY THE HOST
+/// on the session's behalf and gated by the per-fingerprint `microphone`
+/// consent category; the `camera` category is registered but admits no
+/// capture path yet (always absent).
+world realtime {
+    import http;
+    export models;
+    export session;
+}
 
 /// Bridge components translate an external tool protocol (MCP today) into
 /// tau tools. The host knows nothing about that protocol; it only grants
@@ -609,8 +1001,8 @@ interface ingress-handler {
 /// points() list). Later on the same 0.3.0 train (docs/im-channels.md
 /// ingress section): webhook platforms get import ingress (consent-gated
 /// listen by ADDRESS) + export ingress-handler (host pushes each inbound
-/// request in synchronously; the return value is the HTTP response; a
-/// bridge without a webhook leg exports a 501 stub).
+/// request in; the return value is the HTTP response; a bridge without a
+/// webhook leg exports a 501 stub).
 world bridge {
     import process;
     import http;
@@ -619,5 +1011,6 @@ world bridge {
     import ingress;
     export tools;
     export probes;
+    export bridge-io;
     export ingress-handler;
 }

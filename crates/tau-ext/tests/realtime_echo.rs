@@ -53,10 +53,28 @@ async fn realtime_session_crosses_the_wasm_boundary() {
     let mut events = session.events();
     session.push_audio(vec![1, 2, 3, 4]).await.unwrap();
     session.push_audio(vec![5, 6]).await.unwrap();
+    // Audio and commands travel on independent paths -- the guest drains a
+    // host-produced stream while `interrupt` is a call on the driver -- so
+    // the contract fixes no order between "this chunk came back echoed" and
+    // "the interrupt was handled". Wait for both echoes first: that IS the
+    // order the component's script promises, while asserting the other one
+    // is a flake (measured: 3 of 5 runs on the pre-fix binary put
+    // `Interrupted` first).
+    let mut seen = Vec::new();
+    while seen
+        .iter()
+        .filter(|event| matches!(event, ModelEvent::AudioDelta { .. }))
+        .count()
+        < 2
+    {
+        let event = tokio::time::timeout(std::time::Duration::from_secs(10), events.next())
+            .await
+            .expect("both audio chunks come back echoed")
+            .expect("the event stream ends only after close");
+        seen.push(event);
+    }
     session.interrupt().await.unwrap();
     session.close().await.unwrap();
-
-    let mut seen = Vec::new();
     while let Some(event) = events.next().await {
         seen.push(event);
     }

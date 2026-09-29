@@ -27,7 +27,6 @@
 //! // tau_core::ProbeRegistry, then build the Agent as usual.
 //! ```
 
-use std::collections::HashMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
@@ -37,8 +36,10 @@ use tau_core::probe::{ProbeHandler, ProbePoint, Verdict};
 use tau_core::probe_payload::ProbePayload;
 use tau_core::tool::{Tool, ToolDef, ToolOutput};
 use thiserror::Error;
-use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
-use wasmtime::{Config, Engine, Store};
+use wasmtime::component::{
+    Access, Accessor, Component, HasSelf, Linker, Resource, ResourceTable, StreamReader,
+};
+use wasmtime::{AsContextMut, Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 pub mod ws;
@@ -55,6 +56,13 @@ mod bindings {
         // instead of parking a thread on them, and no host function
         // block_on's a runtime thread (docs/wit-redesign.md §6, stage 1).
         exports: { default: async },
+        // `host.subscribe` hands the guest a resource, so the generated
+        // `subscription` needs a host storage type to stand for; without
+        // this it is an empty enum with nothing the host could store
+        // (docs/wit-redesign.md, leg 4's binding recipe).
+        with: {
+            "tau:extension/host.subscription": crate::StreamSubscription,
+        },
     });
 }
 
@@ -69,7 +77,18 @@ mod provider_bindings {
         // async too: a provider's `run` spends its life in `http.*`, and a
         // host import that blocks would park the very worker thread the
         // run is now awaited on.
-        imports: { default: async },
+        imports: {
+            default: async,
+            // `response.body` returns a stream, and a stream handle lives
+            // in the store: the `store` flag is wasmtime's answer
+            // (docs/wit-redesign.md, leg 4's binding recipe).
+            "tau:extension/http.[method]response.body": store,
+        },
+        // Without this the generated resource type is an empty enum and
+        // there is nothing the host could store behind `http.response`.
+        with: {
+            "tau:extension/http.response": crate::http::HostResponse,
+        },
         exports: { default: async },
     });
 }
@@ -81,11 +100,33 @@ mod bridge_bindings {
         // by the wit_vendored test below.
         path: "wit/tau.wit",
         world: "bridge",
-        // Last world of stage 1's second half (docs/wit-redesign.md §6),
-        // and the one with the most to await: exports, plus the http, ws,
-        // process and ingress imports, whose calls all wait on a socket, a
-        // pipe or an actor thread.
-        imports: { default: async },
+        // Last world of stage 2 (docs/wit-redesign.md §6), and the one
+        // with the most to await: exports, plus the http, ws, process and
+        // ingress imports, whose calls all wait on a socket, a pipe or an
+        // actor thread. The store-flagged ones are those that hand the
+        // guest a stream or a future -- a handle lives in the store (leg
+        // 4's binding recipe).
+        imports: {
+            default: async,
+            "tau:extension/http.[method]response.body": store,
+            "tau:extension/process.[method]child.stdin": store,
+            "tau:extension/process.[method]child.stdout": store,
+            "tau:extension/process.[method]child.stderr": store,
+            "tau:extension/process.[method]child.wait": store,
+            // `receive` hands out a stream; `poll` is the sync drain (a
+            // bridge's inbound pump runs in a probe, which cannot await).
+            "tau:extension/ws.[method]connection.receive": store,
+            "tau:extension/ws.[method]connection.poll": store,
+        },
+        // Every resource the guest owns needs a host storage type; without
+        // the mapping each is an empty enum with nothing to store.
+        with: {
+            "tau:extension/http.response": crate::http::HostResponse,
+            "tau:extension/ws.connection": crate::ws::HostConnection,
+            "tau:extension/process.child": crate::bridge::HostChild,
+            "tau:extension/ingress.registration": crate::ingress::HostRegistration,
+            "tau:extension/host.subscription": crate::StreamSubscription,
+        },
         exports: { default: async },
     });
 }
@@ -170,22 +211,24 @@ impl HostChannel {
         inner.control = Some(control);
     }
 
-    fn bus(&self) -> Result<tau_core::EventBus, String> {
+    fn bus(&self) -> Result<tau_core::EventBus, HostError> {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .bus
             .clone()
-            .ok_or_else(|| "host channel not wired (no agent bus attached)".to_string())
+            .ok_or_else(|| HostError::failed("host channel not wired (no agent bus attached)"))
     }
 
-    fn control(&self) -> Result<tau_core::ControlTx, String> {
+    fn control(&self) -> Result<tau_core::ControlTx, HostError> {
         self.inner
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner)
             .control
             .clone()
-            .ok_or_else(|| "host channel not wired (no agent control channel attached)".to_string())
+            .ok_or_else(|| {
+                HostError::failed("host channel not wired (no agent control channel attached)")
+            })
     }
 }
 
@@ -200,19 +243,19 @@ struct ComponentState {
     table: ResourceTable,
     channel: Arc<HostChannel>,
     inject: bool,
-    /// Stream subscriptions (host.subscribe/poll/unsubscribe,
-    /// docs/stream-subscribe.md). Deliberately on the per-instance state,
-    /// not the shared channel: a trap rebuild creates a fresh
-    /// ComponentState, so old handles stop resolving and the receivers
-    /// drop with the old instance — handles never alias across a rebuild.
-    subscriptions: HashMap<u64, StreamSubscription>,
-    next_subscription: u64,
 }
 
 /// One open host.subscribe handle: the topic filter plus the bus
 /// receiver backing the bounded ring (capacity = the bus's own).
-/// pub(crate): bridge state holds the same per-instance subscriptions.
-pub(crate) struct StreamSubscription {
+///
+/// Since 0.7.0 this IS the guest's resource (`with:` maps
+/// `host.subscription` onto it), so ownership replaces the 0.6.0 handle
+/// table: dropping it drops the receiver, and a trap rebuild cannot
+/// alias a stale handle because the table died with the old store.
+/// `pub` because the generated bindings re-export it: `with:` names it
+/// as the storage type behind `host.subscription`, and the bridge state
+/// holds the same per-instance subscriptions.
+pub struct StreamSubscription {
     /// Subscribed to AgentEvent::TextDelta.
     text_delta: bool,
     /// Subscribed to AgentEvent::AudioDelta.
@@ -229,28 +272,85 @@ impl WasiView for ComponentState {
     }
 }
 
+use bindings::exports::tau::extension::probes as wit_probes;
+use bindings::tau::extension::host as wit_host;
 use bindings::tau::extension::types as wit;
+use tau_core::error::HostError;
+
+/// A subscribed topic, in a shape both worlds' generated enums map onto.
+/// The contract types the topic enum, so "unknown topic" stopped being a
+/// runtime refusal; this is only the host's own carrier for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Topic {
+    /// Assistant text fragments.
+    TextDelta,
+    /// Provider audio segments (count + media type).
+    AudioDelta,
+}
+
+/// One drained event, in a shape both worlds convert into their own
+/// generated `stream-event`.
+pub(crate) enum Polled {
+    /// The ring overran: n events were dropped before the next batch.
+    Lagged(u64),
+    /// A fragment of assistant text.
+    TextDelta(String),
+    /// A provider audio segment.
+    AudioDelta {
+        /// How many bytes arrived.
+        bytes: u64,
+        /// The segment's media type.
+        media_type: String,
+    },
+}
+
+/// The level name the bus carries for a notification (the bus keeps the
+/// 0.6.0 string; the contract types the enum).
+pub(crate) fn level_name(level: wit_host::Level) -> &'static str {
+    match level {
+        wit_host::Level::Info => "info",
+        wit_host::Level::Warn => "warn",
+        wit_host::Level::Error => "error",
+    }
+}
+
+/// Classify the host's own failures for the contract's `types.error`
+/// (three-way since 0.7.0; docs/wit-redesign.md, the error decision):
+/// `refused` = policy or consent, `failed` = allowed but broken,
+/// `invalid` = never a valid call here. Call sites name the variant;
+/// this is the mechanical lift into the generated type.
+impl From<HostError> for wit::Error {
+    fn from(error: HostError) -> Self {
+        match error {
+            HostError::Refused(detail) => wit::Error::Refused(detail),
+            HostError::Failed(detail) => wit::Error::Failed(detail),
+            HostError::Invalid(detail) => wit::Error::Invalid(detail),
+        }
+    }
+}
 
 /// steer/follow-up shared path (extensions and bridges alike): consent
 /// gate, role validation, conversion (size cap included), then enqueue
-/// into the control channel. Enqueue-only — the agent loop applies the
-/// message at its own checkpoints (docs/host-channel.md 语义红线 1).
+/// into the control channel. Enqueue-only: the agent loop applies the
+/// message at its own checkpoints (docs/host-channel.md, red line 1).
 pub(crate) fn inject_message(
     channel: &HostChannel,
     inject: bool,
     message: wit::Message,
     steer: bool,
-) -> Result<(), String> {
+) -> Result<(), HostError> {
     if !inject {
-        return Err(
-            "session injection not consented for this component (host CLI: --allow-inject)"
-                .into(),
-        );
+        return Err(HostError::refused(
+            "session injection not consented for this component (host CLI: --allow-inject)",
+        ));
     }
     if !matches!(message.role, wit::Role::User) {
-        return Err("host.steer/follow-up: message role must be user".into());
+        return Err(HostError::invalid(
+            "host.steer/follow-up: message role must be user",
+        ));
     }
-    let message = convert::message_to_core(message).map_err(|e| e.to_string())?;
+    let message =
+        convert::message_to_core(message).map_err(|e| HostError::invalid(e.to_string()))?;
     let control = channel.control()?;
     control
         .send(if steer {
@@ -258,29 +358,33 @@ pub(crate) fn inject_message(
         } else {
             tau_core::Control::FollowUp(message)
         })
-        .map_err(|_| "agent control channel closed (run over?)".to_string())
+        .map_err(|_| HostError::failed("agent control channel closed (run over?)"))
 }
 
-/// notify shared path: user-visible notice → the agent's bus as an
+/// notify shared path: user-visible notice -> the agent's bus as an
 /// ExtensionNotice. A fact for the UI, never model history.
 pub(crate) fn channel_notify(
     channel: &HostChannel,
-    level: String,
+    level: &str,
     content: Vec<wit::Content>,
-) -> Result<(), String> {
-    let content = convert::contents_to_core(content).map_err(|e| e.to_string())?;
+) -> Result<(), HostError> {
+    let content =
+        convert::contents_to_core(content).map_err(|e| HostError::invalid(e.to_string()))?;
     let bus = channel.bus()?;
     // No subscribers is fine; a full channel is the subscriber's problem.
-    let _ = bus.send(tau_core::AgentEvent::ExtensionNotice { level, content });
+    let _ = bus.send(tau_core::AgentEvent::ExtensionNotice {
+        level: level.to_string(),
+        content,
+    });
     Ok(())
 }
 
-/// emit shared path: extension-defined fact → the bus as an
+/// emit shared path: extension-defined fact -> the bus as an
 /// ExtensionFact. The schema is external to tau (JSON leaf) but must be
 /// well-formed JSON.
-pub(crate) fn channel_emit(channel: &HostChannel, event_json: String) -> Result<(), String> {
+pub(crate) fn channel_emit(channel: &HostChannel, event_json: String) -> Result<(), HostError> {
     let fact: serde_json::Value = serde_json::from_str(&event_json)
-        .map_err(|e| format!("host.emit: event-json is not valid JSON: {e}"))?;
+        .map_err(|e| HostError::invalid(format!("host.emit: event-json is not valid JSON: {e}")))?;
     let bus = channel.bus()?;
     let _ = bus.send(tau_core::AgentEvent::ExtensionFact(fact));
     Ok(())
@@ -288,86 +392,58 @@ pub(crate) fn channel_emit(channel: &HostChannel, event_json: String) -> Result<
 
 /// host.subscribe shared path (docs/stream-subscribe.md): hang a bounded
 /// ring on the bus; the guest drains it with poll inside its own
-/// invocations. Fail-loud on unknown topics — a silent empty
-/// subscription looks identical to "no events".
-pub(crate) fn subscribe_topics(
+/// invocations. Both worlds map their generated topic enum onto
+/// [`Topic`] first, so this carries no bindgen types.
+pub(crate) fn subscribe(
     channel: &HostChannel,
-    subscriptions: &mut HashMap<u64, StreamSubscription>,
-    next_subscription: &mut u64,
-    topics: &[String],
-) -> Result<u64, String> {
+    topics: &[Topic],
+) -> Result<StreamSubscription, HostError> {
+    if topics.is_empty() {
+        return Err(HostError::invalid(
+            "host.subscribe: no topics (catalog: text-delta, audio-delta)",
+        ));
+    }
     let mut sub = StreamSubscription {
         text_delta: false,
         audio_delta: false,
         rx: channel.bus()?.subscribe(),
     };
-    if topics.is_empty() {
-        return Err("host.subscribe: no topics (catalog: text-delta, audio-delta)".into());
-    }
     for topic in topics {
-        match topic.as_str() {
-            "text-delta" => sub.text_delta = true,
-            "audio-delta" => sub.audio_delta = true,
-            other => {
-                return Err(format!(
-                    "host.subscribe: unknown topic {other:?} (catalog: text-delta, audio-delta)"
-                ));
-            }
+        match topic {
+            Topic::TextDelta => sub.text_delta = true,
+            Topic::AudioDelta => sub.audio_delta = true,
         }
     }
-    let id = *next_subscription;
-    *next_subscription += 1;
-    subscriptions.insert(id, sub);
-    Ok(id)
+    Ok(sub)
 }
 
-/// host.poll shared path: non-blocking drain (try_recv — a synchronous
+/// host.poll shared path: non-blocking drain (try_recv -- a synchronous
 /// host function must never block_on on the runtime thread). Off-topic
 /// events are dropped on the floor; an overrun surfaces as one lagged(n)
 /// marker at the head of the batch.
-pub(crate) fn poll_subscription(
-    subscriptions: &mut HashMap<u64, StreamSubscription>,
-    subscription: u64,
-) -> Result<Vec<bindings::tau::extension::host::StreamEvent>, String> {
-    use bindings::tau::extension::host::{AudioSegment, StreamEvent};
+pub(crate) fn poll(sub: &mut StreamSubscription) -> Vec<Polled> {
     use tokio::sync::broadcast::error::TryRecvError;
-    let sub = subscriptions.get_mut(&subscription).ok_or_else(|| {
-        format!(
-            "host.poll: unknown subscription {subscription}                  (handles do not survive a trap rebuild)"
-        )
-    })?;
     let mut out = Vec::new();
     loop {
         match sub.rx.try_recv() {
             Ok(tau_core::AgentEvent::TextDelta(text)) if sub.text_delta => {
-                out.push(StreamEvent::TextDelta(text));
+                out.push(Polled::TextDelta(text));
             }
             // Contract stays count-only (audio-segment): the bytes ride
             // the host bus for the renderer's sink, but no audio hot
             // path crosses to guests.
             Ok(tau_core::AgentEvent::AudioDelta { data, media_type }) if sub.audio_delta => {
-                out.push(StreamEvent::AudioDelta(AudioSegment {
+                out.push(Polled::AudioDelta {
                     bytes: data.len() as u64,
                     media_type,
-                }));
+                });
             }
             Ok(_) => {} // off-topic: advance the ring, drop the event
-            Err(TryRecvError::Lagged(n)) => out.push(StreamEvent::Lagged(n)),
+            Err(TryRecvError::Lagged(n)) => out.push(Polled::Lagged(n)),
             Err(TryRecvError::Empty) | Err(TryRecvError::Closed) => break,
         }
     }
-    Ok(out)
-}
-
-/// host.unsubscribe shared path.
-pub(crate) fn unsubscribe_subscription(
-    subscriptions: &mut HashMap<u64, StreamSubscription>,
-    subscription: u64,
-) -> Result<(), String> {
-    subscriptions
-        .remove(&subscription)
-        .map(|_| ())
-        .ok_or_else(|| format!("host.unsubscribe: unknown subscription {subscription}"))
+    out
 }
 
 /// The types interface is type-only; bindgen still generates the marker
@@ -378,42 +454,76 @@ impl bindings::tau::extension::types::Host for ComponentState {}
 /// shared ops above (the bridge world's impl converts its own bindgen
 /// types into these shapes and calls the same functions).
 impl bindings::tau::extension::host::Host for ComponentState {
-    fn notify(&mut self, level: String, content: Vec<wit::Content>) -> Result<(), String> {
-        channel_notify(&self.channel, level, content)
-    }
-
-    fn emit(&mut self, event_json: String) -> Result<(), String> {
-        channel_emit(&self.channel, event_json)
-    }
-
-    fn steer(&mut self, message: wit::Message) -> Result<(), String> {
-        inject_message(&self.channel, self.inject, message, true)
-    }
-
-    fn follow_up(&mut self, message: wit::Message) -> Result<(), String> {
-        inject_message(&self.channel, self.inject, message, false)
-    }
-
-    fn subscribe(&mut self, topics: Vec<String>) -> Result<u64, String> {
-        subscribe_topics(
-            &self.channel,
-            &mut self.subscriptions,
-            &mut self.next_subscription,
-            &topics,
-        )
-    }
-
-    fn poll(
+    fn notify(
         &mut self,
-        subscription: u64,
-    ) -> Result<Vec<bindings::tau::extension::host::StreamEvent>, String> {
-        poll_subscription(&mut self.subscriptions, subscription)
+        level: wit_host::Level,
+        content: Vec<wit::Content>,
+    ) -> Result<(), wit::Error> {
+        channel_notify(&self.channel, level_name(level), content).map_err(Into::into)
     }
 
-    fn unsubscribe(&mut self, subscription: u64) -> Result<(), String> {
-        unsubscribe_subscription(&mut self.subscriptions, subscription)
+    fn emit(&mut self, event_json: String) -> Result<(), wit::Error> {
+        channel_emit(&self.channel, event_json).map_err(Into::into)
+    }
+
+    fn steer(&mut self, message: wit::Message) -> Result<(), wit::Error> {
+        inject_message(&self.channel, self.inject, message, true).map_err(Into::into)
+    }
+
+    fn follow_up(&mut self, message: wit::Message) -> Result<(), wit::Error> {
+        inject_message(&self.channel, self.inject, message, false).map_err(Into::into)
+    }
+
+    fn subscribe(
+        &mut self,
+        topics: Vec<wit_host::Topic>,
+    ) -> Result<Resource<StreamSubscription>, wit::Error> {
+        let topics: Vec<Topic> = topics
+            .into_iter()
+            .map(|topic| match topic {
+                wit_host::Topic::TextDelta => Topic::TextDelta,
+                wit_host::Topic::AudioDelta => Topic::AudioDelta,
+            })
+            .collect();
+        let subscription = subscribe(&self.channel, &topics)?;
+        self.table
+            .push(subscription)
+            .map_err(|_| wit::Error::Failed("host.subscribe: resource table full".into()))
     }
 }
+
+/// The subscription resource's own methods. Dropping it IS the
+/// unsubscribe -- 0.6.0 had an explicit call plus a "close a
+/// subscription that was never opened" error, and ownership makes both
+/// unrepresentable.
+impl bindings::tau::extension::host::HostSubscription for ComponentState {
+    fn poll(
+        &mut self,
+        subscription: Resource<StreamSubscription>,
+    ) -> Vec<bindings::tau::extension::host::StreamEvent> {
+        use bindings::tau::extension::host::{AudioSegment, StreamEvent};
+        let Ok(sub) = self.table.get_mut(&subscription) else {
+            eprintln!("tau host.poll: the subscription resource is not in the table");
+            return Vec::new();
+        };
+        poll(sub)
+            .into_iter()
+            .map(|event| match event {
+                Polled::Lagged(n) => StreamEvent::Lagged(n),
+                Polled::TextDelta(text) => StreamEvent::TextDelta(text),
+                Polled::AudioDelta { bytes, media_type } => {
+                    StreamEvent::AudioDelta(AudioSegment { bytes, media_type })
+                }
+            })
+            .collect()
+    }
+
+    fn drop(&mut self, subscription: Resource<StreamSubscription>) -> wasmtime::Result<()> {
+        self.table.delete(subscription)?;
+        Ok(())
+    }
+}
+
 
 struct ComponentInstance {
     store: Store<ComponentState>,
@@ -440,8 +550,6 @@ impl InstanceFactory {
             table: ResourceTable::new(),
             channel: self.channel.clone(),
             inject: self.inject,
-            subscriptions: HashMap::new(),
-            next_subscription: 0,
         };
         let mut store = Store::new(&self.engine, state);
         let bindings =
@@ -545,7 +653,7 @@ impl WasiPolicy {
 /// places is how a version hint silently goes wrong, so
 /// `contract_version_matches_wit` fails the build if it drifts from the
 /// vendored WIT.
-pub(crate) const CONTRACT_VERSION: &str = "0.6.0";
+pub(crate) const CONTRACT_VERSION: &str = "0.7.0";
 
 /// If the component exports `tau:extension` interfaces of another
 /// contract version, say so — "missing export tau:extension/tools@0.6.0"
@@ -791,11 +899,22 @@ impl ExtensionHost {
             ),
         })?;
 
-        let definitions = instance
-            .bindings
-            .tau_extension_tools()
-            .call_definitions(&mut instance.store)
-            .await
+        // `definitions` is async since 0.7.0 (a bridge performs its
+        // handshake there — docs/wit-redesign.md section 5, leg 5), so the
+        // call goes through the store's concurrent driver like `execute`.
+        let definitions = {
+            let ComponentInstance { store, bindings } = &mut instance;
+            store
+                .run_concurrent(async |acc| {
+                    bindings.tau_extension_tools().call_definitions(acc).await
+                })
+                .await
+        };
+        let definitions = definitions
+            .map_err(|e| ExtError::Load {
+                path: path.display().to_string(),
+                reason: format!("definitions() trapped: {}", compact_wasm_error(&e)),
+            })?
             .map_err(|e| ExtError::Load {
                 path: path.display().to_string(),
                 reason: format!("definitions() trapped: {}", compact_wasm_error(&e)),
@@ -828,10 +947,7 @@ impl ExtensionHost {
             }) as Box<dyn Tool>);
         }
 
-        let points: Vec<ProbePoint> = points
-            .iter()
-            .filter_map(|name| ProbePoint::from_name(name))
-            .collect();
+        let points: Vec<ProbePoint> = points.into_iter().map(convert::point_to_core).collect();
         let probes: Vec<Box<dyn ProbeHandler>> = if points.is_empty() {
             Vec::new()
         } else {
@@ -887,11 +1003,19 @@ impl Tool for WasmTool {
     async fn execute(&self, arguments: serde_json::Value) -> ToolOutput {
         let name = self.def.name.clone();
         let mut guard = self.shared.lock().await;
+        // The export is async (0.7.0), so the call goes through the
+        // store's concurrent driver: one drive per invocation, with the
+        // call itself as the only thing running inside it (a tool call
+        // has no streams to pump).
         let result = {
             let ComponentInstance { store, bindings } = &mut guard.instance;
-            bindings
-                .tau_extension_tools()
-                .call_execute(store, &name, &arguments.to_string())
+            store
+                .run_concurrent(async |acc| {
+                    bindings
+                        .tau_extension_tools()
+                        .call_execute(acc, name, arguments.to_string())
+                        .await
+                })
                 .await
         };
         if result.is_err() {
@@ -900,16 +1024,20 @@ impl Tool for WasmTool {
             guard.revive().await;
         }
         match result {
-            Ok(r) => match convert::tool_result_blocks_to_core(r.content) {
+            Ok(Ok(r)) => match convert::result_blocks_to_core(r.content) {
                 // 校验即错误: invalid/oversize blocks become a tool error
                 // the model sees — never silently truncated or dropped.
                 Ok(content) => ToolOutput {
-                    content,
+                    content: content.into_iter().map(tau_core::types::Content::from).collect(),
                     is_error: r.is_error,
                 },
                 Err(e) => ToolOutput::err(format!("invalid tool result: {e}")),
             },
-            Err(e) => ToolOutput::err(format!("wasm trap: {}", compact_wasm_error(&e))),
+            // Two error layers: the drive's own failure and the guest's
+            // trap. The model sees the same thing either way.
+            Ok(Err(e)) | Err(e) => {
+                ToolOutput::err(format!("wasm trap: {}", compact_wasm_error(&e)))
+            }
         }
     }
 }
@@ -927,19 +1055,8 @@ struct WasmProbes {
 /// bug: like a trap, it degrades to Continue — and says so on stderr —
 /// rather than wedging the run (0.6.0 treated the same input as a hard
 /// run error; a broken extension must not wedge the harness).
-pub(crate) fn replace_probe_payload(
-    point: ProbePoint,
-    payload: ProbePayload,
-    raw: Option<String>,
-) -> Verdict {
-    let Some(raw) = raw else {
-        return Verdict::Continue;
-    };
-    let Ok(replacement) = serde_json::from_str::<serde_json::Value>(&raw) else {
-        eprintln!("tau probe: {}: replacement is not JSON", point.name());
-        return Verdict::Continue;
-    };
-    match payload.merge_json(replacement) {
+pub(crate) fn replace_probe_payload(point: ProbePoint, payload: wit_probes::Payload) -> Verdict {
+    match convert::payload_from_point(point, payload) {
         Ok(replaced) => Verdict::Replace(replaced),
         Err(error) => {
             eprintln!("tau probe: {error}");
@@ -955,14 +1072,20 @@ impl ProbeHandler for WasmProbes {
     }
 
     async fn probe(&self, point: ProbePoint, payload: ProbePayload) -> Verdict {
-        let point_name = point.name().to_string();
-        let payload_json = payload.to_json().to_string();
+        let wit_point = convert::point_to_wit(point);
+        let wit_payload = convert::payload_to_wit(&payload);
         let mut guard = self.shared.lock().await;
+        // `probe` is the one extension export still declared sync in the
+        // contract, so it lowers against the store itself (a sync lowering
+        // needs the store exclusively, which is why it cannot go through
+        // an accessor the way `tools.execute` does). Nothing is driving
+        // this instance between model calls, so the store call is right
+        // here; only the ASYNC default makes the result a future.
         let result = {
             let ComponentInstance { store, bindings } = &mut guard.instance;
             bindings
                 .tau_extension_probes()
-                .call_probe(store, &point_name, &payload_json)
+                .call_probe(store, wit_point, &wit_payload)
                 .await
         };
         if result.is_err() {
@@ -971,14 +1094,10 @@ impl ProbeHandler for WasmProbes {
             guard.revive().await;
         }
         match result {
-            Ok(verdict) => match verdict.action {
-                bindings::exports::tau::extension::probes::Action::Continue => Verdict::Continue,
-                bindings::exports::tau::extension::probes::Action::Replace => {
-                    replace_probe_payload(point, payload, verdict.payload_json)
-                }
-                bindings::exports::tau::extension::probes::Action::Block => Verdict::Block {
-                    reason: verdict.reason.unwrap_or_else(|| "blocked".into()),
-                },
+            Ok(verdict) => match verdict {
+                wit_probes::Verdict::Continue => Verdict::Continue,
+                wit_probes::Verdict::Replace(payload) => replace_probe_payload(point, payload),
+                wit_probes::Verdict::Block(reason) => Verdict::Block { reason },
             },
             // A broken extension degrades to Continue, never wedges the run.
             Err(_) => Verdict::Continue,
@@ -995,7 +1114,6 @@ impl ProbeHandler for WasmProbes {
 struct ProviderState {
     ctx: WasiCtx,
     table: ResourceTable,
-    event_tx: Option<tokio::sync::mpsc::UnboundedSender<tau_core::ModelEvent>>,
     /// Origin-allowlisted HTTP egress, granted by per-fingerprint consent.
     /// Behind a lock the host import may hand to `spawn_blocking`: the
     /// registry is the blocking reqwest client, and its methods must not
@@ -1012,61 +1130,147 @@ impl WasiView for ProviderState {
     }
 }
 
-use provider_bindings::tau::extension::events as provider_events;
-
-impl provider_events::Host for ProviderState {
-    /// Typed in 0.2.0: malformed frames are impossible by construction
-    /// (the 0.1.0 JSON envelope's silent-skip path is gone); the result
-    /// reports the remaining semantic violations to the guest.
-    async fn emit(&mut self, event: provider_events::ModelEvent) -> Result<(), String> {
-        let event = match event {
-            provider_events::ModelEvent::TextDelta(text) => tau_core::ModelEvent::TextDelta { text },
-            provider_events::ModelEvent::ToolCallDelta(d) => {
-                tau_core::ModelEvent::ToolCallDelta {
-                    index: d.index,
-                    id: d.id,
-                    name: d.name,
-                    arguments_delta: d.arguments_delta,
-                }
+/// The provider's event type in core terms. Malformed frames are
+/// impossible by construction (the type is generated from the contract);
+/// what survives is the semantic check the host has always made -- an
+/// audio delta with no media type cannot be assembled into anything.
+fn event_to_core(
+    event: provider_bindings::exports::tau::extension::models::Event,
+) -> Result<tau_core::ModelEvent, String> {
+    use provider_bindings::exports::tau::extension::models::Event;
+    use provider_bindings::tau::extension::types::StopReason;
+    Ok(match event {
+        Event::TextDelta(text) => tau_core::ModelEvent::TextDelta { text },
+        Event::ToolCallDelta(d) => tau_core::ModelEvent::ToolCallDelta {
+            index: d.index,
+            id: d.id,
+            name: d.name,
+            arguments_delta: d.arguments_delta,
+        },
+        Event::AudioDelta(a) => {
+            if a.media_type.is_empty() {
+                return Err("run: audio-delta with an empty media-type".into());
             }
-            provider_events::ModelEvent::AudioDelta(a) => {
-                if a.media_type.is_empty() {
-                    return Err("emit audio-delta: media-type must not be empty".into());
-                }
-                tau_core::ModelEvent::AudioDelta {
-                    data: a.data,
-                    media_type: a.media_type,
-                }
+            tau_core::ModelEvent::AudioDelta {
+                data: a.data,
+                media_type: a.media_type,
             }
-            provider_events::ModelEvent::InputAudioChunk(a) => {
-                if a.media_type.is_empty() {
-                    return Err("emit input-audio-chunk: media-type must not be empty".into());
-                }
-                tau_core::ModelEvent::InputAudioChunk {
-                    data: a.data,
-                    media_type: a.media_type,
-                }
-            }
-            provider_events::ModelEvent::SpeechStarted => tau_core::ModelEvent::SpeechStarted,
-            provider_events::ModelEvent::SpeechStopped => tau_core::ModelEvent::SpeechStopped,
-            provider_events::ModelEvent::Interrupted => tau_core::ModelEvent::Interrupted,
-            provider_events::ModelEvent::Done(stop) => tau_core::ModelEvent::Done {
-                stop: match stop {
-                    provider_events::StopReason::Stop => tau_core::StopReason::Stop,
-                    provider_events::StopReason::ToolUse => tau_core::StopReason::ToolUse,
-                    provider_events::StopReason::Length => tau_core::StopReason::Length,
-                    provider_events::StopReason::Error => tau_core::StopReason::Error,
-                    provider_events::StopReason::Aborted => tau_core::StopReason::Aborted,
-                },
-            },
-            provider_events::ModelEvent::Error(message) => {
-                tau_core::ModelEvent::Error { message }
-            }
-        };
-        if let Some(tx) = &self.event_tx {
-            let _ = tx.send(event);
         }
-        Ok(())
+        Event::InputAudioChunk(a) => {
+            if a.media_type.is_empty() {
+                return Err("run: input-audio-chunk with an empty media-type".into());
+            }
+            tau_core::ModelEvent::InputAudioChunk {
+                data: a.data,
+                media_type: a.media_type,
+            }
+        }
+        Event::SpeechStarted => tau_core::ModelEvent::SpeechStarted,
+        Event::SpeechStopped => tau_core::ModelEvent::SpeechStopped,
+        Event::Interrupted => tau_core::ModelEvent::Interrupted,
+        Event::Done(stop) => tau_core::ModelEvent::Done {
+            stop: match stop {
+                StopReason::Stop => tau_core::StopReason::Stop,
+                StopReason::ToolUse => tau_core::StopReason::ToolUse,
+                StopReason::Length => tau_core::StopReason::Length,
+                StopReason::Error => tau_core::StopReason::Error,
+                StopReason::Aborted => tau_core::StopReason::Aborted,
+            },
+        },
+        Event::Error(message) => tau_core::ModelEvent::Error { message },
+    })
+}
+
+/// Consumes the event stream a provider's `run` returned (0.7.0: the
+/// guest writes it, the host reads it -- `events.emit` is gone) and
+/// forwards each event into the model's channel.
+///
+/// The end needs no detection: when the guest drops its writer the
+/// machinery drops this consumer, which drops `tx`, which is what ends
+/// the model stream's drain loop.
+struct EventConsumer {
+    tx: tokio::sync::mpsc::UnboundedSender<tau_core::ModelEvent>,
+    /// Dropped with the consumer, which is what ends the drive: see
+    /// [`crate::Done`].
+    _done: crate::DoneHolder,
+}
+
+impl<D> wasmtime::component::StreamConsumer<D> for EventConsumer {
+    type Item = provider_bindings::exports::tau::extension::models::Event;
+
+    fn poll_consume(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        mut store: wasmtime::StoreContextMut<D>,
+        mut source: wasmtime::component::Source<'_, Self::Item>,
+        finish: bool,
+    ) -> std::task::Poll<wasmtime::Result<wasmtime::component::StreamResult>> {
+        use wasmtime::component::StreamResult;
+        // An empty source means "nothing to take": the ABI forbids
+        // `Completed` here (the caller would trap), so wait for the
+        // writer.
+        if source.remaining(store.as_context_mut()) == 0 {
+            return if finish {
+                std::task::Poll::Ready(Ok(StreamResult::Cancelled))
+            } else {
+                std::task::Poll::Pending
+            };
+        }
+        let mut events: Vec<Self::Item> =
+            Vec::with_capacity(source.remaining(store.as_context_mut()));
+        source.read(store.as_context_mut(), &mut events)?;
+        let this = self.get_mut();
+        for event in events {
+            match event_to_core(event) {
+                Ok(event) => {
+                    if this.tx.send(event).is_err() {
+                        // Nobody is listening any more (the run was
+                        // aborted): stop reading, which makes the guest's
+                        // next write fail -- the contract's cancellation.
+                        return std::task::Poll::Ready(Ok(StreamResult::Dropped));
+                    }
+                }
+                Err(why) => eprintln!("tau provider {why}"),
+            }
+        }
+        std::task::Poll::Ready(Ok(StreamResult::Completed))
+    }
+}
+
+/// Consumes the verdict future `run` returned: `ok` when the guest saw the
+/// host read its stream to the end, `err` when the host closed it early.
+/// Diagnostic only -- the events already carried the terminal state, and
+/// holding no sender here keeps a guest that never resolves the future
+/// from keeping the model stream open.
+struct VerdictConsumer;
+
+impl<D> wasmtime::component::FutureConsumer<D> for VerdictConsumer {
+    type Item = Result<(), provider_bindings::tau::extension::types::Error>;
+
+    fn poll_consume(
+        self: std::pin::Pin<&mut Self>,
+        _cx: &mut std::task::Context<'_>,
+        mut store: wasmtime::StoreContextMut<D>,
+        mut source: wasmtime::component::Source<'_, Self::Item>,
+        _finish: bool,
+    ) -> std::task::Poll<wasmtime::Result<()>> {
+        if source.remaining(store.as_context_mut()) == 0 {
+            return std::task::Poll::Pending;
+        }
+        let mut values: Vec<Self::Item> =
+            Vec::with_capacity(source.remaining(store.as_context_mut()));
+        source.read(store.as_context_mut(), &mut values)?;
+        for value in values {
+            if let Err(error) = value {
+                let detail = match error {
+                    provider_bindings::tau::extension::types::Error::Refused(d)
+                    | provider_bindings::tau::extension::types::Error::Failed(d)
+                    | provider_bindings::tau::extension::types::Error::Invalid(d) => d,
+                };
+                eprintln!("tau provider run: the host ended the stream early: {detail}");
+            }
+        }
+        std::task::Poll::Ready(Ok(()))
     }
 }
 
@@ -1092,7 +1296,6 @@ impl ProviderFactory {
         let state = ProviderState {
             ctx: self.wasi.ctx_builder().build(),
             table: ResourceTable::new(),
-            event_tx: None,
             http: std::sync::Arc::new(std::sync::Mutex::new(http::HttpRegistry::new(
                 self.origins.clone(),
             ))),
@@ -1123,9 +1326,9 @@ impl SharedProviderInstance {
 
 type SharedProvider = Arc<tokio::sync::Mutex<SharedProviderInstance>>;
 
-/// A model served by a wasm provider component. Events arrive push-mode:
-/// the component calls the imported `events.emit` per chunk; `stream`
-/// forwards them into the returned event stream.
+/// A model served by a wasm provider component. Since 0.7.0 the component
+/// returns its events as a stream from `run`; `stream` consumes that
+/// stream and forwards each event into the returned event stream.
 pub struct WasmModel {
     shared: SharedProvider,
     model: String,
@@ -1221,6 +1424,28 @@ impl ExtensionHost {
 
 /// Lock a registry, surviving a poisoned mutex: a panic inside one
 /// blocking call must not poison every later call in the session.
+/// A host-side budget knob: `name=<milliseconds>` overrides the
+/// production default. Since 0.7.0 no contract call takes a timeout any
+/// more ("waiting is host policy"), so a validation leg that needs to see
+/// a silent peer cut off cannot ask the guest for a short one -- it sets
+/// the host's budget instead, the same species of test knob as
+/// `TAU_MCP_PAD` and `TAU_ACP_STALL_MS`.
+///
+/// The parse rule is theirs too: anything that is not a number means
+/// "keep the default", never a panic -- an environment that exported the
+/// variable for something else is not a reason to refuse to serve a call.
+pub(crate) fn budget(name: &str, default: std::time::Duration) -> std::time::Duration {
+    parse_budget(std::env::var(name).ok().as_deref()).unwrap_or(default)
+}
+
+/// The knob's rule, kept apart from the environment it reads so it can be
+/// tested. Zero is not a budget (it would cut off every wait), so it keeps
+/// the default too.
+fn parse_budget(value: Option<&str>) -> Option<std::time::Duration> {
+    let ms: u64 = value?.trim().parse().ok()?;
+    (ms > 0).then(|| std::time::Duration::from_millis(ms))
+}
+
 pub(crate) fn lock_poisoned<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
     m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
@@ -1233,71 +1458,136 @@ pub(crate) fn lock_registry(
     lock_poisoned(registry)
 }
 
-impl provider_bindings::tau::extension::http::Host for ProviderState {
-    /// The registry is the *blocking* reqwest client (its per-call
-    /// timeouts are enforced by reader threads, docs/extensions.md), so
-    /// the calls that touch the network are handed to the blocking pool
-    /// and awaited — awaiting in place would park a runtime worker for
-    /// as long as the peer takes, which is exactly the thread the
-    /// provider's `run` is being awaited on.
+/// Lifts an HTTP failure into the contract's `types.error` (three-way since
+/// 0.7.0, docs/wit-redesign.md): the classification is made where the
+/// failure happens (`http::HttpError`), never by matching on a message.
+fn http_error_to_wit(
+    error: http::HttpError,
+) -> provider_bindings::tau::extension::types::Error {
+    use provider_bindings::tau::extension::types::Error;
+    match error {
+        http::HttpError::Refused(detail) => Error::Refused(detail),
+        http::HttpError::Failed(detail) => Error::Failed(detail),
+        http::HttpError::Invalid(detail) => Error::Invalid(detail),
+    }
+}
+
+/// The interface's freestanding functions. Since 0.7.0 `request` is an
+/// `async func` in the contract, and an async import needs the store (the
+/// async lift is driven on it), so it lands here rather than on the plain
+/// trait: the receiver is an `Accessor`, and store access is taken in
+/// short synchronous blocks -- an `Accessor`'s borrow cannot cross an
+/// await (wasmtime::component::Accessor::with).
+impl<U> provider_bindings::tau::extension::http::HostWithStore<U> for HasSelf<ProviderState> {
+    /// Consent is checked synchronously (the registry lock is scoped to
+    /// the gate, so no std guard is held across the await); the request
+    /// itself is awaited on the runtime -- 0.6.0 handed it to the blocking
+    /// pool because the client was the blocking one.
     async fn request(
-        &mut self,
+        accessor: &Accessor<U, Self>,
         method: String,
         url: String,
         headers: Vec<(String, String)>,
         body: Vec<u8>,
-        timeout_ms: u32,
-    ) -> Result<u64, String> {
-        let registry = self.http.clone();
-        tokio::task::spawn_blocking(move || {
-            lock_registry(&registry).request(&method, &url, &headers, &body, timeout_ms)
-        })
+    ) -> Result<Resource<http::HostResponse>, provider_bindings::tau::extension::types::Error> {
+        let client = accessor
+            .with(|mut access| crate::lock_registry(&access.get().http).start(&url))
+            .map_err(http_error_to_wit)?;
+        let response = http::send(
+            &client,
+            &method,
+            &url,
+            &headers,
+            &body,
+            http::request_timeout(),
+            http::idle_timeout(),
+        )
         .await
-        .map_err(|e| format!("http.request: blocking task failed: {e}"))?
-    }
-
-    async fn status(&mut self, handle: u64) -> Result<u16, String> {
-        lock_registry(&self.http).status(handle)
-    }
-
-    async fn header(&mut self, handle: u64, name: String) -> Result<Option<String>, String> {
-        lock_registry(&self.http).header(handle, &name)
-    }
-
-    async fn read_body(
-        &mut self,
-        handle: u64,
-        max: u32,
-        timeout_ms: u32,
-    ) -> Result<(Vec<u8>, bool), String> {
-        let registry = self.http.clone();
-        tokio::task::spawn_blocking(move || lock_registry(&registry).read_body(handle, max, timeout_ms))
-            .await
-            .map_err(|e| format!("http.read-body: blocking task failed: {e}"))?
-    }
-
-    async fn close(&mut self, handle: u64) {
-        lock_registry(&self.http).close(handle);
+        .map_err(http_error_to_wit)?;
+        accessor.with(|mut access| {
+            access.get().table.push(response).map_err(|_| {
+                provider_bindings::tau::extension::types::Error::Invalid(
+                    "http.request: the resource table is full".into(),
+                )
+            })
+        })
     }
 }
 
-/// The payload handed to a provider component's `run`: the documented
-/// wire shape, plus `auth` when the caller consented a token.
-pub(crate) fn request_json(model: &str, req: &tau_core::Request, auth: Option<&str>) -> String {
-    let mut payload = serde_json::json!({
-        "model": model,
-        "system": req.system,
-        "messages": req.messages,
-        "tools": req.tools.iter().map(|t| serde_json::json!({
-            "name": t.name,
-            "description": t.description,
-            "parameters": t.parameters,
-        })).collect::<Vec<_>>(),
-    });
-    if let Some(token) = auth {
-        payload["auth"] = serde_json::json!({ "bearer": token });
+/// The resource's own methods that need no store access: the response
+/// lives in this state's resource table, so `&mut self` is enough.
+impl provider_bindings::tau::extension::http::HostResponse for ProviderState {
+    async fn status(&mut self, response: Resource<http::HostResponse>) -> u16 {
+        self.table
+            .get(&response)
+            .map(http::HostResponse::status)
+            .unwrap_or(0)
     }
-    payload.to_string()
+
+    async fn header(&mut self, response: Resource<http::HostResponse>, name: String) -> Option<String> {
+        self.table
+            .get(&response)
+            .ok()
+            .and_then(|response| response.header(&name))
+    }
+
+    /// Dropping the response is the only close it has: the body stream is
+    /// what the guest holds, and the host's sender is released when the
+    /// guest drops that stream.
+    async fn drop(&mut self, response: Resource<http::HostResponse>) -> wasmtime::Result<()> {
+        self.table.delete(response)?;
+        Ok(())
+    }
+}
+
+/// `models`'s request and result mention `tools.definition` /
+/// `tools.tool-result`, which makes the component type import the whole
+/// `tools` interface for those types -- and the component model makes the
+/// host supply the complete instance, functions included, whether or not
+/// anything can call them. Nothing in this world can (the provider world's
+/// import list is `http` alone), so the honest answer is "not provided
+/// here": an empty table, and a refusal for a call that cannot arrive.
+impl provider_bindings::tau::extension::types::Host for ProviderState {}
+
+impl provider_bindings::tau::extension::tools::Host for ProviderState {}
+
+impl<U> provider_bindings::tau::extension::tools::HostWithStore<U> for HasSelf<ProviderState> {
+    async fn definitions(
+        _accessor: &Accessor<U, Self>,
+    ) -> Vec<provider_bindings::tau::extension::tools::Definition> {
+        Vec::new()
+    }
+
+    async fn execute(
+        _accessor: &Accessor<U, Self>,
+        _name: String,
+        _arguments_json: String,
+    ) -> provider_bindings::tau::extension::tools::ToolResult {
+        // The contract gives this function no error channel (`-> tool-result`),
+        // so the only honest unreachable answer is an in-band error.
+        provider_bindings::tau::extension::tools::ToolResult {
+            content: Vec::new(),
+            is_error: true,
+        }
+    }
+}
+
+/// The marker the linker asks for even when every method is store-flagged.
+impl provider_bindings::tau::extension::http::Host for ProviderState {}
+
+/// `response.body` is the one call that has to hand the guest a stream, and
+/// a stream handle lives in the store -- hence the `store` flag on this
+/// method (docs/wit-redesign.md, leg 4's binding recipe).
+impl<U> provider_bindings::tau::extension::http::HostResponseWithStore<U>
+    for HasSelf<ProviderState>
+{
+    fn body(
+        mut host: Access<U, Self>,
+        response: Resource<http::HostResponse>,
+    ) -> StreamReader<u8> {
+        let stream = http::take_body(&mut host.get().table, &response);
+        StreamReader::new(&mut host, stream).expect("stream allocation")
+    }
 }
 
 #[async_trait]
@@ -1308,20 +1598,42 @@ impl tau_core::Model for WasmModel {
     ) -> futures::stream::BoxStream<'static, tau_core::ModelEvent> {
         use tau_core::ModelEvent;
 
-        let request_json = request_json(&self.model, req, self.auth.as_deref());
+        let request = provider_request::build(&self.model, req, self.auth.as_deref());
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ModelEvent>();
         let shared = self.shared.clone();
         let call = tokio::spawn(async move {
             let mut guard = shared.lock().await;
-            let instance = &mut guard.instance;
-            instance.store.data_mut().event_tx = Some(tx);
-            let result = instance
-                .bindings
-                .tau_extension_models()
-                .call_run(&mut instance.store, &request_json)
+            // 0.7.0: the provider hands back the event stream and its
+            // verdict future, and the host reads both. Reading is a
+            // *drive*: the guest's writer is only polled while the store
+            // is running concurrently, so the call stays inside one
+            // `run_concurrent` until the guest's writer ends (the
+            // consumer's [`crate::DoneHolder`] says when) -- a drive that
+            // returned earlier would deliver nothing and the model stream
+            // would sit empty.
+            let (done, done_rx) = crate::Done::new(1);
+            let ProviderInstance { store, bindings } = &mut guard.instance;
+            let result = store
+                .run_concurrent(async |acc| {
+                    let (events, verdict) = bindings
+                        .tau_extension_models()
+                        .call_run(acc, request)
+                        .await?;
+                    acc.with(|store| {
+                        events.pipe(
+                            store,
+                            EventConsumer {
+                                tx,
+                                _done: done.holder(),
+                            },
+                        )
+                    })?;
+                    acc.with(|store| verdict.pipe(store, VerdictConsumer))?;
+                    let _ = done_rx.await;
+                    Ok::<(), wasmtime::Error>(())
+                })
                 .await;
-            instance.store.data_mut().event_tx = None;
             if result.is_err() {
                 // The trap poisoned the guest; rebuild so the next run
                 // reaches a fresh provider instead of trapping for the
@@ -1332,17 +1644,20 @@ impl tau_core::Model for WasmModel {
         });
 
         async_stream::stream! {
-            // Drain events until the component hangs up (event_tx dropped
-            // when stream() returns), then surface any trap as an error
+            // Drain events until the component hangs up (the consumer
+            // holding the sender is dropped when the guest's writer is),
+            // then surface any trap as an error
             // event — the Model contract forbids propagating failures.
             // Events arrive already typed (0.2.0 contract): there is no
             // malformed-frame path to skip.
             while let Some(event) = rx.recv().await {
                 yield event;
             }
+            // Three layers deep: the spawned task's JoinError, the
+            // drive's own error, then the closure's.
             match call.await {
-                Ok(Ok(())) => {}
-                Ok(Err(e)) => {
+                Ok(Ok(Ok(()))) => {}
+                Ok(Ok(Err(e))) | Ok(Err(e)) => {
                     yield ModelEvent::Error { message: format!("provider trapped: {}", compact_wasm_error(&e)) };
                     yield ModelEvent::Done { stop: tau_core::StopReason::Error };
                 }
@@ -1413,21 +1728,27 @@ mod compact_error_tests {
 
 #[cfg(test)]
 mod auth_payload_tests {
+    //! The provider request is a typed value since 0.7.0 (`models.request`),
+    //! so 0.6.0's JSON-shape assertions become field assertions.
+    use crate::provider_bindings::exports::tau::extension::models;
+
     #[test]
-    fn request_json_carries_auth_only_when_consented() {
+    fn the_provider_request_carries_auth_only_when_consented() {
         let req = tau_core::Request {
             system: None,
             messages: vec![tau_core::Message::user("hi")],
             tools: vec![],
         };
-        let without: serde_json::Value =
-            serde_json::from_str(&super::request_json("m", &req, None)).unwrap();
-        assert!(without.get("auth").is_none());
+        let without = super::provider_request::build("m", &req, None);
+        assert!(without.auth.is_none());
+        assert_eq!(without.model, "m");
+        assert_eq!(without.messages.len(), 1);
 
-        let with: serde_json::Value =
-            serde_json::from_str(&super::request_json("m", &req, Some("tok-1"))).unwrap();
-        assert_eq!(with["auth"]["bearer"], "tok-1");
-        assert_eq!(with["model"], "m");
+        let with = super::provider_request::build("m", &req, Some("tok-1"));
+        assert!(
+            matches!(with.auth, Some(models::Auth::Bearer(token)) if token == "tok-1"),
+            "the grant is the bearer arm and carries the token"
+        );
     }
 }
 
@@ -1455,13 +1776,14 @@ mod large_payload_tests {
         hash
     }
 
-    /// The request JSON handed to the guest must arrive byte-for-byte.
-    /// 8 MiB of media inflates it past 10 MiB of base64 — far beyond the
-    /// few KiB every other test sends — and the guest reports back the
-    /// length and checksum of what IT received. Both are recomputed here
-    /// over the very string the host sends (`super::request_json`, not a
-    /// re-implementation), so truncation or corruption anywhere on the
-    /// host→component copy mismatches loudly.
+    /// The request's media must arrive at the guest byte-for-byte. 8 MiB of
+    /// noise is far beyond the few KiB every other test sends, and the guest
+    /// reports back the length and checksum of the bytes IT received. Both
+    /// are recomputed here over the very bytes the host sends, so truncation
+    /// or corruption anywhere on the host→component copy mismatches loudly.
+    /// (0.6.0 measured this over the request JSON, whose base64 inflated the
+    /// fixture past 10 MiB; the payload is typed now, so the bytes cross the
+    /// boundary as bytes.)
     #[tokio::test]
     async fn a_multi_mib_request_arrives_at_the_guest_byte_for_byte() {
         let Some(path) = artifact() else {
@@ -1480,19 +1802,14 @@ mod large_payload_tests {
             *b = state as u8;
         }
         message.content.push(Content::Image {
-            media: Media::bytes("image/png", bytes),
+            media: Media::bytes("image/png", bytes.clone()),
         });
         let req = Request {
             system: None,
             messages: vec![message],
             tools: vec![],
         };
-        let expected = super::request_json("echo", &req, None);
-        assert!(
-            expected.len() > 10 * 1024 * 1024,
-            "fixture must inflate past 10 MiB of base64, got {}",
-            expected.len()
-        );
+        assert_eq!(bytes.len(), 8 * 1024 * 1024, "fixture is 8 MiB of media");
 
         let host = super::ExtensionHost::new();
         let model = host
@@ -1510,11 +1827,7 @@ mod large_payload_tests {
             }
         }
         assert!(done, "stream never completed");
-        let want = format!(
-            "bytes={} fnv1a={:016x}",
-            expected.len(),
-            fnv1a(expected.as_bytes())
-        );
+        let want = format!("bytes={} fnv1a={:016x}", bytes.len(), fnv1a(&bytes));
         assert!(
             text.contains(&want),
             "guest received a different payload than the host sent: got {text:?}, want {want:?}"
@@ -1598,11 +1911,14 @@ mod schema_strictness_tests {
 
 #[cfg(test)]
 mod stream_subscription_tests {
-    //! host.subscribe/poll/unsubscribe (docs/stream-subscribe.md): the
-    //! high-frequency observation leg of F2. ComponentState is built
-    //! directly — no component needed, the host functions under test
+    //! host.subscribe + the subscription resource (docs/stream-subscribe.md):
+    //! the high-frequency observation leg of F2, and the smallest surface of
+    //! the 0.7.0 resource migration -- an unknown topic is unrepresentable
+    //! (typed enum) and dropping the handle IS the unsubscribe. ComponentState
+    //! is built directly: no component needed, the host functions under test
     //! never touch wasm.
-    use super::bindings::tau::extension::host::{Host, StreamEvent};
+    use super::bindings::tau::extension::host::{Host, HostSubscription, StreamEvent, Topic};
+    use super::wit;
     use super::*;
     use tau_core::AgentEvent;
 
@@ -1612,17 +1928,32 @@ mod stream_subscription_tests {
             table: ResourceTable::new(),
             channel: Arc::new(HostChannel::default()),
             inject: false,
-            subscriptions: HashMap::new(),
-            next_subscription: 0,
         }
+    }
+
+    /// The ABI hands the host a *borrow* of the guest's resource, and the
+    /// host-side [`Resource`] is neither `Copy` nor `Clone`, so a handle
+    /// polled more than once is re-borrowed from the rep the subscription
+    /// was created with. (Deleting, by contrast, wants the owned handle --
+    /// the table asserts on it.)
+    fn borrow(rep: u32) -> Resource<StreamSubscription> {
+        Resource::new_borrow(rep)
+    }
+
+    /// A state with the bus wired, plus the bus: the host channel is the
+    /// publisher side, which the agent loop plays in production.
+    fn wired() -> (ComponentState, tau_core::EventBus) {
+        let state = state();
+        let bus = tau_core::bus::new_bus();
+        state.channel.wire(bus.clone(), tau_core::control::channel().0);
+        (state, bus)
     }
 
     #[test]
     fn poll_drains_matching_events_in_order_then_empty() {
-        let mut state = state();
-        let bus = tau_core::bus::new_bus();
-        state.channel.wire(bus.clone(), tau_core::control::channel().0);
-        let id = Host::subscribe(&mut state, vec!["text-delta".into()]).unwrap();
+        let (mut state, bus) = wired();
+        let id = Host::subscribe(&mut state, vec![Topic::TextDelta]).unwrap();
+        let rep = id.rep();
 
         bus.send(AgentEvent::TextDelta("he".into())).unwrap();
         bus.send(AgentEvent::AudioDelta {
@@ -1632,7 +1963,7 @@ mod stream_subscription_tests {
         .unwrap(); // off-topic: dropped
         bus.send(AgentEvent::TextDelta("llo".into())).unwrap();
 
-        let batch = Host::poll(&mut state, id).unwrap();
+        let batch = HostSubscription::poll(&mut state, borrow(rep));
         let texts: Vec<&str> = batch
             .iter()
             .map(|e| match e {
@@ -1641,22 +1972,20 @@ mod stream_subscription_tests {
             })
             .collect();
         assert_eq!(texts, ["he", "llo"]);
-        assert!(Host::poll(&mut state, id).unwrap().is_empty());
+        assert!(HostSubscription::poll(&mut state, borrow(rep)).is_empty());
     }
 
     #[test]
     fn audio_topic_receives_segments_not_bytes() {
-        let mut state = state();
-        let bus = tau_core::bus::new_bus();
-        state.channel.wire(bus.clone(), tau_core::control::channel().0);
-        let id = Host::subscribe(&mut state, vec!["audio-delta".into()]).unwrap();
+        let (mut state, bus) = wired();
+        let id = Host::subscribe(&mut state, vec![Topic::AudioDelta]).unwrap();
         bus.send(AgentEvent::AudioDelta {
             data: vec![0; 2048],
             media_type: "audio/pcm;rate=24000".into(),
         })
         .unwrap();
         bus.send(AgentEvent::TextDelta("ignored".into())).unwrap();
-        match &Host::poll(&mut state, id).unwrap()[..] {
+        match &HostSubscription::poll(&mut state, id)[..] {
             [StreamEvent::AudioDelta(seg)] => {
                 assert_eq!(seg.bytes, 2048);
                 assert_eq!(seg.media_type, "audio/pcm;rate=24000");
@@ -1666,41 +1995,67 @@ mod stream_subscription_tests {
     }
 
     #[test]
-    fn unknown_topic_and_handle_fail_loud() {
-        let mut state = state();
-        let bus = tau_core::bus::new_bus();
-        state.channel.wire(bus, tau_core::control::channel().0);
-        let err = Host::subscribe(&mut state, vec!["tool-progress".into()]).unwrap_err();
-        assert!(err.contains("unknown topic"), "{err}");
-        assert!(err.contains("tool-progress"), "{err}");
-        assert!(Host::subscribe(&mut state, vec![]).unwrap_err().contains("no topics"));
-        assert!(Host::poll(&mut state, 99).unwrap_err().contains("unknown subscription"));
-        assert!(Host::unsubscribe(&mut state, 99)
-            .unwrap_err()
-            .contains("unknown subscription"));
-    }
-
-    #[test]
     fn subscribe_before_wiring_is_an_error() {
         let mut state = state();
-        let err = Host::subscribe(&mut state, vec!["text-delta".into()]).unwrap_err();
-        assert!(err.contains("not wired"), "{err}");
+        let err = Host::subscribe(&mut state, vec![Topic::TextDelta]).unwrap_err();
+        assert!(
+            matches!(&err, wit::Error::Failed(detail) if detail.contains("not wired")),
+            "{err:?}"
+        );
+    }
+
+    /// Two one-sided refusals: asking for no topics at all, and a handle the
+    /// table can no longer resolve. Only the first is an error -- the
+    /// contract's `poll` has no error arm, so a dead handle drains to empty
+    /// (and says so on stderr).
+    #[test]
+    fn no_topics_is_refused_and_a_dead_handle_polls_empty() {
+        let (mut state, _bus) = wired();
+        let err = Host::subscribe(&mut state, vec![]).unwrap_err();
+        assert!(
+            matches!(&err, wit::Error::Invalid(detail) if detail.contains("no topics")),
+            "{err:?}"
+        );
+
+        let id = Host::subscribe(&mut state, vec![Topic::TextDelta]).unwrap();
+        let rep = id.rep();
+        state
+            .table
+            .delete(id)
+            .expect("the subscription was in the table");
+        // The stale rep is not in the table any more: empty, and said so.
+        assert!(HostSubscription::poll(&mut state, borrow(rep)).is_empty());
+    }
+
+    /// Dropping the handle is the unsubscribe (0.7.0): 0.6.0 had an explicit
+    /// call plus an error for "close a subscription that was never opened",
+    /// and ownership makes both unrepresentable.
+    #[test]
+    fn dropping_the_handle_unsubscribes() {
+        let (mut state, bus) = wired();
+        let id = Host::subscribe(&mut state, vec![Topic::TextDelta]).unwrap();
+        let rep = id.rep();
+        drop(state.table.delete(id));
+        // No receivers left: the publisher's send reports SendError -- fine.
+        let _ = bus.send(AgentEvent::TextDelta("gone".into()));
+        assert!(HostSubscription::poll(&mut state, borrow(rep)).is_empty());
+        // Re-subscribing gets a fresh handle that sees only new events.
+        let id2 = Host::subscribe(&mut state, vec![Topic::TextDelta]).unwrap();
+        assert!(HostSubscription::poll(&mut state, id2).is_empty());
     }
 
     #[test]
     fn ring_overrun_marks_the_gap() {
-        let mut state = state();
-        let bus = tau_core::bus::new_bus();
-        state.channel.wire(bus.clone(), tau_core::control::channel().0);
-        let id = Host::subscribe(&mut state, vec!["text-delta".into()]).unwrap();
+        let (mut state, bus) = wired();
+        let id = Host::subscribe(&mut state, vec![Topic::TextDelta]).unwrap();
         let total = tau_core::bus::BUS_CAPACITY + 76;
         for i in 0..total {
             bus.send(AgentEvent::TextDelta(format!("d{i}"))).unwrap();
         }
-        let batch = Host::poll(&mut state, id).unwrap();
-        match batch[0] {
-            StreamEvent::Lagged(n) => assert_eq!(n, 76),
-            ref other => panic!("expected lagged marker, got {other:?}"),
+        let batch = HostSubscription::poll(&mut state, id);
+        match &batch[0] {
+            StreamEvent::Lagged(n) => assert_eq!(*n, 76),
+            other => panic!("expected lagged marker, got {other:?}"),
         }
         assert_eq!(batch.len(), tau_core::bus::BUS_CAPACITY + 1);
         match &batch[1] {
@@ -1710,40 +2065,29 @@ mod stream_subscription_tests {
             other => panic!("expected text delta, got {other:?}"),
         }
     }
-
-    #[test]
-    fn unsubscribe_stops_the_flow() {
-        let mut state = state();
-        let bus = tau_core::bus::new_bus();
-        state.channel.wire(bus.clone(), tau_core::control::channel().0);
-        let id = Host::subscribe(&mut state, vec!["text-delta".into()]).unwrap();
-        Host::unsubscribe(&mut state, id).unwrap();
-        // No receivers left: broadcast send reports SendError — fine.
-        let _ = bus.send(AgentEvent::TextDelta("gone".into()));
-        assert!(Host::poll(&mut state, id).is_err());
-        // Re-subscribing gets a fresh handle that sees only new events.
-        let id2 = Host::subscribe(&mut state, vec!["text-delta".into()]).unwrap();
-        assert!(Host::poll(&mut state, id2).unwrap().is_empty());
-    }
 }
-
 #[cfg(test)]
 mod replace_tests {
+    //! A guest's `replace` verdict, folded back into the payload it answers
+    //! ([`replace_probe_payload`]). The payload is typed since 0.7.0, so
+    //! 0.6.0's junk cases ("not json", a field of the wrong type) are
+    //! unrepresentable; what a component can still get wrong is answering a
+    //! point with another point's payload, or with a value that does not
+    //! convert (a tool call whose arguments-json is not JSON).
     use super::*;
-    use tau_core::probe_payload::BeforeRun;
 
-    fn payload() -> ProbePayload {
-        ProbePayload::BeforeRun(BeforeRun {
-            prompt: tau_core::Message::user("original"),
-        })
+    fn a_message(text: &str) -> wit::Message {
+        wit::Message {
+            role: wit::Role::User,
+            content: vec![wit::Content::Text(text.to_string())],
+        }
     }
 
     #[test]
     fn a_well_aimed_replacement_replaces() {
         let verdict = replace_probe_payload(
             ProbePoint::BeforeRun,
-            payload(),
-            Some(r#"{"prompt": {"role": "user", "content": [{"type": "text", "text": "rewritten"}]}}"#.into()),
+            wit_probes::Payload::BeforeRun(a_message("rewritten")),
         );
         match verdict {
             Verdict::Replace(ProbePayload::BeforeRun(replaced)) => {
@@ -1753,42 +2097,232 @@ mod replace_tests {
         }
     }
 
-    /// The 0.6.0 host failed the run on these two; a component bug must
-    /// not wedge the harness, so they read as "no opinion".
+    /// A payload belonging to another point is a component bug: like a trap it
+    /// degrades to Continue and says so on stderr (0.6.0 made the same shape a
+    /// hard run error; a broken extension must not wedge the harness).
     #[test]
-    fn junk_and_misaimed_replacements_degrade_to_continue() {
+    fn a_misaimed_replacement_degrades_to_continue() {
+        let facts = wit_probes::SessionFacts {
+            session: "s".into(),
+            cwd: ".".into(),
+            model: "m".into(),
+        };
         assert!(matches!(
-            replace_probe_payload(ProbePoint::BeforeRun, payload(), Some("not json".into())),
-            Verdict::Continue
-        ));
-        assert!(matches!(
-            replace_probe_payload(
-                ProbePoint::BeforeRun,
-                payload(),
-                Some(r#"{"prompt": 5}"#.into())
-            ),
-            Verdict::Continue
-        ));
-        assert!(matches!(
-            replace_probe_payload(ProbePoint::BeforeRun, payload(), None),
+            replace_probe_payload(ProbePoint::BeforeRun, wit_probes::Payload::SessionEnd(facts)),
             Verdict::Continue
         ));
     }
 
-    /// A field the point does not know is not an error: 0.6.0 read the
-    /// fields it knew and left the rest alone, and so does `merge_json`.
     #[test]
-    fn an_unknown_field_is_ignored() {
-        let verdict = replace_probe_payload(
-            ProbePoint::BeforeRun,
-            payload(),
-            Some(r#"{"nonsense": true}"#.into()),
+    fn an_unconvertible_payload_degrades_to_continue() {
+        let bad = wit_probes::Payload::BeforeTool(wit::ToolCall {
+            id: "c".into(),
+            name: "t".into(),
+            arguments_json: "not json".into(),
+        });
+        assert!(matches!(
+            replace_probe_payload(ProbePoint::BeforeTool, bad),
+            Verdict::Continue
+        ));
+    }
+}
+
+#[cfg(test)]
+mod budget_tests {
+    use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn a_knob_reads_as_milliseconds_and_junk_keeps_the_default() {
+        assert_eq!(parse_budget(Some("300")), Some(Duration::from_millis(300)));
+        assert_eq!(parse_budget(Some(" 300 ")), Some(Duration::from_millis(300)));
+        assert_eq!(parse_budget(None), None);
+        // Anything that is not a positive number means "no opinion": zero
+        // is not a budget (it would cut off every wait), and a value that
+        // was exported for something else must not panic a host call.
+        for junk in ["", "soon", "0", "-5", "300ms", "1.5"] {
+            assert_eq!(parse_budget(Some(junk)), None, "{junk:?}");
+        }
+    }
+
+    #[test]
+    fn a_name_nothing_exported_keeps_the_callers_default() {
+        assert_eq!(
+            budget("TAU_VALIDATE_NOBODY_EXPORTS_THIS_MS", Duration::from_secs(7)),
+            Duration::from_secs(7)
         );
-        match verdict {
-            Verdict::Replace(ProbePayload::BeforeRun(replaced)) => {
-                assert_eq!(replaced.prompt.text(), "original");
-            }
-            other => panic!("expected a replacement, got {other:?}"),
+    }
+
+    #[test]
+    fn the_host_budgets_are_bounded_by_default() {
+        // The knobs must not have replaced the production values: with no
+        // environment in play, each host budget is the long one.
+        assert_eq!(crate::http::request_timeout(), crate::http::REQUEST_TIMEOUT);
+        assert_eq!(crate::http::idle_timeout(), crate::http::IDLE_TIMEOUT);
+        assert_eq!(crate::ws::connect_timeout_ms(), crate::ws::CONNECT_TIMEOUT_MS);
+        // The process pipes (bridge.rs): 0.7.0's guest cannot keep a clock
+        // (no awaiting `wasi:clocks`), so the two deadlines 0.6.0's
+        // `write-stdin(timeout-ms)` / `read-stdout(timeout-ms)` carried
+        // live host-side now.
+        assert_eq!(crate::bridge::stdin_idle_timeout(), crate::bridge::STDIN_IDLE_DEFAULT);
+        assert_eq!(crate::bridge::pipe_idle_timeout(), crate::bridge::PIPE_IDLE_DEFAULT);
+    }
+}
+
+/// Core to the provider world's generated types.
+///
+/// bindgen generates the contract's types once per world, so this mirrors
+/// `convert::` one world over (the same mapping, different Rust types).
+/// Aliasing the shared `types` interface into one module with `with:` is the
+/// way to collapse that duplication; it is a change to the binding layer, not
+/// to the contract, and is deliberately not part of 0.7.0's migration
+/// (docs/wit-redesign.md section 7).
+mod provider_request {
+    use crate::provider_bindings::exports::tau::extension::models;
+    use crate::provider_bindings::tau::extension::types as wit;
+    use tau_core::tool::ToolDef;
+    use tau_core::types::{Content, Media, MediaSource, Message, ResultBlock, Role};
+
+    /// The payload handed to `models.run`: the request is a typed
+    /// value since 0.7.0, plus `auth` when the caller consented a token.
+    pub(super) fn build(
+        model: &str,
+        req: &tau_core::Request,
+        auth: Option<&str>,
+    ) -> models::Request {
+        models::Request {
+            model: model.to_string(),
+            system: req.system.clone(),
+            messages: req.messages.iter().map(message).collect(),
+            tools: req.tools.iter().map(definition).collect(),
+            auth: auth.map(|token| models::Auth::Bearer(token.to_string())),
+        }
+    }
+
+    fn message(message: &Message) -> wit::Message {
+        wit::Message {
+            role: match message.role {
+                Role::User => wit::Role::User,
+                Role::Assistant => wit::Role::Assistant,
+                Role::Tool => wit::Role::Tool,
+            },
+            content: message.content.iter().map(content).collect(),
+        }
+    }
+
+    fn content(content: &Content) -> wit::Content {
+        match content {
+            Content::Text { text } => wit::Content::Text(text.clone()),
+            Content::Image { media } => wit::Content::Image(media_to_wit(media)),
+            Content::Audio { media } => wit::Content::Audio(media_to_wit(media)),
+            Content::Video { media } => wit::Content::Video(media_to_wit(media)),
+            Content::File { media, name } => wit::Content::File(wit::File {
+                media: media_to_wit(media),
+                name: name.clone(),
+            }),
+            Content::ToolCall {
+                id,
+                name,
+                arguments,
+            } => wit::Content::ToolCall(wit::ToolCall {
+                id: id.clone(),
+                name: name.clone(),
+                arguments_json: arguments.to_string(),
+            }),
+            Content::ToolResult {
+                call_id,
+                content,
+                is_error,
+            } => wit::Content::ToolResult(wit::ToolResult {
+                call_id: call_id.clone(),
+                content: content.iter().map(result_block).collect(),
+                is_error: *is_error,
+            }),
+        }
+    }
+
+    /// The wire's `result-block` is narrower than `content` (the toolchain
+    /// refuses a recursive `content`), so a nested call or result degrades
+    /// to its text projection -- the same posture `convert::` takes.
+    fn result_block(block: &Content) -> wit::ResultBlock {
+        match ResultBlock::try_from(block.clone()) {
+            Ok(block) => match block {
+                ResultBlock::Text { text } => wit::ResultBlock::Text(text),
+                ResultBlock::Image { media } => wit::ResultBlock::Image(media_to_wit(&media)),
+                ResultBlock::Audio { media } => wit::ResultBlock::Audio(media_to_wit(&media)),
+                ResultBlock::Video { media } => wit::ResultBlock::Video(media_to_wit(&media)),
+                ResultBlock::File { media, name } => wit::ResultBlock::File(wit::File {
+                    media: media_to_wit(&media),
+                    name,
+                }),
+            },
+            Err(_) => wit::ResultBlock::Text(tau_core::types::tool_result_text(
+                std::slice::from_ref(block),
+            )),
+        }
+    }
+
+    fn media_to_wit(media: &Media) -> wit::Media {
+        wit::Media {
+            media_type: media.media_type.clone(),
+            source: match &media.source {
+                MediaSource::Bytes(bytes) => wit::MediaSource::Bytes(bytes.clone()),
+                MediaSource::Url(url) => wit::MediaSource::Url(url.clone()),
+                MediaSource::Blob { hash } => wit::MediaSource::Blob(hash.clone()),
+            },
+        }
+    }
+
+    fn definition(def: &ToolDef) -> models::Definition {
+        models::Definition {
+            name: def.name.clone(),
+            description: def.description.clone(),
+            parameters_json: def.parameters.to_string(),
+        }
+    }
+}
+
+/// The "everyone is done" signal a drive loop waits on.
+///
+/// A host-side drive (`Store::run_concurrent`) has to stay active for as
+/// long as the consumers it registered are alive: the machinery drops a
+/// consumer when the guest's writer ends, and a driver that returns
+/// earlier stops running the executor, so nothing would ever be
+/// delivered. Each consumer holds one [`DoneHolder`] and drops it with
+/// itself; the last one out hands the receiver its `()`.
+pub(crate) struct Done {
+    live: std::sync::atomic::AtomicUsize,
+    signal: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+}
+
+impl Done {
+    /// `live` is how many holders will exist.
+    pub(crate) fn new(live: usize) -> (std::sync::Arc<Self>, tokio::sync::oneshot::Receiver<()>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        (
+            std::sync::Arc::new(Self {
+                live: std::sync::atomic::AtomicUsize::new(live),
+                signal: std::sync::Mutex::new(Some(tx)),
+            }),
+            rx,
+        )
+    }
+
+    /// One holder, for one consumer.
+    pub(crate) fn holder(self: &std::sync::Arc<Self>) -> DoneHolder {
+        DoneHolder(std::sync::Arc::clone(self))
+    }
+}
+
+/// A consumer's share of a [`Done`]; dropping it counts it out.
+pub(crate) struct DoneHolder(std::sync::Arc<Done>);
+
+impl Drop for DoneHolder {
+    fn drop(&mut self) {
+        if self.0.live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1
+            && let Some(tx) = self.0.signal.lock().unwrap().take()
+        {
+            let _ = tx.send(());
         }
     }
 }

@@ -26,6 +26,45 @@ use crate::bridge_bindings::exports::tau::extension::ingress_handler as wit_ingr
 /// How long the accept loop sleeps between shutdown polls.
 const TICK: Duration = Duration::from_millis(250);
 
+/// Why a listen failed, in the contract's own three-way split
+/// (`types.error`): the variant is what a guest branches on, the detail is
+/// for the human reading the log. Same shape as `http::HttpError`.
+#[derive(Debug)]
+pub(crate) enum IngressError {
+    /// No listen address is consented: the host CLI was never given one.
+    Refused(String),
+    /// The address is consented and the bind failed (taken, no permission).
+    Failed(String),
+    /// The call is not valid here: a route that is not an absolute path, or
+    /// one that is already registered.
+    Invalid(String),
+}
+
+impl std::fmt::Display for IngressError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Refused(detail) => write!(f, "refused: {detail}"),
+            Self::Failed(detail) => write!(f, "failed: {detail}"),
+            Self::Invalid(detail) => write!(f, "invalid: {detail}"),
+        }
+    }
+}
+
+/// One registered webhook route, owned by the guest as
+/// `ingress.registration`. Dropping it unregisters the route (the servers
+/// keep running -- a listener with zero routes answers 404, which is the
+/// honest state: the address stays consented).
+pub struct HostRegistration {
+    route: String,
+    registry: Arc<IngressRegistry>,
+}
+
+impl Drop for HostRegistration {
+    fn drop(&mut self) {
+        let _ = self.registry.close(&self.route);
+    }
+}
+
 /// One bridge's ingress world: the consented listen addresses, the
 /// routes it registered, the servers it spawned, and (late-bound, after
 /// instantiation) the instance the server threads push requests into.
@@ -70,29 +109,39 @@ impl IngressRegistry {
     }
 
     /// `ingress.listen`: register `route` on every consented address,
-    /// spawning the address's server on first use.
-    pub(crate) fn listen(self: &Arc<Self>, route: &str) -> Result<(), String> {
+    /// spawning the address's server on first use. The returned handle IS
+    /// the registration since 0.7.0: dropping it stops serving the route
+    /// (0.6.0's explicit `close`, and its "close a route that was never
+    /// registered" error, are both unrepresentable now).
+    pub(crate) fn listen(self: &Arc<Self>, route: &str) -> Result<HostRegistration, IngressError> {
         if self.addrs.is_empty() {
-            return Err(
+            return Err(IngressError::Refused(
                 "ingress not consented: pass --ingress <addr:port> to let this bridge listen"
                     .into(),
-            );
+            ));
         }
         if !route.starts_with('/') || route.contains(['?', '#']) {
-            return Err(format!(
+            return Err(IngressError::Invalid(format!(
                 "invalid route {route:?}: an absolute path without query/fragment"
-            ));
+            )));
         }
         {
             let mut routes = self.routes.lock().unwrap_or_else(|e| e.into_inner());
             if !routes.insert(route.to_string()) {
-                return Err(format!("route {route} already registered"));
+                return Err(IngressError::Invalid(format!(
+                    "route {route} already registered"
+                )));
             }
         }
         for addr in &self.addrs {
-            self.ensure_server(addr)?;
+            // Past the consent check above, so a failure here is the bind
+            // itself (address in use, no permission to bind): `failed`.
+            self.ensure_server(addr).map_err(IngressError::Failed)?;
         }
-        Ok(())
+        Ok(HostRegistration {
+            route: route.to_string(),
+            registry: Arc::clone(self),
+        })
     }
 
     /// `ingress.close`: stop serving `route`. Servers keep running until

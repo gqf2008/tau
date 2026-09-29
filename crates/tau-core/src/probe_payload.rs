@@ -1,5 +1,5 @@
 //! Typed probe payloads — the Rust side of `variant payload` in the 0.7.0
-//! contract (`wit/next/tau.wit`, `interface probes`), per the projection
+//! contract (`wit/tau.wit`, `interface probes`), per the projection
 //! rule in `docs/wit-redesign.md` §3.
 //!
 //! Before this, every firing handed the handler a `Json` object and the
