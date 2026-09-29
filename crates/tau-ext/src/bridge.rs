@@ -14,7 +14,7 @@ use std::collections::{HashMap, HashSet, VecDeque};
 use std::io::{Read, Write};
 use std::path::Path;
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 
 use async_trait::async_trait;
 use tau_core::probe::{ProbeHandler, ProbePoint, Verdict};
@@ -35,9 +35,13 @@ impl bridge_bindings::tau::extension::types::Host for BridgeState {}
 struct BridgeState {
     ctx: WasiCtx,
     table: ResourceTable,
-    processes: ProcessRegistry,
-    http: HttpRegistry,
-    ws: crate::ws::WsRegistry,
+    /// The three blocking registries sit behind a std mutex so the host
+    /// imports can hand a whole call to `spawn_blocking` and await it (the
+    /// lock is taken and dropped inside the blocking body, never held
+    /// across an await). Same shape as the provider and realtime worlds.
+    processes: std::sync::Arc<std::sync::Mutex<ProcessRegistry>>,
+    http: std::sync::Arc<std::sync::Mutex<HttpRegistry>>,
+    ws: std::sync::Arc<std::sync::Mutex<crate::ws::WsRegistry>>,
     /// Host channel sinks (late-bound via wire_host_channel, same as
     /// extensions) + this bridge's session-injection consent.
     channel: Arc<HostChannel>,
@@ -379,7 +383,10 @@ pub fn origin_of(url: &str) -> Option<String> {
 }
 
 impl bridge_bindings::tau::extension::http::Host for BridgeState {
-    fn request(
+    /// The network calls run on the blocking pool and are awaited; the
+    /// table lookups answer inline (same shape as the provider world's
+    /// http import).
+    async fn request(
         &mut self,
         method: String,
         url: String,
@@ -387,32 +394,55 @@ impl bridge_bindings::tau::extension::http::Host for BridgeState {
         body: Vec<u8>,
         timeout_ms: u32,
     ) -> Result<u64, String> {
-        self.http.request(&method, &url, &headers, &body, timeout_ms)
+        let registry = self.http.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::lock_registry(&registry).request(&method, &url, &headers, &body, timeout_ms)
+        })
+        .await
+        .map_err(|e| format!("http.request: blocking task failed: {e}"))?
     }
 
-    fn status(&mut self, handle: u64) -> Result<u16, String> {
-        self.http.status(handle)
+    async fn status(&mut self, handle: u64) -> Result<u16, String> {
+        crate::lock_registry(&self.http).status(handle)
     }
 
-    fn header(&mut self, handle: u64, name: String) -> Result<Option<String>, String> {
-        self.http.header(handle, &name)
+    async fn header(&mut self, handle: u64, name: String) -> Result<Option<String>, String> {
+        crate::lock_registry(&self.http).header(handle, &name)
     }
 
-    fn read_body(&mut self, handle: u64, max: u32, timeout_ms: u32) -> Result<(Vec<u8>, bool), String> {
-        self.http.read_body(handle, max, timeout_ms)
+    async fn read_body(
+        &mut self,
+        handle: u64,
+        max: u32,
+        timeout_ms: u32,
+    ) -> Result<(Vec<u8>, bool), String> {
+        let registry = self.http.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::lock_registry(&registry).read_body(handle, max, timeout_ms)
+        })
+        .await
+        .map_err(|e| format!("http.read-body: blocking task failed: {e}"))?
     }
 
-    fn close(&mut self, handle: u64) {
-        self.http.close(handle);
+    async fn close(&mut self, handle: u64) {
+        crate::lock_registry(&self.http).close(handle);
     }
 }
 
 impl bridge_bindings::tau::extension::ws::Host for BridgeState {
-    fn connect(&mut self, url: String, timeout_ms: u32) -> Result<u64, String> {
-        self.ws.connect(&url, timeout_ms)
+    /// Every ws op waits on the connection's actor thread (handshake,
+    /// write confirmation, inbound frame up to the timeout), so each one
+    /// goes to the blocking pool and is awaited.
+    async fn connect(&mut self, url: String, timeout_ms: u32) -> Result<u64, String> {
+        let registry = self.ws.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::lock_poisoned(&registry).connect(&url, timeout_ms)
+        })
+        .await
+        .map_err(|e| format!("ws.connect: blocking task failed: {e}"))?
     }
 
-    fn send(
+    async fn send(
         &mut self,
         handle: u64,
         frame: bridge_bindings::tau::extension::ws::Frame,
@@ -422,23 +452,35 @@ impl bridge_bindings::tau::extension::ws::Host for BridgeState {
             Frame::Text(t) => crate::ws::WsFrame::Text(t),
             Frame::Binary(b) => crate::ws::WsFrame::Binary(b),
         };
-        self.ws.send(handle, frame)
+        let registry = self.ws.clone();
+        tokio::task::spawn_blocking(move || crate::lock_poisoned(&registry).send(handle, frame))
+            .await
+            .map_err(|e| format!("ws.send: blocking task failed: {e}"))?
     }
 
-    fn recv(
+    async fn recv(
         &mut self,
         handle: u64,
         timeout_ms: u32,
     ) -> Result<bridge_bindings::tau::extension::ws::Frame, String> {
         use bridge_bindings::tau::extension::ws::Frame;
-        match self.ws.recv(handle, timeout_ms)? {
+        let registry = self.ws.clone();
+        let frame = tokio::task::spawn_blocking(move || {
+            crate::lock_poisoned(&registry).recv(handle, timeout_ms)
+        })
+        .await
+        .map_err(|e| format!("ws.recv: blocking task failed: {e}"))??;
+        match frame {
             crate::ws::WsFrame::Text(t) => Ok(Frame::Text(t)),
             crate::ws::WsFrame::Binary(b) => Ok(Frame::Binary(b)),
         }
     }
 
-    fn close(&mut self, handle: u64) -> Result<(), String> {
-        self.ws.close(handle)
+    async fn close(&mut self, handle: u64) -> Result<(), String> {
+        let registry = self.ws.clone();
+        tokio::task::spawn_blocking(move || crate::lock_poisoned(&registry).close(handle))
+            .await
+            .map_err(|e| format!("ws.close: blocking task failed: {e}"))?
     }
 }
 
@@ -448,7 +490,7 @@ impl bridge_bindings::tau::extension::ws::Host for BridgeState {
 /// host bindings' shapes (identical by construction, like
 /// bridge_block_to_host below).
 impl bridge_bindings::tau::extension::host::Host for BridgeState {
-    fn notify(
+    async fn notify(
         &mut self,
         level: String,
         content: Vec<bridge_bindings::tau::extension::types::Content>,
@@ -460,11 +502,11 @@ impl bridge_bindings::tau::extension::host::Host for BridgeState {
         )
     }
 
-    fn emit(&mut self, event_json: String) -> Result<(), String> {
+    async fn emit(&mut self, event_json: String) -> Result<(), String> {
         crate::channel_emit(&self.channel, event_json)
     }
 
-    fn steer(
+    async fn steer(
         &mut self,
         message: bridge_bindings::tau::extension::types::Message,
     ) -> Result<(), String> {
@@ -476,7 +518,7 @@ impl bridge_bindings::tau::extension::host::Host for BridgeState {
         )
     }
 
-    fn follow_up(
+    async fn follow_up(
         &mut self,
         message: bridge_bindings::tau::extension::types::Message,
     ) -> Result<(), String> {
@@ -488,7 +530,7 @@ impl bridge_bindings::tau::extension::host::Host for BridgeState {
         )
     }
 
-    fn subscribe(&mut self, topics: Vec<String>) -> Result<u64, String> {
+    async fn subscribe(&mut self, topics: Vec<String>) -> Result<u64, String> {
         crate::subscribe_topics(
             &self.channel,
             &mut self.subscriptions,
@@ -497,7 +539,7 @@ impl bridge_bindings::tau::extension::host::Host for BridgeState {
         )
     }
 
-    fn poll(
+    async fn poll(
         &mut self,
         subscription: u64,
     ) -> Result<Vec<bridge_bindings::tau::extension::host::StreamEvent>, String> {
@@ -505,7 +547,7 @@ impl bridge_bindings::tau::extension::host::Host for BridgeState {
             .map(|events| events.into_iter().map(host_event_to_bridge).collect())
     }
 
-    fn unsubscribe(&mut self, subscription: u64) -> Result<(), String> {
+    async fn unsubscribe(&mut self, subscription: u64) -> Result<(), String> {
         crate::unsubscribe_subscription(&mut self.subscriptions, subscription)
     }
 }
@@ -514,74 +556,107 @@ impl bridge_bindings::tau::extension::host::Host for BridgeState {
 /// the registry owns routes/servers and the push dispatch
 /// (docs/im-channels.md). Host stays a pipe.
 impl bridge_bindings::tau::extension::ingress::Host for BridgeState {
-    fn listen(&mut self, route: String) -> Result<(), String> {
+    async fn listen(&mut self, route: String) -> Result<(), String> {
         // Arc<S: listen takes &Arc<Self> for server spawning; clone the
         // Arc out of the state (the registry outlives any one instance).
+        // First use binds the socket, so the call goes to the blocking
+        // pool like the other network imports.
         let registry = self.ingress.clone();
-        registry.listen(&route)
+        tokio::task::spawn_blocking(move || registry.listen(&route))
+            .await
+            .map_err(|e| format!("ingress.listen: blocking task failed: {e}"))?
     }
 
-    fn close(&mut self, route: String) -> Result<(), String> {
+    async fn close(&mut self, route: String) -> Result<(), String> {
         self.ingress.close(&route)
     }
 }
 
 /// Push one inbound webhook request into the component's
-/// ingress-handler export, synchronously, under the instance lock. A
-/// trap poisons the guest: revive so the NEXT request lands on a fresh
-/// instance, and answer this one 502 (the platform retries — a retried
-/// webhook is a platform fact, not a loss).
+/// ingress-handler export, under the instance lock. A trap poisons the
+/// guest: revive so the NEXT request lands on a fresh instance, and
+/// answer this one 502 (the platform retries — a retried webhook is a
+/// platform fact, not a loss).
+///
+/// The callers are the ingress server's plain threads, and the export is
+/// awaited now, so the call is driven to completion here — the one place
+/// in this world that still crosses the runtime boundary (and the reason
+/// `block_on_component` exists).
 pub(crate) fn ingress_dispatch(
     shared: &SharedBridge,
     request: bridge_bindings::exports::tau::extension::ingress_handler::Request,
 ) -> Result<bridge_bindings::exports::tau::extension::ingress_handler::Response, String> {
-    let mut guard = shared.lock().unwrap_or_else(|e| e.into_inner());
-    let BridgeInstance { store, bindings } = &mut guard.instance;
-    let result = bindings
-        .tau_extension_ingress_handler()
-        .call_handle_request(store, &request);
-    match result {
-        Ok(response) => Ok(response),
-        Err(e) => {
-            guard.revive();
-            Err(format!(
-                "component trapped handling the webhook: {}",
-                crate::compact_wasm_error(&e)
-            ))
+    let shared = shared.clone();
+    crate::block_on_component(async move {
+        let mut guard = shared.lock().await;
+        let BridgeInstance { store, bindings } = &mut guard.instance;
+        let result = bindings
+            .tau_extension_ingress_handler()
+            .call_handle_request(store, &request)
+            .await;
+        match result {
+            Ok(response) => Ok(response),
+            Err(e) => {
+                guard.revive().await;
+                Err(format!(
+                    "component trapped handling the webhook: {}",
+                    crate::compact_wasm_error(&e)
+                ))
+            }
         }
-    }
+    })
 }
 
 impl bridge_bindings::tau::extension::process::Host for BridgeState {
-    fn spawn(&mut self, argv: Vec<String>) -> Result<u64, String> {
-        self.processes.spawn(&argv)
+    /// `spawn` is a fork/exec under the lock; the other three wait on the
+    /// child (pipe drains, timeout polls, wait), so they go to the
+    /// blocking pool like the other waiting imports.
+    async fn spawn(&mut self, argv: Vec<String>) -> Result<u64, String> {
+        crate::lock_poisoned(&self.processes).spawn(&argv)
     }
 
-    fn write_stdin(&mut self, handle: u64, data: Vec<u8>, timeout_ms: u32) -> Result<u32, String> {
-        self.processes.write_stdin(handle, &data, timeout_ms)
+    async fn write_stdin(
+        &mut self,
+        handle: u64,
+        data: Vec<u8>,
+        timeout_ms: u32,
+    ) -> Result<u32, String> {
+        let processes = self.processes.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::lock_poisoned(&processes).write_stdin(handle, &data, timeout_ms)
+        })
+        .await
+        .map_err(|e| format!("process.write-stdin: blocking task failed: {e}"))?
     }
 
-    fn read_stdout(
+    async fn read_stdout(
         &mut self,
         handle: u64,
         max: u32,
         timeout_ms: u32,
     ) -> Result<(Vec<u8>, bool), String> {
-        self.processes.read_stdout(handle, max, timeout_ms)
+        let processes = self.processes.clone();
+        tokio::task::spawn_blocking(move || {
+            crate::lock_poisoned(&processes).read_stdout(handle, max, timeout_ms)
+        })
+        .await
+        .map_err(|e| format!("process.read-stdout: blocking task failed: {e}"))?
     }
 
-    fn kill(&mut self, handle: u64) -> Result<(), String> {
-        // Validates generation and existence (0.2.0: kill failures are
-        // reported, not swallowed — wit-review F8).
-        self.processes.get(handle)?;
-        let mut child = self
-            .processes
-            .children
-            .remove(&handle)
-            .expect("checked above");
-        child.child.kill().map_err(|e| format!("kill: {e}"))?;
-        child.child.wait().map_err(|e| format!("kill: wait: {e}"))?;
-        Ok(())
+    async fn kill(&mut self, handle: u64) -> Result<(), String> {
+        let processes = self.processes.clone();
+        tokio::task::spawn_blocking(move || {
+            let mut registry = crate::lock_poisoned(&processes);
+            // Validates generation and existence (0.2.0: kill failures are
+            // reported, not swallowed — wit-review F8).
+            registry.get(handle)?;
+            let mut child = registry.children.remove(&handle).expect("checked above");
+            child.child.kill().map_err(|e| format!("kill: {e}"))?;
+            child.child.wait().map_err(|e| format!("kill: wait: {e}"))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| format!("process.kill: blocking task failed: {e}"))?
     }
 }
 
@@ -607,8 +682,9 @@ struct BridgeFactory {
     /// Session-injection consent for this bridge (steer/follow-up).
     inject: bool,
     /// Bumped per instantiation; baked into process handles (see
-    /// [`ProcessRegistry`]). Guarded by the SharedBridgeInstance mutex.
-    generation: std::cell::Cell<u32>,
+    /// [`ProcessRegistry`]). An atomic, not a `Cell`: the factory now rides
+    /// `&self` across awaits, which needs `Sync`.
+    generation: std::sync::atomic::AtomicU32,
     /// One per load_bridge; the listener survives instance revivals and
     /// dies with the factory (see Drop).
     ingress: std::sync::Arc<crate::ingress::IngressRegistry>,
@@ -625,7 +701,7 @@ impl Drop for BridgeFactory {
 }
 
 impl BridgeFactory {
-    fn instantiate(&self) -> Result<BridgeInstance, wasmtime::Error> {
+    async fn instantiate(&self) -> Result<BridgeInstance, wasmtime::Error> {
         let mut ctx = self.wasi.ctx_builder();
         if let Some(command) = &self.consent.command {
             let command_json = serde_json::to_string(command).unwrap_or_else(|_| "[]".into());
@@ -634,14 +710,23 @@ impl BridgeFactory {
         if let Some(url) = &self.consent.mcp_url {
             ctx.env("TAU_MCP_URL", url);
         }
-        let generation = self.generation.get().wrapping_add(1);
-        self.generation.set(generation);
+        let generation = self
+            .generation
+            .fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+            .wrapping_add(1);
         let state = BridgeState {
             ctx: ctx.build(),
             table: ResourceTable::new(),
-            processes: ProcessRegistry::new(generation),
-            http: HttpRegistry::new(self.consent.origins.clone()),
-            ws: crate::ws::WsRegistry::new(generation, self.consent.origins.clone()),
+            processes: std::sync::Arc::new(std::sync::Mutex::new(ProcessRegistry::new(
+                generation,
+            ))),
+            http: std::sync::Arc::new(std::sync::Mutex::new(HttpRegistry::new(
+                self.consent.origins.clone(),
+            ))),
+            ws: std::sync::Arc::new(std::sync::Mutex::new(crate::ws::WsRegistry::new(
+                generation,
+                self.consent.origins.clone(),
+            ))),
             channel: self.channel.clone(),
             inject: self.inject,
             subscriptions: HashMap::new(),
@@ -650,7 +735,8 @@ impl BridgeFactory {
         };
         let mut store = Store::new(&self.engine, state);
         let bindings =
-            bridge_bindings::Bridge::instantiate(&mut store, &self.component, &self.linker)?;
+            bridge_bindings::Bridge::instantiate_async(&mut store, &self.component, &self.linker)
+                .await?;
         Ok(BridgeInstance { store, bindings })
     }
 }
@@ -664,14 +750,18 @@ impl SharedBridgeInstance {
     /// Drop a poisoned instance and build a fresh one. Best-effort: if
     /// re-instantiation somehow fails, the poisoned instance stays and
     /// calls keep surfacing trap errors.
-    fn revive(&mut self) {
-        if let Ok(fresh) = self.factory.instantiate() {
+    async fn revive(&mut self) {
+        if let Ok(fresh) = self.factory.instantiate().await {
             self.instance = fresh;
         }
     }
 }
 
-pub(crate) type SharedBridge = Arc<Mutex<SharedBridgeInstance>>;
+/// The interior mutex alone, for holders that keep a `Weak` (the ingress
+/// registry: a strong ref there would cycle through the factory).
+pub(crate) type SharedBridgeInner = tokio::sync::Mutex<SharedBridgeInstance>;
+
+pub(crate) type SharedBridge = Arc<SharedBridgeInner>;
 
 impl ExtensionHost {
     /// Load a bridge component. `consent` carries everything the bridge is
@@ -690,10 +780,10 @@ impl ExtensionHost {
         consent: BridgeConsent,
     ) -> Result<LoadedExtension, ExtError> {
         let path = path.as_ref().to_path_buf();
-        Self::off_runtime(move || self.load_bridge_inner(&path, consent))
+        crate::block_on_component(self.load_bridge_inner(&path, consent))
     }
 
-    fn load_bridge_inner(
+    async fn load_bridge_inner(
         &self,
         path: &Path,
         consent: BridgeConsent,
@@ -705,7 +795,7 @@ impl ExtensionHost {
                 reason: e.to_string(),
             })?;
         let mut linker: Linker<BridgeState> = Linker::new(&self.engine);
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         bridge_bindings::Bridge::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
         let ingress = std::sync::Arc::new(crate::ingress::IngressRegistry::new(
             consent.ingress.clone(),
@@ -718,10 +808,10 @@ impl ExtensionHost {
             channel: self.channel.clone(),
             inject: consent.inject,
             consent,
-            generation: std::cell::Cell::new(0),
+            generation: std::sync::atomic::AtomicU32::new(0),
             ingress,
         };
-        let mut instance = factory.instantiate().map_err(|e| ExtError::Load {
+        let mut instance = factory.instantiate().await.map_err(|e| ExtError::Load {
             path: path.display().to_string(),
             reason: format!(
                 "bridge instantiation failed (the bridge world since 0.3.0 also \
@@ -739,6 +829,7 @@ impl ExtensionHost {
             .bindings
             .tau_extension_tools()
             .call_definitions(&mut instance.store)
+            .await
             .map_err(|e| ExtError::Load {
                 path: path.display().to_string(),
                 reason: format!("bridge handshake failed: {}", crate::compact_wasm_error(&e)),
@@ -751,21 +842,18 @@ impl ExtensionHost {
             .bindings
             .tau_extension_probes()
             .call_points(&mut instance.store)
+            .await
             .map_err(|e| ExtError::Load {
                 path: path.display().to_string(),
                 reason: format!("bridge points() trapped: {}", crate::compact_wasm_error(&e)),
             })?;
 
-        let shared: SharedBridge = Arc::new(Mutex::new(SharedBridgeInstance { instance, factory }));
+        let shared: SharedBridge =
+            Arc::new(tokio::sync::Mutex::new(SharedBridgeInstance { instance, factory }));
         // Late-bind the dispatch target: requests arriving between the
         // listener's first accept and this line answer 503, never
         // dispatch into a half-built bridge.
-        shared
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .factory
-            .ingress
-            .bind(&shared);
+        shared.lock().await.factory.ingress.bind(&shared);
         let mut tools: Vec<Box<dyn Tool>> = Vec::with_capacity(definitions.len());
         for def in definitions {
             let tool_def = crate::tool_def_strict(def.name, def.description, &def.parameters_json)
@@ -914,27 +1002,20 @@ impl Tool for BridgeTool {
 
     async fn execute(&self, arguments: serde_json::Value) -> ToolOutput {
         let name = self.def.name.clone();
-        let shared = self.shared.clone();
-        let result = tokio::task::spawn_blocking(move || {
-            let mut guard = shared
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let BridgeInstance { store, bindings } = &mut guard.instance;
-            let result =
-                bindings
-                    .tau_extension_tools()
-                    .call_execute(store, &name, &arguments.to_string());
-            if result.is_err() {
-                // The trap poisoned the guest; rebuild so the next call
-                // reaches a fresh instance (which respawns its server)
-                // instead of trapping forever.
-                guard.revive();
-            }
-            result
-        })
-        .await;
+        let mut guard = self.shared.lock().await;
+        let BridgeInstance { store, bindings } = &mut guard.instance;
+        let result = bindings
+            .tau_extension_tools()
+            .call_execute(store, &name, &arguments.to_string())
+            .await;
+        if result.is_err() {
+            // The trap poisoned the guest; rebuild so the next call
+            // reaches a fresh instance (which respawns its server)
+            // instead of trapping forever.
+            guard.revive().await;
+        }
         match result {
-            Ok(Ok(r)) => match crate::convert::tool_result_blocks_to_core(
+            Ok(r) => match crate::convert::tool_result_blocks_to_core(
                 // The bridge world bindgen has its own copies of the types
                 // interface; translate field-by-field into the host-side
                 // bindings' shapes (identical by construction).
@@ -946,10 +1027,9 @@ impl Tool for BridgeTool {
                 },
                 Err(e) => ToolOutput::err(format!("invalid tool result: {e}")),
             },
-            Ok(Err(e)) => {
+            Err(e) => {
                 ToolOutput::err(format!("bridge trap: {}", crate::compact_wasm_error(&e)))
             }
-            Err(e) => ToolOutput::err(format!("bridge task failed: {e}")),
         }
     }
 }
@@ -970,29 +1050,22 @@ impl ProbeHandler for BridgeProbes {
     }
 
     async fn probe(&self, point: ProbePoint, payload: ProbePayload) -> Verdict {
-        let shared = self.shared.clone();
         let point_name = point.name().to_string();
         let payload_json = payload.to_json().to_string();
-        let result = tokio::task::spawn_blocking(move || {
-            let mut guard = shared
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
-            let BridgeInstance { store, bindings } = &mut guard.instance;
-            let result =
-                bindings
-                    .tau_extension_probes()
-                    .call_probe(store, &point_name, &payload_json);
-            if result.is_err() {
-                // The trap poisoned the guest; rebuild so the next probe
-                // still decides instead of degrading forever.
-                guard.revive();
-            }
-            result
-        })
-        .await;
+        let mut guard = self.shared.lock().await;
+        let BridgeInstance { store, bindings } = &mut guard.instance;
+        let result = bindings
+            .tau_extension_probes()
+            .call_probe(store, &point_name, &payload_json)
+            .await;
+        if result.is_err() {
+            // The trap poisoned the guest; rebuild so the next probe
+            // still decides instead of degrading forever.
+            guard.revive().await;
+        }
         use bridge_bindings::exports::tau::extension::probes::Action;
         match result {
-            Ok(Ok(verdict)) => match verdict.action {
+            Ok(verdict) => match verdict.action {
                 Action::Continue => Verdict::Continue,
                 Action::Replace => crate::replace_probe_payload(point, payload, verdict.payload_json),
                 Action::Block => Verdict::Block {
@@ -1000,7 +1073,7 @@ impl ProbeHandler for BridgeProbes {
                 },
             },
             // A broken bridge degrades to Continue, never wedges the run.
-            Ok(Err(_)) | Err(_) => Verdict::Continue,
+            Err(_) => Verdict::Continue,
         }
     }
 }

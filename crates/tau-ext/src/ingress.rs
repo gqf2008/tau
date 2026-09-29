@@ -4,10 +4,11 @@
 //! The host is a pipe — method/path/headers/body pass through untouched;
 //! signature verification against platform secrets is the component's
 //! job. Each inbound request is pushed into the component's
-//! `ingress-handler` export synchronously (under the instance lock, so a
-//! component mid-tool-call queues the webhook — platforms retry, that is
-//! a fact of the platform, not a loss) and the export's return value is
-//! written back verbatim as the HTTP response.
+//! `ingress-handler` export under the instance lock (the server thread
+//! drives the awaited call to completion, so a component mid-tool-call
+//! queues the webhook — platforms retry, that is a fact of the platform,
+//! not a loss) and the export's return value is written back verbatim as
+//! the HTTP response.
 //!
 //! TLS is terminated by the tunnel/reverse proxy in front (the docs say
 //! so honestly); this listener speaks plain HTTP on the consented
@@ -19,7 +20,7 @@ use std::sync::{Arc, Mutex, Weak};
 use std::thread::JoinHandle;
 use std::time::Duration;
 
-use crate::bridge::{SharedBridge, SharedBridgeInstance, ingress_dispatch};
+use crate::bridge::{SharedBridge, SharedBridgeInner, ingress_dispatch};
 use crate::bridge_bindings::exports::tau::extension::ingress_handler as wit_ingress;
 
 /// How long the accept loop sleeps between shutdown polls.
@@ -38,7 +39,7 @@ pub(crate) struct IngressRegistry {
     /// (BridgeFactory.ingress), so a strong ref here would cycle and
     /// nothing would ever shut the listener down. Upgrade per request;
     /// a dead instance answers 503.
-    target: Mutex<Weak<Mutex<SharedBridgeInstance>>>,
+    target: Mutex<Weak<SharedBridgeInner>>,
     shutdown: AtomicBool,
 }
 

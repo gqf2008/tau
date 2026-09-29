@@ -81,6 +81,12 @@ mod bridge_bindings {
         // by the wit_vendored test below.
         path: "wit/tau.wit",
         world: "bridge",
+        // Last world of stage 1's second half (docs/wit-redesign.md §6),
+        // and the one with the most to await: exports, plus the http, ws,
+        // process and ingress imports, whose calls all wait on a socket, a
+        // pipe or an actor thread.
+        imports: { default: async },
+        exports: { default: async },
     });
 }
 
@@ -728,20 +734,6 @@ impl ExtensionHost {
         Ok(bytes)
     }
 
-    /// Run component instantiation and entry-point calls on a plain OS
-    /// thread when called from inside a tokio runtime: wasmtime-wasi's sync
-    /// host functions block_on internally and panic on a runtime thread
-    /// ("Cannot start a runtime from within a runtime"). The extension
-    /// world has moved off this path (async linker + [`block_on_component`]);
-    /// the provider, bridge and realtime worlds still use it.
-    fn off_runtime<T: Send>(f: impl FnOnce() -> Result<T, ExtError> + Send) -> Result<T, ExtError> {
-        if tokio::runtime::Handle::try_current().is_ok() {
-            std::thread::scope(|scope| scope.spawn(f).join().expect("loader thread"))
-        } else {
-            f()
-        }
-    }
-
     /// Load one component file. Ambient WASI access follows the host's
     /// [`WasiPolicy`] (allow-all by default; `--deny-wasi` to sandbox).
     /// Session injection (`host.steer`/`follow-up`) is NOT consented;
@@ -1228,13 +1220,17 @@ impl ExtensionHost {
 }
 
 /// Lock a registry, surviving a poisoned mutex: a panic inside one
-/// blocking http call must not poison every later call in the session.
+/// blocking call must not poison every later call in the session.
+pub(crate) fn lock_poisoned<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+    m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+/// [`lock_poisoned`] for the http table the provider and realtime worlds
+/// share.
 pub(crate) fn lock_registry(
     registry: &std::sync::Mutex<http::HttpRegistry>,
 ) -> std::sync::MutexGuard<'_, http::HttpRegistry> {
-    registry
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
+    lock_poisoned(registry)
 }
 
 impl provider_bindings::tau::extension::http::Host for ProviderState {
