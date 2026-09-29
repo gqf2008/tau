@@ -2,6 +2,12 @@
 
 > Spike 结论（2026-09-27 实机验证）。**迁移冻结到 Rust 1.100.0 进 stable**
 > （预计 2026-11 中旬），届时按本文档的范围执行；在此之前不动 WIT。
+>
+> **2026-09-29 更新：冻结的解锁条件已提前满足。** wit-bindgen 0.62 让 stable
+> `wasm32-wasip2` 就能编出 `async func` + `stream` 的组件（无需 nightly、无需
+> `-Zbuild-std`）——等的是 wasip3 的 **std**，不是 Component Model 的异步 ABI，
+> 本文此前把两者绑在了一起。见文末「追加 Spike（2026-09-29）」；契约层面的重设计见
+> `docs/wit-redesign.md` 与草案 `wit/next/tau.wit`。
 
 ## TL;DR
 
@@ -88,3 +94,25 @@ concurrent API 驱动器，当前死于 guest 链接/宿主校验两道上游错
 本机 stable ≥ 1.100 可用时：`rustup target add wasm32-wasip3`，
 重跑 `target/wasip3-spike/guest` 的构建；绿，则立迁移项并按上面
 的范围排期。
+
+
+## 追加 Spike（2026-09-29，wit-bindgen 0.62 + **stable** wasm32-wasip2）：解锁条件已提前满足
+
+本文的冻结理由之一是「stream 组件若要求 nightly + `-Zbuild-std`，`rustup target add
+wasm32-wasip2; cargo build` 的分发故事直接破产」。**该理由不再成立。**
+
+| 检查 | 结果 | 证据 |
+|------|------|------|
+| wit-bindgen 0.62（2026-09-10）修好 async 导出的 canon 编码 | ✅ | 2026-09-28 那条卡在 wit-bindgen 0.46 把导出编码成 `[async]run`、被 LLVM 23 的 componentizer 拒收；0.62 改成 `[async-lift]…` + `[callback]…`，与 wasm-tools/wasmtime 两侧一致 |
+| **stable** 工具链（rustc 1.98.1）编 wasip2 的 async 流组件 | ✅ | `target/wit-probe/guest-realtime/`：`wit-bindgen = { version = "0.62", features = ["async-spawn", "inter-task-wakeup"] }`、`world realtime`、`cargo build --target wasm32-wasip2 --release` → `probe_realtime.wasm` 163 KB。**没有 nightly、没有 `-Zbuild-std`** |
+| 产物里真是异步提升 | ✅ | `wasm-tools print`：`(canon lift (core func "[async-lift]tau:extension/models@0.7.0#run") … async (callback …))`（`[static]session.create` 同）；`wasm-tools component wit` 读回 `run: async func(request: request) -> tuple<stream<event>, future<result<_, error>>>` |
+| host 侧（wasmtime 49.0.1）绑定 | ✅ 编译并运行 | 四个 world 全部 `bindgen!` 通过；async 按界面开——`imports: { default: async }` + `exports: { default: async }`（**没有** `async: true` 这个键） |
+| host 侧驱动一条 guest→host 流 | ✅ 既有 spike | 本目录的 host 驱动器：4×4096 字节逐字节校验 |
+| 非 Rust 生成器 | ✅ C / Go / JS，❌ C++ | `wit-bindgen c`：`…_execute_callback` / `…_execute_return` + `stream`/`future` 句柄 typedef；`wit-bindgen go`：`[async-lift]` + `StreamReader/StreamWriter/FutureReader` + `StreamVtable`；`jco types`：`Promise<[AsyncIterable<Event>, …]>`。**`wit-bindgen-cpp 0.62` 对 `future`/`stream` 是 `todo!()`**（`src/lib.rs:1750-1751`），C++ 访客暂时只能留在 `extension` world |
+
+**结论更新**：wasip3 的 *std* 仍等 1.100（本文原判断没错），但 **Component Model 的异步
+ABI 今天就能在 stable + `wasm32-wasip2` 上用**。于是「等」的理由只剩一条：等一个更省拷贝
+的 ABI 不是必须的——因为异步 ABI 本身已经可用。
+
+仍待验证（迁移 spike 的腿，逐条列在 `docs/wit-redesign.md` §5）：宿主向访客**写**流
+（上行方向）、宿主持有访客资源句柄的运行时行为、`Store::run_concurrent` 下的多会话并发。
