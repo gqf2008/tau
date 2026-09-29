@@ -672,23 +672,26 @@ echo "$OUT" | grep -q "STATUS 302" \
 echo "ok — consented origin's 302 is shown, never followed"
 
 # A peer that sends headers and then goes quiet must surface as an error,
-# not a hang: the guest's read-body carries a bounded idle budget
-# (wit-review F9 — before this, the host thread blocked until exit).
-OUT="$("$TAU" --allow-unsigned \
+# not a hang: the body's idle budget is the HOST's since 0.7.0 (the guest
+# no longer passes a timeout), so the knob shortens it for this gate. The
+# reason goes to stderr and the guest's stream simply ends (wit-review F9).
+OUT="$(TAU_HTTP_IDLE_TIMEOUT_MS=300 "$TAU" --allow-unsigned \
     --provider-wasm "$HTTP_PROVIDER" --model http \
     --provider-origin http://127.0.0.1:8402 \
-    -p "http://127.0.0.1:8402/quiet idle=300" 2>&1 || true)"
+    -p "http://127.0.0.1:8402/quiet" 2>&1 || true)"
 echo "$OUT" | grep -q "no bytes within 300ms" \
-    || fail "idle budget never fired — read-body blocked or swallowed it: $OUT"
-echo "ok — a quiet peer returns an explicit timeout instead of a hung call"
+    || fail "idle budget never fired — the body stream blocked or swallowed it: $OUT"
+echo "ok — a quiet peer ends the body stream with an explicit timeout"
 
 # A peer that accepts the connection and then sends NOTHING — no headers,
 # no error, no FIN — must surface as an error too: the wait for response
-# headers carries its own bound, separate from the body's (wit-review F11).
-OUT="$("$TAU" --allow-unsigned \
+# headers carries its own bound, separate from the body's, and it is the
+# HOST's bound as well since 0.7.0 (wit-review F11). This failure reaches
+# the guest as the import's error, so the model output is what names it.
+OUT="$(TAU_HTTP_REQUEST_TIMEOUT_MS=300 "$TAU" --allow-unsigned \
     --provider-wasm "$HTTP_PROVIDER" --model http \
     --provider-origin http://127.0.0.1:8402 \
-    -p "http://127.0.0.1:8402/mute idle=300" 2>&1 || true)"
+    -p "http://127.0.0.1:8402/mute" 2>&1 || true)"
 echo "$OUT" | grep -q "no response headers within 300ms" \
     || fail "headers budget never fired — request blocked or swallowed it: $OUT"
 echo "ok — a peer that never sends headers returns an explicit timeout"
@@ -739,13 +742,16 @@ echo "ok — unknown model id refused at load, available ids named"
 
 # --- step 4b: large payload over the component boundary ----------------
 step "4b/11 large media crosses the component boundary intact"
-# A 3 MiB image in the session history inflates the request JSON past
-# 4 MiB of base64 — far beyond the few KiB every other step sends. The
-# echo provider's "probe" keyword reports the byte length of the
-# request the GUEST received; the session → materialize → wasm boundary
-# path must deliver it whole, not choke, truncate, or refuse. (The
-# exact length + FNV-1a contract against the sent string is pinned by
-# tau-ext's large_payload_tests; here the real CLI drives it.)
+# A 3 MiB image in the session history must cross the session →
+# materialize → wasm boundary whole — not choked, truncated, or refused.
+# Since 0.7.0 the echo provider's "probe" keyword reports the byte length
+# and the FNV-1a of the RAW media bytes it received (the serialized
+# request JSON is a host-side wire detail now; the guest sees typed
+# records). A length alone is a weak leg, so the script recomputes the
+# checksum over the very bytes it sent: corruption is a mismatch,
+# truncation a short count. (tau-ext's large_payload_tests pin the same
+# length+checksum contract against a hand-built component; here the real
+# CLI drives it.)
 python - << 'PYEOF'
 import base64, json, random
 random.seed()
@@ -760,6 +766,12 @@ msg = {
 }
 with open("big-session.jsonl", "w") as f:
     f.write(json.dumps(msg) + "\n")
+h = 0xcbf29ce484222325
+for b in data:
+    h ^= b
+    h = (h * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
+with open("big-fnv.txt", "w") as f:
+    f.write("%016x" % h)
 PYEOF
 OUT="$("$TAU" --allow-unsigned \
     --provider-wasm "$ECHO_PROVIDER" --model echo \
@@ -767,9 +779,11 @@ OUT="$("$TAU" --allow-unsigned \
     -p "probe" 2>&1)" || fail "large-payload run: $OUT"
 BYTES=$(echo "$OUT" | grep -o 'bytes=[0-9]*' | head -1 | cut -d= -f2)
 [ -n "$BYTES" ] || fail "guest never reported the payload size: $OUT"
-[ "$BYTES" -gt 4000000 ] \
+[ "$BYTES" -eq 3145728 ] \
     || fail "payload truncated at the boundary: guest saw only $BYTES bytes"
-echo "ok — 3 MiB of media crossed session→guest whole ($BYTES bytes of request JSON)"
+echo "$OUT" | grep -q "fnv1a=$(cat big-fnv.txt)" \
+    || fail "payload corrupted at the boundary (checksums differ): $OUT"
+echo "ok — 3 MiB of media crossed session→guest whole ($BYTES bytes, FNV-1a matches)"
 
 # --- step 5: MCP bridge (consent-gated spawn) --------------------------
 step "5/11 MCP bridge (consent-gated spawn)"
@@ -792,14 +806,19 @@ echo "$OUT" | grep -q "tool ← echo: bridge validation ok" \
 echo "ok — consent-gated spawn served the echo tool through the MCP bridge"
 
 # A server that never reads its stdin must not wedge the bridge (wit-review
-# F12): the host takes what its buffer holds, the call returns a short count
-# under a bound, and the bridge fails by name once a few budgets take
-# nothing. TAU_MCP_PAD inflates the request past the host's buffer — no argv
-# can carry that many bytes.
-OUT="$(TAU_MCP_PAD=200000 "$TAU" --allow-unsigned --mcp-bridge "$MCP_BRIDGE" \
+# F12). The wait is the HOST budget since 0.7.0 — a wasm guest has no clock
+# it can await — so the gate shortens it with the knob: the host stdin sink
+# gives up on a queue nobody drains, the guest write comes back with the
+# unwritten remainder, and the bridge names the stall in the tool result.
+# TAU_MCP_PAD inflates the request past the host buffer — no argv can carry
+# that many bytes.
+OUT="$(TAU_MCP_PAD=200000 TAU_PROCESS_STDIN_IDLE_TIMEOUT_MS=300 "$TAU" --allow-unsigned \
+    --mcp-bridge "$MCP_BRIDGE" \
     --mcp-command "[\"python\",\"$ROOT_WIN/examples/mcp-bridge/mock_server.py\",\"--mute-stdin\"]" \
     --demo -p "write stall validation" 2>&1 || true)"
-echo "$OUT" | grep -q "took nothing from stdin" \
+echo "$OUT" | grep -q "tau process.stdin: the child took nothing for 300ms" \
+    || fail "the host stdin budget never fired: $OUT"
+echo "$OUT" | grep -q "the server stopped taking stdin" \
     || fail "a server that never reads stdin was not reported: $OUT"
 echo "ok — a server that never reads stdin surfaces as a named stall, not a hang"
 
@@ -821,9 +840,11 @@ echo "$OUT" | grep -qE "tool ← ws_echo: echo: .*frame-pipe-ok" || fail "ws ech
 echo "ok — frame crossed guest→host→ws→echo→back (consent-gated origin)"
 
 # A listener that accepts the TCP connection and never upgrades it: the
-# handshake wait is bounded in the host, so this must fail loudly rather
-# than park the run (wit-review F11 — tungstenite's connect does
-# transport + upgrade in one unbounded blocking call).
+# handshake wait is the HOST's budget since 0.7.0 (the guest no longer
+# passes one), so the gate shortens it with the knob instead. Failure
+# must still be loud rather than park the run (wit-review F11 —
+# tungstenite's connect does transport + upgrade in one unbounded
+# blocking call).
 python - <<'MUTE' > ws_mute.log 2>&1 &
 import socket, time
 srv = socket.socket()
@@ -841,7 +862,7 @@ for _ in $(seq 1 20); do
 done
 WS_MUTE_PORT=$(sed -n 's/^ws mute ready //p' ws_mute.log)
 [ -n "$WS_MUTE_PORT" ] || fail "ws mute listener did not start: $(cat ws_mute.log)"
-OUT="$("$TAU" --allow-unsigned --mcp-bridge "$WS_ECHO" \
+OUT="$(TAU_WS_CONNECT_TIMEOUT_MS=5000 "$TAU" --allow-unsigned --mcp-bridge "$WS_ECHO" \
     --mcp-url "ws://127.0.0.1:$WS_MUTE_PORT/echo" --demo \
     -p "never answers via ws_echo" 2>&1 || true)"
 kill "$WS_MUTE_PID" 2> /dev/null || true

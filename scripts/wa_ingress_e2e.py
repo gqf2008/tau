@@ -185,7 +185,7 @@ def refusal_leg():
             tau.wait("you> ")
             # Fail-closed: the listen call errors, the notice names the
             # missing consent, and no listener ever exists.
-            tau.wait("wa: ingress not consented", 15)
+            tau.wait("wa: ingress refused: ingress not consented", 15)
             tau.send("/quit\r")
             # No turn ever ran (nothing steered), so there is no
             # "ready (session: ...)" line to wait on — /quit just exits.
