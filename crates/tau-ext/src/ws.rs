@@ -108,31 +108,47 @@ enum Inbound {
     Poll,
 }
 
+/// Why an inbound call was refused the frame queue. The two answers are
+/// different promises to the guest, so they are different variants here:
+/// `AlreadyOwned` is the contract's `invalid` (one consumer per
+/// connection -- a misuse of the interface, and `invalid` is what a guest
+/// matching the typed variant looks for), while `Ended` is the
+/// connection's terminal reason, which the interface reports as `failed`
+/// after the frames it follows. Folding both into one string is what let a
+/// refused `receive` show up as a clean end.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum InboundError {
+    /// The other consumer already owns this connection's frames.
+    AlreadyOwned,
+    /// The connection's terminal reason (peer closed, actor gone).
+    Ended(String),
+}
+
 impl HostConnection {
     /// The inbound frame queue, handed out once, to `receive`'s stream.
-    /// `None` when a consumer already has it (the stream is then an
-    /// immediately-ended one, which is the shape this interface has always
-    /// used for "there is nothing to hand you": `receive` has no error
-    /// channel).
-    pub(crate) fn take_inbound(&mut self) -> Option<InboundQueue> {
+    /// `Err(AlreadyOwned)` when the sync drain already has it -- the
+    /// contract's `invalid`, which `receive` reports through the future it
+    /// hands back (the stream it also returns ends at once: there is
+    /// nothing left to hand you).
+    pub(crate) fn take_inbound(&mut self) -> Result<InboundQueue, InboundError> {
         if self.inbound != Inbound::Free {
-            return None;
+            return Err(InboundError::AlreadyOwned);
         }
         self.inbound = Inbound::Stream;
-        Some(Arc::clone(&self.frames))
+        Ok(Arc::clone(&self.frames))
     }
 
     /// Drain what has arrived, without waiting -- the sync pump's shape.
-    /// `Err` when the queue already belongs to the `receive` stream (the
-    /// contract's `invalid`), otherwise the frames so far plus, on a later
-    /// call, the connection's terminal reason.
-    pub(crate) fn poll_inbound(&mut self) -> Result<Vec<WsFrame>, String> {
+    /// `Err(AlreadyOwned)` when the queue already belongs to the
+    /// `receive` stream (the contract's `invalid`); otherwise the frames
+    /// so far plus, on a later call, the connection's terminal reason.
+    pub(crate) fn poll_inbound(&mut self) -> Result<Vec<WsFrame>, InboundError> {
         if self.inbound == Inbound::Stream {
-            return Err("receive() already owns this connection's frames (one consumer per connection)".into());
+            return Err(InboundError::AlreadyOwned);
         }
         self.inbound = Inbound::Poll;
         if let Some(why) = self.ended.take() {
-            return Err(why);
+            return Err(InboundError::Ended(why));
         }
         let frames = Arc::clone(&self.frames);
         let mut queue = frames.lock().unwrap_or_else(|e| e.into_inner());
@@ -444,11 +460,32 @@ mod tests {
 
         // The async stream takes the inbox: `receive` is handed out once,
         // and a `poll` after it is refused rather than silently splitting
-        // the frames between two consumers.
+        // the frames between two consumers. The refusal is the contract's
+        // `invalid`, not the connection's terminal reason.
         let (mut stream_owner, _frames) = connection();
-        assert!(stream_owner.take_inbound().is_some(), "the first take wins");
-        assert!(stream_owner.take_inbound().is_none(), "handed out twice");
-        assert!(stream_owner.poll_inbound().is_err(), "poll took a taken inbox");
+        assert!(stream_owner.take_inbound().is_ok(), "the first take wins");
+        assert_eq!(
+            stream_owner.take_inbound().unwrap_err(),
+            InboundError::AlreadyOwned,
+            "handed out twice"
+        );
+        assert_eq!(
+            stream_owner.poll_inbound().unwrap_err(),
+            InboundError::AlreadyOwned,
+            "poll took a taken inbox"
+        );
+
+        // The other order is the other half of the same rule, and the one
+        // the guest meets as a refused `receive`: the sync pump owns the
+        // queue, so the stream's take is refused instead of ending as if
+        // the connection were over (the receipt carries the reason).
+        let (mut poll_first, _frames) = connection();
+        assert!(poll_first.poll_inbound().unwrap().is_empty(), "nothing yet is not an end");
+        assert_eq!(
+            poll_first.take_inbound().unwrap_err(),
+            InboundError::AlreadyOwned,
+            "receive after poll is the same misuse, in the other direction"
+        );
 
         // The sync drain: everything queued, nothing when the peer is
         // quiet, and the terminal reason only after the frames it follows.
@@ -469,7 +506,7 @@ mod tests {
         );
         assert_eq!(
             poller.poll_inbound().unwrap_err(),
-            "ws: peer closed the connection"
+            InboundError::Ended("ws: peer closed the connection".into())
         );
     }
 

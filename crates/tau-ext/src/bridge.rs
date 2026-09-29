@@ -817,7 +817,17 @@ impl<U> bridge_ws::HostConnectionWithStore<U> for HasSelf<BridgeState> {
             })?;
         match drained {
             Ok(frames) => Ok(frames.into_iter().map(bridge_frame).collect()),
-            Err(why) => Err(bridge_types::Error::Failed(why)),
+            // One consumer per connection: the second caller's answer is
+            // `invalid` -- the contract's word for a contract misuse, and
+            // the variant a guest matches on (the string is detail, not
+            // the discriminator; 0.7.0 typed these errors so nobody has to
+            // parse them).
+            Err(crate::ws::InboundError::AlreadyOwned) => Err(bridge_types::Error::Invalid(
+                "ws.poll: receive() already owns this connection's frames \
+                 (one consumer per connection)"
+                    .into(),
+            )),
+            Err(crate::ws::InboundError::Ended(why)) => Err(bridge_types::Error::Failed(why)),
         }
     }
 
@@ -826,7 +836,11 @@ impl<U> bridge_ws::HostConnectionWithStore<U> for HasSelf<BridgeState> {
     /// connection ended. The stream settles that state when it ends, so the
     /// future resolves exactly when the frames stop -- which is what the
     /// contract promises ("that close ends the stream and the future's
-    /// error names the reason").
+    /// error names the reason"). A `receive` that loses the single-consumer
+    /// race is settled here instead: the future answers `invalid` and the
+    /// stream it hands back is the immediately-ended one, so a guest that
+    /// matches the typed variant sees the misuse rather than an empty
+    /// stream that looks like a connection ending cleanly.
     fn receive(
         mut host: Access<U, Self>,
         connection: Resource<crate::ws::HostConnection>,
@@ -834,20 +848,37 @@ impl<U> bridge_ws::HostConnectionWithStore<U> for HasSelf<BridgeState> {
         StreamReader<bridge_ws::Frame>,
         FutureReader<Result<(), bridge_types::Error>>,
     ) {
-        let frames = host
+        let (frames, refusal) = match host
             .get()
             .table
             .get_mut(&connection)
-            .ok()
-            .and_then(crate::ws::HostConnection::take_inbound);
-        if frames.is_none() {
-            eprintln!(
-                "tau ws.receive: the connection is not in the resource table, or its frames \
-                 already have a consumer (receive is handed out once)"
-            );
-        }
-        let verdict: Arc<std::sync::Mutex<Option<Result<(), String>>>> =
-            Arc::new(std::sync::Mutex::new(None));
+            .map(crate::ws::HostConnection::take_inbound)
+        {
+            Ok(Ok(frames)) => (Some(frames), None),
+            Ok(Err(crate::ws::InboundError::AlreadyOwned)) => (
+                None,
+                Some(bridge_types::Error::Invalid(
+                    "ws.receive: poll() already owns this connection's frames \
+                     (one consumer per connection)"
+                        .into(),
+                )),
+            ),
+            // `take_inbound` hands out the queue or refuses it; it has no
+            // terminal reason of its own. Kept total anyway, so a variant
+            // added later cannot be silently folded into "the stream just
+            // ended".
+            Ok(Err(crate::ws::InboundError::Ended(why))) => {
+                (None, Some(bridge_types::Error::Failed(why)))
+            }
+            Err(_) => (
+                None,
+                Some(bridge_types::Error::Invalid(
+                    "ws.receive: the connection is not in the resource table".into(),
+                )),
+            ),
+        };
+        let verdict: Arc<std::sync::Mutex<Option<Result<(), bridge_types::Error>>>> =
+            Arc::new(std::sync::Mutex::new(refusal.map(Err)));
         let verdict_waker = Arc::new(std::sync::Mutex::new(None));
         let stream = StreamReader::new(
             &mut host,
@@ -864,9 +895,11 @@ impl<U> bridge_ws::HostConnectionWithStore<U> for HasSelf<BridgeState> {
                     let slot = verdict.lock().unwrap_or_else(|e| e.into_inner());
                 match &*slot {
                     Some(Ok(())) => Poll::Ready(Ok(Ok(()))),
-                    Some(Err(why)) => {
-                        Poll::Ready(Ok(Err(bridge_types::Error::Failed(why.clone()))))
-                    }
+                    // The one thing that reaches a guest here: the
+                    // connection's terminal reason, or the `invalid` a
+                    // refused `receive` settled before the stream was even
+                    // handed out.
+                    Some(Err(err)) => Poll::Ready(Ok(Err(err.clone()))),
                     None => {
                         drop(slot);
                         *verdict_waker.lock().unwrap_or_else(|e| e.into_inner()) =
@@ -887,18 +920,23 @@ impl<U> bridge_ws::HostConnectionWithStore<U> for HasSelf<BridgeState> {
 /// the connection's terminal state. A producer must be `'static`, so it
 /// holds `Arc`s rather than borrowing the resource table entry.
 struct FrameStream {
-    /// `None` when the resource was not in the table (unreachable through
-    /// the resource typing): the stream ends immediately rather than
-    /// panicking inside a host import.
+    /// `None` when there was nothing to hand out: the resource was not in
+    /// the table (unreachable through the resource typing), or the sync
+    /// drain already owned the queue. Either way the stream ends
+    /// immediately rather than panicking inside a host import, and the
+    /// reason rides the future as a typed error.
     frames: Option<crate::ws::InboundQueue>,
-    verdict: Arc<std::sync::Mutex<Option<Result<(), String>>>>,
+    /// The future's answer: `Ok(())` when the connection ended, `Err` when
+    /// it failed -- or when this call was the refused second consumer
+    /// (`invalid`).
+    verdict: Arc<std::sync::Mutex<Option<Result<(), bridge_types::Error>>>>,
     verdict_waker: Arc<std::sync::Mutex<Option<std::task::Waker>>>,
 }
 
 impl FrameStream {
     /// Record how the connection ended and wake the verdict future. First
     /// answer wins: a connection ends once.
-    fn settle(&self, outcome: Result<(), String>) {
+    fn settle(&self, outcome: Result<(), bridge_types::Error>) {
         let mut slot = self.verdict.lock().unwrap_or_else(|e| e.into_inner());
         if slot.is_none() {
             *slot = Some(outcome);
@@ -958,8 +996,10 @@ impl<D> StreamProducer<D> for FrameStream {
             }
             Poll::Ready(Some(Err(why))) => {
                 // The actor's terminal report: the peer closed, or the
-                // keepalive declared the connection dead.
-                this.settle(Err(why));
+                // keepalive declared the connection dead. A failed
+                // connection, not a contract misuse -- `invalid` is
+                // settled only by a refused `receive`.
+                this.settle(Err(bridge_types::Error::Failed(why)));
                 Poll::Ready(Ok(StreamResult::Dropped))
             }
             // Every sender is gone: the actor exited, which is also how a
