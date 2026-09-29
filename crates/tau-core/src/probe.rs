@@ -4,7 +4,8 @@
 use std::sync::Arc;
 
 use async_trait::async_trait;
-use serde_json::Value as Json;
+
+use crate::probe_payload::ProbePayload;
 
 /// A lifecycle point where a probe may fire. Payload shapes and verdict
 /// semantics per point: [`CATALOG`] (rendered by `tau probes --json`).
@@ -102,12 +103,14 @@ impl ProbePoint {
 }
 
 /// A probe's decision for one firing.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone)]
 pub enum Verdict {
     /// No opinion; the run proceeds with the current payload.
     Continue,
-    /// Replacement payload, point-specific.
-    Replace(Json),
+    /// Replacement payload. Its arm must be the one the firing used —
+    /// [`ProbePayload::point`] says which — and the registry ignores a
+    /// replacement that answers a different point instead of wedging.
+    Replace(ProbePayload),
     /// Veto the action; reason goes back to the model (tool points) or user.
     Block {
         /// Human-readable justification for the veto.
@@ -120,8 +123,10 @@ pub enum Verdict {
 pub trait ProbeHandler: Send + Sync {
     /// Which points this handler answers; others are never routed to it.
     fn points(&self) -> &[ProbePoint];
-    /// Decide one firing: the point and its payload.
-    async fn probe(&self, point: ProbePoint, payload: Json) -> Verdict;
+    /// Decide one firing: the point and its payload. The payload carries
+    /// the point (`payload.point()`), so a handler that answers several
+    /// points matches on the payload rather than on a second argument.
+    async fn probe(&self, point: ProbePoint, payload: ProbePayload) -> Verdict;
 }
 
 /// Sequential fold: each handler sees the previous handler's replacement;
@@ -165,7 +170,19 @@ impl ProbeRegistry {
 
     /// Folds all registered handlers; `Replace` if any handler replaced,
     /// `Block` on first block, else `Continue`.
-    pub async fn probe(&self, point: ProbePoint, mut payload: Json) -> Verdict {
+    ///
+    /// A replacement whose arm answers a different point is dropped: the
+    /// next handler sees the payload it would have seen, and the fold's
+    /// answer stays the last well-aimed one. That is the same stance as a
+    /// panicking handler (a broken extension must not wedge the harness),
+    /// and it cannot happen by accident: [`ProbePayload::merge_json`] and
+    /// every other constructor preserve the arm they started from.
+    pub async fn probe(&self, point: ProbePoint, mut payload: ProbePayload) -> Verdict {
+        debug_assert_eq!(
+            payload.point(),
+            point,
+            "payload and point disagree at the call site"
+        );
         let mut replaced = false;
         for handler in &self.handlers {
             if !handler.points().contains(&point) {
@@ -173,10 +190,11 @@ impl ProbeRegistry {
             }
             match handler.probe(point, payload.clone()).await {
                 Verdict::Continue => {}
-                Verdict::Replace(replacement) => {
+                Verdict::Replace(replacement) if replacement.point() == point => {
                     payload = replacement;
                     replaced = true;
                 }
+                Verdict::Replace(_) => {}
                 Verdict::Block { reason } => return Verdict::Block { reason },
             }
         }
@@ -378,7 +396,7 @@ mod registry_tests {
         fn points(&self) -> &[ProbePoint] {
             std::slice::from_ref(&self.point)
         }
-        async fn probe(&self, _point: ProbePoint, payload: Json) -> Verdict {
+        async fn probe(&self, _point: ProbePoint, payload: ProbePayload) -> Verdict {
             self.seen.fetch_add(1, Ordering::SeqCst);
             Verdict::Replace(payload)
         }
@@ -401,11 +419,24 @@ mod registry_tests {
             "the clone built its own handler instead of sharing the registered one"
         );
 
-        // The clone routes to that same handler.
-        let verdict = futures::executor::block_on(
-            handed_out.probe(ProbePoint::SessionStart, Json::Null),
-        );
-        assert_eq!(verdict, Verdict::Replace(Json::Null));
+        // The clone routes to that same handler, which hands the payload
+        // straight back: a replacement equal to what it was given.
+        let facts = crate::probe_payload::SessionFacts {
+            session: "s1".into(),
+            cwd: "/tmp".into(),
+            model: "demo".into(),
+        };
+        let verdict = futures::executor::block_on(handed_out.probe(
+            ProbePoint::SessionStart,
+            ProbePayload::SessionStart(facts.clone()),
+        ));
+        match verdict {
+            Verdict::Replace(ProbePayload::SessionStart(back)) => {
+                assert_eq!(back.session, facts.session, "payload drifted in the fold");
+                assert_eq!(back.cwd, facts.cwd);
+            }
+            other => panic!("expected a replacement, got {other:?}"),
+        }
         assert_eq!(seen.load(Ordering::SeqCst), 1);
 
         // Registration is still per-registry: the clone's handler set is

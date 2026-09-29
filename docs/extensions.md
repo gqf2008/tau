@@ -141,7 +141,9 @@ shapes; `docs/probes.md` has the full table and verdict semantics.
 
 Handlers fold in load order: each sees the previous handler's
 replacement; first `block` wins. A trapping handler degrades to
-`continue` — a broken extension must not wedge the harness.
+`continue`, and so does a `replace` whose payload does not fit the point
+it answers (the host names the offending field on stderr) — a broken
+extension must not wedge the harness.
 
 ## 4. The host channel (world `extension`, import `host`)
 

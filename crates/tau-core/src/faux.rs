@@ -888,10 +888,13 @@ mod tests {
         async fn probe(
             &self,
             _point: crate::probe::ProbePoint,
-            payload: serde_json::Value,
+            payload: crate::probe_payload::ProbePayload,
         ) -> crate::probe::Verdict {
+            let crate::probe_payload::ProbePayload::BeforeTool(call) = payload else {
+                return crate::probe::Verdict::Continue;
+            };
             // jev-shaped verdict: typed judgment over the payload.
-            if payload["args"]["text"].as_str() == Some("abc") {
+            if call.arguments["text"].as_str() == Some("abc") {
                 crate::probe::Verdict::Block {
                     reason: "policy: 'abc' is on the deny list".into(),
                 }
@@ -934,6 +937,7 @@ mod probe_point_tests {
     #![allow(clippy::module_inception)]
     use crate::model::{Model, ModelEvent, Request, StopReason};
     use crate::probe::{ProbeHandler, ProbePoint, ProbeRegistry, Verdict};
+    use crate::probe_payload::ProbePayload;
     use crate::{Agent, Message, ToolRegistry};
     use async_trait::async_trait;
 
@@ -963,7 +967,7 @@ mod probe_point_tests {
     }
 
     /// Records every probe firing (point + payload) for assertion.
-    struct Recorder(std::sync::Mutex<Vec<(ProbePoint, serde_json::Value)>>);
+    struct Recorder(std::sync::Mutex<Vec<(ProbePoint, ProbePayload)>>);
 
     #[async_trait]
     impl ProbeHandler for Recorder {
@@ -975,7 +979,7 @@ mod probe_point_tests {
             ]
         }
 
-        async fn probe(&self, point: ProbePoint, payload: serde_json::Value) -> Verdict {
+        async fn probe(&self, point: ProbePoint, payload: ProbePayload) -> Verdict {
             self.0.lock().unwrap().push((point, payload));
             Verdict::Continue
         }
@@ -991,7 +995,7 @@ mod probe_point_tests {
             fn points(&self) -> &[ProbePoint] {
                 self.0.points()
             }
-            async fn probe(&self, point: ProbePoint, payload: serde_json::Value) -> Verdict {
+            async fn probe(&self, point: ProbePoint, payload: ProbePayload) -> Verdict {
                 self.0.probe(point, payload).await
             }
         }
@@ -1011,22 +1015,20 @@ mod probe_point_tests {
             ]
         );
         // before_request sees the final request incl. the user message.
-        assert!(
-            fired[0].1["messages"]
-                .as_array()
-                .unwrap()
-                .iter()
-                .any(|m| m["content"][0]["text"] == "hello probes")
-        );
+        let ProbePayload::BeforeRequest(request) = &fired[0].1 else {
+            panic!("before_request fired with {:?}", fired[0].1.point());
+        };
+        assert!(request.messages.iter().any(|m| m.text() == "hello probes"));
         // after_response sees the assembled assistant message.
-        assert!(
-            fired[1].1["message"]["content"][0]["text"]
-                .as_str()
-                .unwrap()
-                .contains("hello probes")
-        );
+        let ProbePayload::AfterResponse(response) = &fired[1].1 else {
+            panic!("after_response fired with {:?}", fired[1].1.point());
+        };
+        assert!(response.message.text().contains("hello probes"));
         // before_run_end sees everything the run produced.
-        assert!(fired[2].1["messages"].as_array().unwrap().len() >= 2);
+        let ProbePayload::BeforeRunEnd(end) = &fired[2].1 else {
+            panic!("before_run_end fired with {:?}", fired[2].1.point());
+        };
+        assert!(end.messages.len() >= 2);
     }
 
     struct RewriteRequest;
@@ -1037,11 +1039,13 @@ mod probe_point_tests {
             &[ProbePoint::BeforeRequest]
         }
 
-        async fn probe(&self, _point: ProbePoint, mut payload: serde_json::Value) -> Verdict {
+        async fn probe(&self, _point: ProbePoint, payload: ProbePayload) -> Verdict {
+            let ProbePayload::BeforeRequest(mut request) = payload else {
+                return Verdict::Continue;
+            };
             // Rewrite the user text before it reaches the model.
-            payload["messages"][0]["content"][0]["text"] =
-                serde_json::Value::String("rewritten by probe".into());
-            Verdict::Replace(payload)
+            request.messages[0] = Message::user("rewritten by probe");
+            Verdict::Replace(ProbePayload::BeforeRequest(request))
         }
     }
 
@@ -1305,6 +1309,7 @@ mod blob_edge_tests {
 mod compaction_tests {
     use crate::model::{Model, ModelEvent, Request, StopReason};
     use crate::probe::{ProbeHandler, ProbePoint, Verdict};
+    use crate::probe_payload::{Compaction, ProbePayload};
     use crate::{Agent, Message, ToolRegistry};
     use async_trait::async_trait;
 
@@ -1374,7 +1379,7 @@ mod compaction_tests {
             fn points(&self) -> &[ProbePoint] {
                 &[ProbePoint::BeforeCompaction]
             }
-            async fn probe(&self, _point: ProbePoint, _payload: serde_json::Value) -> Verdict {
+            async fn probe(&self, _point: ProbePoint, _payload: ProbePayload) -> Verdict {
                 Verdict::Block {
                     reason: "not now".into(),
                 }
@@ -1396,9 +1401,11 @@ mod compaction_tests {
             fn points(&self) -> &[ProbePoint] {
                 &[ProbePoint::BeforeCompaction]
             }
-            async fn probe(&self, _point: ProbePoint, _payload: serde_json::Value) -> Verdict {
-                Verdict::Replace(serde_json::json!({
-                    "messages": [Message::user("only this")]
+            async fn probe(&self, _point: ProbePoint, payload: ProbePayload) -> Verdict {
+                assert!(matches!(payload, ProbePayload::BeforeCompaction(_)));
+                Verdict::Replace(ProbePayload::BeforeCompaction(Compaction {
+                    reason: "probe".into(),
+                    messages: vec![Message::user("only this")],
                 }))
             }
         }
@@ -1420,6 +1427,7 @@ mod compaction_tests {
 #[cfg(test)]
 mod navigation_tests {
     use crate::probe::{ProbeHandler, ProbePoint, Verdict};
+    use crate::probe_payload::ProbePayload;
     use crate::session::{EntryKind, JsonlStore, SessionEntry};
     use crate::{Agent, Message, ToolRegistry};
     use async_trait::async_trait;
@@ -1480,7 +1488,7 @@ mod navigation_tests {
             fn points(&self) -> &[ProbePoint] {
                 &[ProbePoint::BeforeNavigation]
             }
-            async fn probe(&self, _point: ProbePoint, _payload: serde_json::Value) -> Verdict {
+            async fn probe(&self, _point: ProbePoint, _payload: ProbePayload) -> Verdict {
                 Verdict::Block {
                     reason: "critical phase".into(),
                 }
@@ -1504,10 +1512,14 @@ mod navigation_tests {
             fn points(&self) -> &[ProbePoint] {
                 &[ProbePoint::BeforeNavigation]
             }
-            async fn probe(&self, _point: ProbePoint, payload: serde_json::Value) -> Verdict {
+            async fn probe(&self, _point: ProbePoint, payload: ProbePayload) -> Verdict {
+                let ProbePayload::BeforeNavigation(mut asked) = payload else {
+                    return Verdict::Continue;
+                };
                 // Asked to go to bbb; redirect to aaa instead.
-                assert_eq!(payload["target"], "bbb");
-                Verdict::Replace(serde_json::json!({ "target": "aaa" }))
+                assert_eq!(asked.target, "bbb");
+                asked.target = "aaa".into();
+                Verdict::Replace(ProbePayload::BeforeNavigation(asked))
             }
         }
         let mut probes = crate::ProbeRegistry::new();
@@ -1542,6 +1554,7 @@ mod observe_tests {
 
     use crate::agent::AgentEvent;
     use crate::probe::{ProbeHandler, Verdict};
+    use crate::probe_payload::ProbePayload;
     use crate::{Agent, ProbePoint, ProbeRegistry, ToolRegistry};
 
     fn agent() -> Agent {
@@ -1557,14 +1570,14 @@ mod observe_tests {
     #[tokio::test]
     async fn observe_fires_handlers_and_ignores_verdicts() {
         struct Recorder {
-            seen: Arc<Mutex<Vec<(ProbePoint, serde_json::Value)>>>,
+            seen: Arc<Mutex<Vec<(ProbePoint, ProbePayload)>>>,
         }
         #[async_trait]
         impl ProbeHandler for Recorder {
             fn points(&self) -> &[ProbePoint] {
                 &[ProbePoint::SessionStart]
             }
-            async fn probe(&self, point: ProbePoint, payload: serde_json::Value) -> Verdict {
+            async fn probe(&self, point: ProbePoint, payload: ProbePayload) -> Verdict {
                 self.seen.lock().unwrap().push((point, payload));
                 // Misuse: observe-only points must not honor this.
                 Verdict::Block {
@@ -1580,16 +1593,20 @@ mod observe_tests {
         agent
             .observe(
                 ProbePoint::SessionStart,
-                serde_json::json!({ "session": "s.jsonl" }),
+                ProbePayload::SessionStart(crate::probe_payload::SessionFacts {
+                    session: "s.jsonl".into(),
+                    cwd: "/tmp".into(),
+                    model: "demo".into(),
+                }),
             )
             .await;
-        assert_eq!(
-            seen.lock().unwrap().as_slice(),
-            &[(
-                ProbePoint::SessionStart,
-                serde_json::json!({ "session": "s.jsonl" })
-            )]
-        );
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].0, ProbePoint::SessionStart);
+        let ProbePayload::SessionStart(facts) = &seen[0].1 else {
+            panic!("session_start fired with {:?}", seen[0].1.point());
+        };
+        assert_eq!(facts.session, "s.jsonl");
         let mut saw_ignored = false;
         while let Ok(event) = events.try_recv() {
             if let AgentEvent::Probe { point, action } = event {
@@ -1604,7 +1621,14 @@ mod observe_tests {
     #[tokio::test]
     async fn observe_without_probes_is_a_noop() {
         agent()
-            .observe(ProbePoint::SessionEnd, serde_json::json!({}))
+            .observe(
+                ProbePoint::SessionEnd,
+                ProbePayload::SessionEnd(crate::probe_payload::SessionFacts {
+                    session: "s.jsonl".into(),
+                    cwd: "/tmp".into(),
+                    model: "demo".into(),
+                }),
+            )
             .await;
     }
 }

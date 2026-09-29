@@ -13,6 +13,7 @@ use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use tau_core::probe::ProbePoint;
+use tau_core::probe_payload::{Branch, ProbePayload, SessionFacts};
 use tau_core::types::{Content, Media, MediaSource};
 use tau_core::{Agent, AgentEvent, Control, JsonlStore, Message};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
@@ -49,7 +50,7 @@ pub(crate) async fn interactive(
     store: JsonlStore,
     history: Vec<Message>,
     base: Option<String>,
-    session_payload: serde_json::Value,
+    session_facts: SessionFacts,
     inject: UnboundedReceiver<Control>,
     mic_consent: bool,
 ) -> Result<()> {
@@ -129,7 +130,7 @@ pub(crate) async fn interactive(
         base,
         line_rx,
         print.as_ref(),
-        Some(session_payload.clone()),
+        Some(session_facts.clone()),
         inject,
         mic_consent,
     )
@@ -138,7 +139,7 @@ pub(crate) async fn interactive(
         // Best-effort clean-exit observation (observe-only; verdicts
         // ignored). Error exits skip it — a crash is not a session end.
         agent
-            .observe(ProbePoint::SessionEnd, session_payload)
+            .observe(ProbePoint::SessionEnd, ProbePayload::SessionEnd(session_facts))
             .await;
     }
     result
@@ -158,7 +159,7 @@ pub(crate) async fn drive(
     base: Option<String>,
     mut lines: UnboundedReceiver<LineEvent>,
     print: impl Fn(&str) + Send + Sync,
-    session_start: Option<serde_json::Value>,
+    session_start: Option<SessionFacts>,
     mut inject: UnboundedReceiver<Control>,
     // May the host capture the real microphone for THIS model?
     // (Consent category per fingerprint for wasm providers; host
@@ -294,8 +295,10 @@ pub(crate) async fn drive(
 
     // The renderer is attached; session_start observes now so its
     // notices render (observe leg, probes.md — verdicts ignored).
-    if let Some(payload) = session_start {
-        agent.observe(ProbePoint::SessionStart, payload).await;
+    if let Some(facts) = session_start {
+        agent
+            .observe(ProbePoint::SessionStart, ProbePayload::SessionStart(facts))
+            .await;
     }
 
     // Run completion is signalled over a channel so the select stays
@@ -465,7 +468,10 @@ pub(crate) async fn drive(
                                     agent
                                         .observe(
                                             ProbePoint::Branch,
-                                            serde_json::json!({ "from": from, "to": id.clone() }),
+                                            ProbePayload::Branch(Branch {
+                                                previous: from,
+                                                to: id.clone(),
+                                            }),
                                         )
                                         .await;
                                     print(&format!(
@@ -907,15 +913,22 @@ mod tests {
     #[tokio::test]
     async fn drive_fires_session_start_before_the_first_turn() {
         struct Recorder {
-            seen: Arc<Mutex<Vec<serde_json::Value>>>,
+            seen: Arc<Mutex<Vec<tau_core::probe_payload::SessionFacts>>>,
         }
         #[async_trait::async_trait]
         impl tau_core::probe::ProbeHandler for Recorder {
             fn points(&self) -> &[ProbePoint] {
                 &[ProbePoint::SessionStart]
             }
-            async fn probe(&self, _point: ProbePoint, payload: serde_json::Value) -> tau_core::probe::Verdict {
-                self.seen.lock().unwrap().push(payload);
+            async fn probe(
+                &self,
+                _point: ProbePoint,
+                payload: tau_core::probe_payload::ProbePayload,
+            ) -> tau_core::probe::Verdict {
+                let tau_core::probe_payload::ProbePayload::SessionStart(facts) = payload else {
+                    panic!("session_start fired with another point's payload");
+                };
+                self.seen.lock().unwrap().push(facts);
                 tau_core::probe::Verdict::Continue
             }
         }
@@ -938,16 +951,20 @@ mod tests {
             None,
             rx,
             capture.printer(),
-            Some(serde_json::json!({ "session": "s.jsonl", "model": "demo" })),
+            Some(SessionFacts {
+                session: "s.jsonl".into(),
+                cwd: "/tmp".into(),
+                model: "demo".into(),
+            }),
             unbounded_channel().1,
             true,
         ));
         tx.send(LineEvent::Line("/quit".into())).unwrap();
         task.await.unwrap().unwrap();
-        assert_eq!(
-            seen.lock().unwrap().as_slice(),
-            &[serde_json::json!({ "session": "s.jsonl", "model": "demo" })]
-        );
+        let seen = seen.lock().unwrap();
+        assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].session, "s.jsonl");
+        assert_eq!(seen[0].model, "demo");
     }
 
     #[tokio::test]

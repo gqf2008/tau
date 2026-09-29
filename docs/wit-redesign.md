@@ -117,10 +117,13 @@ error: type `json` depends on itself       ← variant json { array(list<json>),
 3. 事件总线上跑 `AgentEvent`（运行叙事），契约里是 `ModelEvent`（模型输出）——两者本就
    不是同一个东西，映射在 `tau-ext`。
 
-**因此 Rust 侧要长出的东西**（并入 §6 迁移期 1）：`types.error` 对应 `tau_core` 的错误
-枚举（宿主内部现在是 `String`）；探针的 `payload` / `verdict.replace` 现在是
-`ProbeHandler::probe(point, payload: Json)` ⇒ 要按 `docs/probes.md` 已有形状长成每点一个
-类型，否则这条界面违反投影规则（**文档已先写形状，Rust 落后于文档**）。
+**因此 Rust 侧长出的两类**（迁移期 1 前半，2026-09-29 已落地）：`types.error` 对应
+`tau_core::error::HostError`（`Refused` / `Failed` / `Invalid`，核 3 臂替换宿主内部的
+`String`）；探针的 `payload` / `verdict.replace` 对应 `tau_core::probe_payload::ProbePayload`
+（每点一臂，记录逐字段对齐契约里的同名 record）——0.6.0 的 `ProbeHandler::probe(point,
+payload: Json)` 与 `payload["messages"]` 式取字段随之消失。**组件侧 ABI 未动**：访客仍收发
+`payload-json` / `replace-json`，两个 `to_json` / `merge_json` 就是那条边（形状与 0.6.0 逐字
+节一致，由 `the_json_edge_round_trips_every_point` 钉住）。
 
 ## 4. 逐界面 before → after
 
@@ -156,6 +159,7 @@ error: type `json` depends on itself       ← variant json { array(list<json>),
 | 宿主侧绑定：wasmtime 49.0.1 四个 world 全部 `bindgen!`（`provider`/`realtime`/`bridge`/`extension`） | ✅ 编译并运行 | `target/wit-probe/host-bind/`；async 按界面开：`imports: { default: async }` + `exports: { default: async }`（wasmtime 的 bindgen **没有** `async: true` 这个键，接受的是 `debug/path/inline/world/ownership/trappable_error_type/interfaces/with/named_imports/additional_derives/stringify/skip_mut_forwarding_impls/require_store_data_send/wasmtime_crate/anyhow/include_generated_code_from_file/include_component_type/imports/exports`；async 是每个函数/每个界面的标记）。探针同时点名了宿主必须用到的生成类型并编译通过——`exports::…::session::Session`（访客导出的资源句柄）、`…::process::Child` / `…::http::Response` / `…::ws::Connection` / `…::ingress::Registration`（宿主实现的导入资源）、`host::Subscription` |
 | 访客 async 导出 + 宿主读返回流（端到端运行） | ✅ 既有 spike | `target/wasip3-spike/`（4×4096 字节逐字节校验） |
 | 编译产物里真的是异步提升 | ✅ | 对 `probe_realtime.wasm` 反汇编：`(canon lift (core func "[async-lift]tau:extension/models@0.7.0#run") … async (callback …))`、`[static]session.create` 同；`[method]session.downlink` 是普通 lift。`wasm-tools component wit` 读回的组件类型与草案逐字一致 |
+| 迁移期 1 前半：`HostError` + `ProbePayload`（0.6.0 ABI 不动） | ✅ 宿主侧全量迁移，`cargo test --workspace` 绿（`probe_payload` 6 条：每点 JSON 往返、空替换不改动、坏字段为 `invalid`、`before_tool` 整体替换、`after_tool` 的旧字符串升级；tau-ext `replace_tests` 3 条：合法替换、非 JSON/坏字段/无载荷一律降级 `continue`、未知字段忽略） | `crates/tau-core/src/{error.rs,probe_payload.rs}`、`crates/tau-ext/src/{lib.rs,bridge.rs}`、`crates/tau-cli/src/acp/permission.rs` |
 | **宿主向访客流写入**（`session.uplink`、`child.stdin` 方向） | ⬜ 待 spike | 迁移 spike 第一腿；失败则退回 `push-audio(data) -> result`（0.6.0 形状，已在契约注释里写明为回退） |
 | 宿主持有访客资源句柄的运行时行为 | ⬜ 待 spike | 同上；`bindgen!` 编译通过只证明绑定，不证明运行时 |
 | `Store::run_concurrent` 下多会话并发的宿主模型 | ⬜ 待 spike | tau-ext 迁移的核心未知 |
@@ -195,7 +199,7 @@ Promise/AsyncIterable）。**这也没证明什么**：`wit-bindgen-cpp` 缺的�
 | 期 | 内容 | 门禁 |
 |---|---|---|
 | 0（本轮） | 本文 + `wit/next/tau.wit` 草案；`wit/tau.wit` 不动，无组件重建 | 本文的 §5 证据；`cargo test --workspace` 与 `validate.sh` 不受影响（新文件不被任何构建引用，已核：`wit_bindgen::generate!`/`bindgen!` 全部走显式文件路径） |
-| 1 | tau-core 长出投影缺的两类：错误枚举（`types.error`，替换宿主内部的 `String`）与探针类型（每点的 `payload` 与 `verdict` 的 `replace`，替换 `ProbeHandler` 的 `Json`）。tau-ext 宿主改造：async 开关（wasmtime 49 里默认已开，这两个调用只是钉住），bindgen 侧 `imports/exports: { default: async }`（§5 已验证语法）、`spawn_blocking + Mutex<SharedInstance>` → `call_concurrent` / `Store::run_concurrent`、资源句柄表；**先跑 spike 补齐 §5 的三条待验证腿** | spike 端到端；`cargo test -p tau-ext` |
+| 1 | **前半已落地**（2026-09-29）：tau-core 的两类——错误枚举 `HostError`（`types.error`）与探针类型 `ProbePayload`（每点一臂，含 `SessionFacts` / `Branch`），宿主侧 12 个探针调用点、`faux.rs` 测试处理器、两个 wasm 适配器（`WasmProbes` / `BridgeProbes`，失败降级为 `continue` 并在 stderr 说明）、CLI 的权限门与三处 `observe` 全部改用类型；`cargo test --workspace` 全绿，clippy `-D warnings` 干净。**后半待做**：tau-ext 宿主改造：async 开关（wasmtime 49 里默认已开，这两个调用只是钉住），bindgen 侧 `imports/exports: { default: async }`（§5 已验证语法）、`spawn_blocking + Mutex<SharedInstance>` → `call_concurrent` / `Store::run_concurrent`、资源句柄表；**先跑 spike 补齐 §5 的三条待验证腿** | spike 端到端；`cargo test -p tau-ext` |
 | 2 | 契约切换：`wit/tau.wit` → 0.7.0 + vendored 副本 + `CONTRACT_VERSION`；examples 重建（`validate.sh` 的 15 个 Rust 组件 + 6 个非 Rust 语言的例子，后者按 `docs/wasm-languages.md` 的每语言断点重验）| `validate.sh` 的 wasm 腿全绿（11b/11c/11d、5b–5f、1f 等） |
 | 3 | 文档随切换更新：`docs/extensions.md`（契约章）、`docs/realtime-av.md`（两会话方向）、`docs/host-channel.md`（订阅）、`docs/probes.md`（类型化点/载荷）、`docs/builtins*` 无关 | 文档与契约一致 |
 | 4 | 新增一条门禁腿：0.7.0 契约的 provider 流式（组件产流、宿主拉、`done` 后 future 为 ok）+ 一条「宿主丢流 ⇒ 组件拿到未写余量」的取消腿 | 该腿在无宿主 async 实现时会红——这正是它存在的意义 |

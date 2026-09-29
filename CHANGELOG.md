@@ -73,8 +73,28 @@
   the contract carries the arm itself; the point of the type is that a
   guest branches on the arm instead of matching English prose, and that
   the same detail string under two different arms stays two different
-  values (docs/wit-redesign.md 投影规则). Migration stage 1, first
-  half — the typed probe payloads are the second.
+  values (docs/wit-redesign.md 投影规则).
+- **Typed probe payloads** (tau-core): `ProbeHandler::probe` takes a
+  `ProbePayload` — one arm per point, with records named after the 0.7.0
+  contract's (`BeforeRun`, `AssembledContext`, `FinalRequest`,
+  `AssembledResponse`, `ToolOutcome`, `RunEnd`, `Compaction`,
+  `Navigation`, `SessionFacts`, `Branch`) — instead of a
+  `serde_json::Value` that every handler indexed by string
+  (`payload["messages"]`). The point is fixed when a handler is called, so
+  `ProbePayload::point()` is the only way to ask which one it is, and a
+  renamed field is now a compile error rather than a runtime no-op.
+  `Agent::observe` takes the same type (`session_start` / `branch` /
+  `session_end` carry `SessionFacts` / `Branch`). The component ABI is
+  unchanged — guests still get `payload-json` and answer `replace-json` —
+  and `ProbePayload::to_json` / `merge_json` are the compatibility edge
+  that reproduces 0.6.0's shapes and replacement semantics field by field.
+  One behaviour change: a replacement that does not fit the point it
+  answers (a missing `prompt`, a `messages` that is not a list) used to
+  fail the run; it now degrades to `continue` with a line on stderr, like a
+  trapping component, because a broken extension must not wedge the
+  harness. `Verdict` is no longer `PartialEq` (its payload is not a
+  value); match it. Migration stage 1's two tau-core types — the error
+  enum above and these payloads — are both in.
 
 ### Changed
 

@@ -8,6 +8,8 @@
 use std::path::PathBuf;
 
 use tau_core::probe::{ProbePoint, Verdict};
+use tau_core::probe_payload::ProbePayload;
+use tau_core::types::ToolCall;
 use tau_ext::ExtensionHost;
 
 fn artifact() -> Option<PathBuf> {
@@ -16,11 +18,12 @@ fn artifact() -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
-fn tool_payload(id: &str, text: &str) -> serde_json::Value {
-    serde_json::json!({
-        "id": id,
-        "name": "upper",
-        "args": { "text": text },
+/// A `before_tool` firing for the guard example's probe.
+fn tool_payload(id: &str, text: &str) -> ProbePayload {
+    ProbePayload::BeforeTool(ToolCall {
+        id: id.into(),
+        name: "upper".into(),
+        arguments: serde_json::json!({ "text": text }),
     })
 }
 

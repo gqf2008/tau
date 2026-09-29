@@ -8,6 +8,7 @@
 use std::path::PathBuf;
 
 use tau_core::probe::{ProbePoint, Verdict};
+use tau_core::probe_payload::{ProbePayload, SessionFacts};
 use tau_ext::bridge::BridgeConsent;
 use tau_ext::ExtensionHost;
 
@@ -37,7 +38,11 @@ async fn whatsapp_ingress_end_to_end() {
     let verdict = probes[0]
         .probe(
             ProbePoint::SessionStart,
-            serde_json::json!({"session": "t", "model": "t"}),
+            ProbePayload::SessionStart(SessionFacts {
+                session: "t".into(),
+                cwd: ".".into(),
+                model: "t".into(),
+            }),
         )
         .await;
     assert!(

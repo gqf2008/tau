@@ -11,6 +11,18 @@ Naming: the WIT interface was `hooks` in `tau:extension@0.1.0`;
 0.2.0 renamed it `probes`, matching the code, this doc, and the
 `tau probes` CLI.
 
+The JSON below is the wire: what a component receives as `payload-json` and
+answers as `replace-json`, and what `tau probes --json` prints. Host-side
+handlers (`ProbeHandler`) do not index that JSON by name — they get a
+`tau_core::probe_payload::ProbePayload`, one arm per point
+(`ProbePayload::BeforeTool(ToolCall { .. })`, …), so a renamed field is a
+compile error instead of a silent no-op; `ProbePayload::point()` says which
+point a payload belongs to. `to_json` / `merge_json` are the edge that keeps
+the two in step: the shapes are exactly the ones in this doc, and a
+`replace` that does not fit its point degrades to `continue` (with a line on
+stderr) rather than failing the run. The 0.7.0 contract types the same
+payloads (docs/wit-redesign.md §3).
+
 Model (derived from pi's `HookMap`, packages/agent/src/harness/agent-harness.ts):
 
 - `continue` — no opinion, run proceeds unchanged.

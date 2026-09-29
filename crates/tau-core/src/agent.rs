@@ -12,8 +12,12 @@ use crate::bus::EventBus;
 use crate::control::{Control, ControlRx, ControlTx};
 use crate::model::{Model, ModelEvent, Request, StopReason};
 use crate::probe::{ProbePoint, ProbeRegistry, Verdict};
+use crate::probe_payload::{
+    AssembledContext, AssembledResponse, BeforeRun, Compaction, FinalRequest, Navigation,
+    ProbePayload, RunEnd, ToolOutcome,
+};
 use crate::tool::ToolRegistry;
-use crate::types::{Content, Message, Role};
+use crate::types::{Content, Message, ResultBlock, Role, ToolCall};
 
 /// Lifecycle events published on the agent's bus ([`Agent::events`]):
 /// the full observable trail of a run for UIs and loggers.
@@ -211,7 +215,7 @@ impl Agent {
     }
 
     /// Fire a probe, publish its outcome, return the verdict.
-    async fn probe(&self, point: ProbePoint, payload: serde_json::Value) -> Verdict {
+    async fn probe(&self, point: ProbePoint, payload: ProbePayload) -> Verdict {
         if self.probes.is_empty() {
             return Verdict::Continue;
         }
@@ -235,7 +239,7 @@ impl Agent {
     /// for the point sees the payload; verdicts are ignored by contract.
     /// A non-continue verdict is reported on the bus as a `Probe` event
     /// with action `ignored` — visible, never honored.
-    pub async fn observe(&self, point: ProbePoint, payload: serde_json::Value) {
+    pub async fn observe(&self, point: ProbePoint, payload: ProbePayload) {
         debug_assert!(
             point.observe_only(),
             "observe() with an influence point: {point:?}"
@@ -244,7 +248,7 @@ impl Agent {
             return;
         }
         let verdict = self.probes.probe(point, payload).await;
-        if verdict != Verdict::Continue {
+        if !matches!(verdict, Verdict::Continue) {
             self.emit(AgentEvent::Probe {
                 point: point.name(),
                 action: "ignored",
@@ -301,12 +305,17 @@ impl Agent {
         let messages = match self
             .probe(
                 ProbePoint::BeforeCompaction,
-                serde_json::json!({ "reason": "manual", "messages": history }),
+                ProbePayload::BeforeCompaction(Compaction {
+                    reason: "manual".into(),
+                    messages: history.to_vec(),
+                }),
             )
             .await
         {
-            Verdict::Replace(payload) => serde_json::from_value(payload["messages"].clone())
-                .map_err(|e| AgentError::Model(format!("bad before_compaction payload: {e}")))?,
+            Verdict::Replace(ProbePayload::BeforeCompaction(replaced)) => replaced.messages,
+            // A replacement aimed at another point: the fold drops it, so
+            // keep the history we already have.
+            Verdict::Replace(_) => history.to_vec(),
             Verdict::Block { reason } => return Err(AgentError::Model(reason)),
             Verdict::Continue => history.to_vec(),
         };
@@ -367,16 +376,17 @@ impl Agent {
         match self
             .probe(
                 ProbePoint::BeforeNavigation,
-                serde_json::json!({ "target": target, "summary": summary }),
+                ProbePayload::BeforeNavigation(Navigation {
+                    target: target.clone(),
+                    summary,
+                }),
             )
             .await
         {
-            Verdict::Replace(payload) => {
-                let redirected = payload["target"].as_str().ok_or_else(|| {
-                    AgentError::Model("bad before_navigation payload: no target".into())
-                })?;
-                target = store.resolve_id(redirected)?;
+            Verdict::Replace(ProbePayload::BeforeNavigation(replaced)) => {
+                target = store.resolve_id(&replaced.target)?;
             }
+            Verdict::Replace(_) => {}
             Verdict::Block { reason } => return Err(AgentError::NavigationBlocked(reason)),
             Verdict::Continue => {}
         }
@@ -393,12 +403,14 @@ impl Agent {
         let prompt = match self
             .probe(
                 ProbePoint::BeforeRun,
-                serde_json::json!({ "prompt": prompt }),
+                ProbePayload::BeforeRun(BeforeRun {
+                    prompt: prompt.clone(),
+                }),
             )
             .await
         {
-            Verdict::Replace(payload) => serde_json::from_value(payload["prompt"].clone())
-                .map_err(|e| AgentError::Model(format!("bad before_run payload: {e}")))?,
+            Verdict::Replace(ProbePayload::BeforeRun(replaced)) => replaced.prompt,
+            Verdict::Replace(_) => prompt,
             Verdict::Block { reason } => return Err(AgentError::Model(reason)),
             Verdict::Continue => prompt,
         };
@@ -412,40 +424,31 @@ impl Agent {
                 messages: [history, &produced].concat(),
                 tools: self.tools.defs(),
             };
-            if let Verdict::Replace(payload) = self
+            if let Verdict::Replace(ProbePayload::TransformContext(replaced)) = self
                 .probe(
                     ProbePoint::TransformContext,
-                    serde_json::json!({
-                        "messages": request.messages,
-                        "system": request.system,
+                    ProbePayload::TransformContext(AssembledContext {
+                        system: request.system.clone(),
+                        messages: request.messages.clone(),
                     }),
                 )
                 .await
             {
-                if let Some(messages) = payload.get("messages") {
-                    request.messages = serde_json::from_value(messages.clone())
-                        .map_err(|e| AgentError::Model(format!("bad context payload: {e}")))?;
-                }
-                if let Some(system) = payload.get("system") {
-                    request.system = serde_json::from_value(system.clone())
-                        .map_err(|e| AgentError::Model(format!("bad context payload: {e}")))?;
-                }
+                request.messages = replaced.messages;
+                request.system = replaced.system;
             }
-            let request_json = serde_json::json!({
-                "system": request.system,
-                "messages": request.messages,
-                "tools": request.tools,
+            let final_request = ProbePayload::BeforeRequest(FinalRequest {
+                system: request.system.clone(),
+                messages: request.messages.clone(),
+                tools: request.tools.clone(),
             });
-            let request = match self.probe(ProbePoint::BeforeRequest, request_json).await {
-                Verdict::Replace(payload) => Request {
-                    system: serde_json::from_value(payload["system"].clone()).map_err(|e| {
-                        AgentError::Model(format!("bad before_request payload: {e}"))
-                    })?,
-                    messages: serde_json::from_value(payload["messages"].clone()).map_err(|e| {
-                        AgentError::Model(format!("bad before_request payload: {e}"))
-                    })?,
+            let request = match self.probe(ProbePoint::BeforeRequest, final_request).await {
+                Verdict::Replace(ProbePayload::BeforeRequest(replaced)) => Request {
+                    system: replaced.system,
+                    messages: replaced.messages,
                     tools: request.tools, // tools are registry-owned; not replaceable here
                 },
+                Verdict::Replace(_) => request,
                 Verdict::Block { reason } => return Err(AgentError::Model(reason)),
                 Verdict::Continue => request,
             };
@@ -470,18 +473,17 @@ impl Agent {
             let (assistant, stop) = match self
                 .probe(
                     ProbePoint::AfterResponse,
-                    serde_json::json!({ "message": assistant, "stop": stop }),
+                    ProbePayload::AfterResponse(AssembledResponse {
+                        message: assistant.clone(),
+                        stop,
+                    }),
                 )
                 .await
             {
-                Verdict::Replace(payload) => {
-                    let message =
-                        serde_json::from_value(payload["message"].clone()).map_err(|e| {
-                            AgentError::Model(format!("bad after_response payload: {e}"))
-                        })?;
-                    let stop = serde_json::from_value(payload["stop"].clone()).unwrap_or(stop);
-                    (message, stop)
+                Verdict::Replace(ProbePayload::AfterResponse(replaced)) => {
+                    (replaced.message, replaced.stop)
                 }
+                Verdict::Replace(_) => (assistant, stop),
                 Verdict::Block { reason } => return Err(AgentError::Model(reason)),
                 Verdict::Continue => (assistant, stop),
             };
@@ -520,15 +522,15 @@ impl Agent {
                 let produced = match self
                     .probe(
                         ProbePoint::BeforeRunEnd,
-                        serde_json::json!({ "messages": produced, "stop": stop }),
+                        ProbePayload::BeforeRunEnd(RunEnd {
+                            messages: produced.clone(),
+                            stop,
+                        }),
                     )
                     .await
                 {
-                    Verdict::Replace(payload) => {
-                        serde_json::from_value(payload["messages"].clone()).map_err(|e| {
-                            AgentError::Model(format!("bad before_run_end payload: {e}"))
-                        })?
-                    }
+                    Verdict::Replace(ProbePayload::BeforeRunEnd(replaced)) => replaced.messages,
+                    Verdict::Replace(_) => produced,
                     Verdict::Block { reason } => return Err(AgentError::Model(reason)),
                     Verdict::Continue => produced,
                 };
@@ -541,14 +543,17 @@ impl Agent {
                     id: id.clone(),
                     name: name.clone(),
                 });
+                let call = ToolCall {
+                    id: id.clone(),
+                    name: name.clone(),
+                    arguments: args.clone(),
+                };
                 let args = match self
-                    .probe(
-                        ProbePoint::BeforeTool,
-                        serde_json::json!({ "id": id, "name": name, "args": args }),
-                    )
+                    .probe(ProbePoint::BeforeTool, ProbePayload::BeforeTool(call))
                     .await
                 {
-                    Verdict::Replace(args) => args,
+                    Verdict::Replace(ProbePayload::BeforeTool(replaced)) => replaced.arguments,
+                    Verdict::Replace(_) => args,
                     Verdict::Block { reason } => {
                         self.emit(AgentEvent::ToolCallEnd {
                             id: id.clone(),
@@ -571,30 +576,35 @@ impl Agent {
                     Some(tool) => tool.execute(args.clone()).await,
                     None => crate::tool::ToolOutput::err(format!("unknown tool: {name}")),
                 };
-                let output = match self
-                    .probe(
-                        ProbePoint::AfterTool,
-                        serde_json::json!({
-                            "id": id,
-                            "name": name,
-                            "args": args,
-                            "content": output.text(),
-                            "isError": output.is_error,
-                        }),
-                    )
-                    .await
-                {
-                    Verdict::Replace(payload) => match payload["content"].as_str() {
-                        // replace{content} rewrites the result as a single
-                        // text block (the probe payload is text-shaped).
-                        Some(text) => crate::tool::ToolOutput {
-                            content: vec![Content::Text { text: text.to_string() }],
-                            is_error: payload["isError"].as_bool().unwrap_or(output.is_error),
-                        },
-                        None => crate::tool::ToolOutput {
-                            content: output.content,
-                            is_error: payload["isError"].as_bool().unwrap_or(output.is_error),
-                        },
+                let blocks = output
+                    .content
+                    .iter()
+                    .cloned()
+                    .map(ResultBlock::try_from)
+                    .collect::<Result<Vec<_>, _>>()
+                    .unwrap_or_else(|_| {
+                        // A result carrying a block the ABI has no arm for
+                        // (a nested tool call): fall back to the flattened
+                        // text, which is the shape 0.6.0 always sent.
+                        vec![ResultBlock::Text {
+                            text: output.text(),
+                        }]
+                    });
+                let outcome = ProbePayload::AfterTool(ToolOutcome {
+                    call: ToolCall {
+                        id: id.clone(),
+                        name: name.clone(),
+                        arguments: args.clone(),
+                    },
+                    content: blocks,
+                    is_error: output.is_error,
+                });
+                let output = match self.probe(ProbePoint::AfterTool, outcome).await {
+                    // A replacement rewrites what the model is told the tool
+                    // returned; the call itself is history and stays.
+                    Verdict::Replace(ProbePayload::AfterTool(replaced)) => crate::tool::ToolOutput {
+                        content: replaced.content.into_iter().map(Content::from).collect(),
+                        is_error: replaced.is_error,
                     },
                     _ => output,
                 };

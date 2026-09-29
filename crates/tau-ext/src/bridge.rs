@@ -18,6 +18,7 @@ use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
 use tau_core::probe::{ProbeHandler, ProbePoint, Verdict};
+use tau_core::probe_payload::ProbePayload;
 use tau_core::tool::{Tool, ToolDef, ToolOutput};
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
 use wasmtime::{Engine, Store};
@@ -968,9 +969,10 @@ impl ProbeHandler for BridgeProbes {
         &self.points
     }
 
-    async fn probe(&self, point: ProbePoint, payload: serde_json::Value) -> Verdict {
+    async fn probe(&self, point: ProbePoint, payload: ProbePayload) -> Verdict {
         let shared = self.shared.clone();
         let point_name = point.name().to_string();
+        let payload_json = payload.to_json().to_string();
         let result = tokio::task::spawn_blocking(move || {
             let mut guard = shared
                 .lock()
@@ -979,7 +981,7 @@ impl ProbeHandler for BridgeProbes {
             let result =
                 bindings
                     .tau_extension_probes()
-                    .call_probe(store, &point_name, &payload.to_string());
+                    .call_probe(store, &point_name, &payload_json);
             if result.is_err() {
                 // The trap poisoned the guest; rebuild so the next probe
                 // still decides instead of degrading forever.
@@ -992,11 +994,7 @@ impl ProbeHandler for BridgeProbes {
         match result {
             Ok(Ok(verdict)) => match verdict.action {
                 Action::Continue => Verdict::Continue,
-                Action::Replace => verdict
-                    .payload_json
-                    .and_then(|p| serde_json::from_str(&p).ok())
-                    .map(Verdict::Replace)
-                    .unwrap_or(Verdict::Continue),
+                Action::Replace => crate::replace_probe_payload(point, payload, verdict.payload_json),
                 Action::Block => Verdict::Block {
                     reason: verdict.reason.unwrap_or_else(|| "blocked".into()),
                 },

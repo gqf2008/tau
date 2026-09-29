@@ -34,6 +34,7 @@ use std::sync::{Arc, Mutex};
 use async_trait::async_trait;
 use futures::StreamExt;
 use tau_core::probe::{ProbeHandler, ProbePoint, Verdict};
+use tau_core::probe_payload::ProbePayload;
 use tau_core::tool::{Tool, ToolDef, ToolOutput};
 use thiserror::Error;
 use wasmtime::component::{Component, HasSelf, Linker, ResourceTable};
@@ -877,15 +878,45 @@ struct WasmProbes {
     shared: Shared,
 }
 
+/// Fold a component's `replace-json` back into the typed payload. Shared
+/// by both probe adapters (the `extension` world's and the bridge's): the
+/// two differ in their bindings, not in what a replacement means.
+///
+/// A replacement that does not fit the point it answers is a component
+/// bug: like a trap, it degrades to Continue — and says so on stderr —
+/// rather than wedging the run (0.6.0 treated the same input as a hard
+/// run error; a broken extension must not wedge the harness).
+pub(crate) fn replace_probe_payload(
+    point: ProbePoint,
+    payload: ProbePayload,
+    raw: Option<String>,
+) -> Verdict {
+    let Some(raw) = raw else {
+        return Verdict::Continue;
+    };
+    let Ok(replacement) = serde_json::from_str::<serde_json::Value>(&raw) else {
+        eprintln!("tau probe: {}: replacement is not JSON", point.name());
+        return Verdict::Continue;
+    };
+    match payload.merge_json(replacement) {
+        Ok(replaced) => Verdict::Replace(replaced),
+        Err(error) => {
+            eprintln!("tau probe: {error}");
+            Verdict::Continue
+        }
+    }
+}
+
 #[async_trait]
 impl ProbeHandler for WasmProbes {
     fn points(&self) -> &[ProbePoint] {
         &self.points
     }
 
-    async fn probe(&self, point: ProbePoint, payload: serde_json::Value) -> Verdict {
+    async fn probe(&self, point: ProbePoint, payload: ProbePayload) -> Verdict {
         let shared = self.shared.clone();
         let point_name = point.name().to_string();
+        let payload_json = payload.to_json().to_string();
         let result = tokio::task::spawn_blocking(move || {
             let mut guard = shared
                 .lock()
@@ -894,7 +925,7 @@ impl ProbeHandler for WasmProbes {
             let result =
                 bindings
                     .tau_extension_probes()
-                    .call_probe(store, &point_name, &payload.to_string());
+                    .call_probe(store, &point_name, &payload_json);
             if result.is_err() {
                 // The trap poisoned the guest; rebuild so the next probe
                 // still decides instead of degrading forever.
@@ -906,11 +937,9 @@ impl ProbeHandler for WasmProbes {
         match result {
             Ok(Ok(verdict)) => match verdict.action {
                 bindings::exports::tau::extension::probes::Action::Continue => Verdict::Continue,
-                bindings::exports::tau::extension::probes::Action::Replace => verdict
-                    .payload_json
-                    .and_then(|p| serde_json::from_str(&p).ok())
-                    .map(Verdict::Replace)
-                    .unwrap_or(Verdict::Continue),
+                bindings::exports::tau::extension::probes::Action::Replace => {
+                    replace_probe_payload(point, payload, verdict.payload_json)
+                }
                 bindings::exports::tau::extension::probes::Action::Block => Verdict::Block {
                     reason: verdict.reason.unwrap_or_else(|| "blocked".into()),
                 },
@@ -1617,5 +1646,71 @@ mod stream_subscription_tests {
         // Re-subscribing gets a fresh handle that sees only new events.
         let id2 = Host::subscribe(&mut state, vec!["text-delta".into()]).unwrap();
         assert!(Host::poll(&mut state, id2).unwrap().is_empty());
+    }
+}
+
+#[cfg(test)]
+mod replace_tests {
+    use super::*;
+    use tau_core::probe_payload::BeforeRun;
+
+    fn payload() -> ProbePayload {
+        ProbePayload::BeforeRun(BeforeRun {
+            prompt: tau_core::Message::user("original"),
+        })
+    }
+
+    #[test]
+    fn a_well_aimed_replacement_replaces() {
+        let verdict = replace_probe_payload(
+            ProbePoint::BeforeRun,
+            payload(),
+            Some(r#"{"prompt": {"role": "user", "content": [{"type": "text", "text": "rewritten"}]}}"#.into()),
+        );
+        match verdict {
+            Verdict::Replace(ProbePayload::BeforeRun(replaced)) => {
+                assert_eq!(replaced.prompt.text(), "rewritten");
+            }
+            other => panic!("expected a replacement, got {other:?}"),
+        }
+    }
+
+    /// The 0.6.0 host failed the run on these two; a component bug must
+    /// not wedge the harness, so they read as "no opinion".
+    #[test]
+    fn junk_and_misaimed_replacements_degrade_to_continue() {
+        assert!(matches!(
+            replace_probe_payload(ProbePoint::BeforeRun, payload(), Some("not json".into())),
+            Verdict::Continue
+        ));
+        assert!(matches!(
+            replace_probe_payload(
+                ProbePoint::BeforeRun,
+                payload(),
+                Some(r#"{"prompt": 5}"#.into())
+            ),
+            Verdict::Continue
+        ));
+        assert!(matches!(
+            replace_probe_payload(ProbePoint::BeforeRun, payload(), None),
+            Verdict::Continue
+        ));
+    }
+
+    /// A field the point does not know is not an error: 0.6.0 read the
+    /// fields it knew and left the rest alone, and so does `merge_json`.
+    #[test]
+    fn an_unknown_field_is_ignored() {
+        let verdict = replace_probe_payload(
+            ProbePoint::BeforeRun,
+            payload(),
+            Some(r#"{"nonsense": true}"#.into()),
+        );
+        match verdict {
+            Verdict::Replace(ProbePayload::BeforeRun(replaced)) => {
+                assert_eq!(replaced.prompt.text(), "original");
+            }
+            other => panic!("expected a replacement, got {other:?}"),
+        }
     }
 }

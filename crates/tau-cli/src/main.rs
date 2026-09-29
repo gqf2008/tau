@@ -8,6 +8,7 @@ use anyhow::{Context, Result};
 use clap::Parser;
 use tau_core::agent::AgentEvent;
 use tau_core::probe::ProbePoint;
+use tau_core::probe_payload::{Branch, ProbePayload, SessionFacts};
 use tau_core::session::{EntryKind, JsonlStore, SessionEntry, new_id};
 use tau_core::{Agent, Message};
 
@@ -551,11 +552,11 @@ async fn main() -> Result<()> {
     // Observe leg (probes.md): session lifecycle observations fire once
     // the agent exists so every loaded extension sees them. Verdicts are
     // ignored by contract (observe-only).
-    let session_payload = serde_json::json!({
-        "session": session_path.display().to_string(),
-        "cwd": cwd.display().to_string(),
-        "model": model_label,
-    });
+    let session_facts = SessionFacts {
+        session: session_path.display().to_string(),
+        cwd: cwd.display().to_string(),
+        model: model_label.to_string(),
+    };
     // Print mode: the renderer's receiver subscribes before the session
     // lifecycle fires — broadcast buffers for existing receivers, so the
     // renderer (spawned below) still sees session_start and every probe
@@ -564,7 +565,10 @@ async fn main() -> Result<()> {
     let print_events = (!interactive).then(|| agent.events());
     if !interactive {
         agent
-            .observe(ProbePoint::SessionStart, session_payload.clone())
+            .observe(
+                ProbePoint::SessionStart,
+                ProbePayload::SessionStart(session_facts.clone()),
+            )
             .await;
     }
 
@@ -591,7 +595,9 @@ async fn main() -> Result<()> {
             }
         }
         if cli.print.is_none() && !interactive {
-            agent.observe(ProbePoint::SessionEnd, session_payload).await;
+            agent
+                .observe(ProbePoint::SessionEnd, ProbePayload::SessionEnd(session_facts))
+                .await;
             return Ok(());
         }
     }
@@ -611,12 +617,15 @@ async fn main() -> Result<()> {
         history = branch;
         base = Some(id.clone());
         agent
-            .observe(ProbePoint::Branch, serde_json::json!({ "from": from, "to": id }))
+            .observe(
+                ProbePoint::Branch,
+                ProbePayload::Branch(Branch { previous: from, to: id }),
+            )
             .await;
     }
 
     if interactive {
-        return repl::interactive(agent, store, history, base, session_payload, inject_rx, mic_consent)
+        return repl::interactive(agent, store, history, base, session_facts, inject_rx, mic_consent)
             .await;
     }
     let prompt_text = cli.print.expect("print mode checked above");
@@ -755,7 +764,9 @@ async fn main() -> Result<()> {
         store.append(entry)?;
     }
     eprintln!("[tau] session: {}", session_path.display());
-    agent.observe(ProbePoint::SessionEnd, session_payload).await;
+    agent
+        .observe(ProbePoint::SessionEnd, ProbePayload::SessionEnd(session_facts))
+        .await;
     Ok(())
 }
 

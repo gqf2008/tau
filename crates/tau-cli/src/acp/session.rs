@@ -17,6 +17,7 @@ use agent_client_protocol::schema::v1::{NewSessionRequest, PromptResponse, Sessi
 use agent_client_protocol::{Client, ConnectionTo, Responder};
 use anyhow::{Context, Result};
 use tau_core::probe::ProbePoint;
+use tau_core::probe_payload::{ProbePayload, SessionFacts};
 use tau_core::session::{JsonlStore, new_id};
 use tau_core::{Agent, Control, Message, Model, ProbeRegistry, ToolRegistry};
 
@@ -52,8 +53,9 @@ pub struct Session {
     /// drained by the *next* run, which would then die before it began, on
     /// behalf of a client that asked to cancel a turn already over.
     pub in_flight: AtomicBool,
-    /// The session_start payload, key for key what print mode sends.
-    pub payload: serde_json::Value,
+    /// The facts `session_start` / `session_end` observe, field for field
+    /// what print mode sends.
+    pub facts: SessionFacts,
 }
 
 /// Every session this process is serving, and what they share.
@@ -177,13 +179,13 @@ impl Sessions {
         }
         self.wire_host_channel(&agent);
 
-        let payload = serde_json::json!({
-            "session": path.display().to_string(),
-            "cwd": self.cwd.display().to_string(),
-            "model": self.model_label,
-        });
+        let facts = SessionFacts {
+            session: path.display().to_string(),
+            cwd: self.cwd.display().to_string(),
+            model: self.model_label.to_string(),
+        };
         agent
-            .observe(ProbePoint::SessionStart, payload.clone())
+            .observe(ProbePoint::SessionStart, ProbePayload::SessionStart(facts.clone()))
             .await;
 
         let mut sessions = self
@@ -199,7 +201,7 @@ impl Sessions {
                 agent,
                 turns,
                 in_flight: AtomicBool::new(false),
-                payload,
+                facts,
             }),
         );
         drop(sessions);
@@ -305,8 +307,11 @@ impl Sessions {
             if session.in_flight.load(Ordering::SeqCst) {
                 let _ = session.agent.control().send(Control::Abort);
             }
-            let payload = session.payload.clone();
-            session.agent.observe(ProbePoint::SessionEnd, payload).await;
+            let facts = session.facts.clone();
+            session
+                .agent
+                .observe(ProbePoint::SessionEnd, ProbePayload::SessionEnd(facts))
+                .await;
         }
     }
 }

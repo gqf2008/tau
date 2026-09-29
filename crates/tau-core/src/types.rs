@@ -226,6 +226,92 @@ where
     })
 }
 
+/// A tool invocation as a named record: the ABI's `tool-call`
+/// (`interface types`), which [`Content::ToolCall`] carries inline today.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ToolCall {
+    /// Provider-assigned call id (echoed back by a tool result).
+    pub id: String,
+    /// Registered tool name.
+    pub name: String,
+    /// Arguments matching the tool's JSON schema.
+    pub arguments: Json,
+}
+
+/// The non-recursive half of [`Content`]: what a tool result may carry.
+///
+/// The ABI calls this `result-block`, and it has to be a separate type
+/// there: `content` reaching itself through a tool result is refused by
+/// the toolchain (`error: type `content` depends on itself`), so
+/// [`Content::ToolResult`]'s `Vec<Content>` is wider than any contract can
+/// be. Here the two coexist until the host converges on the narrower one.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "camelCase")]
+pub enum ResultBlock {
+    /// A plain text block.
+    Text {
+        /// The text.
+        text: String,
+    },
+    /// An image.
+    Image {
+        /// The image payload.
+        media: Media,
+    },
+    /// An audio clip.
+    Audio {
+        /// The audio payload.
+        media: Media,
+    },
+    /// A video clip.
+    Video {
+        /// The video payload.
+        media: Media,
+    },
+    /// An arbitrary file attachment.
+    File {
+        /// The file payload.
+        media: Media,
+        /// Original filename, when known.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        name: Option<String>,
+    },
+}
+
+impl From<ResultBlock> for Content {
+    fn from(block: ResultBlock) -> Self {
+        match block {
+            ResultBlock::Text { text } => Content::Text { text },
+            ResultBlock::Image { media } => Content::Image { media },
+            ResultBlock::Audio { media } => Content::Audio { media },
+            ResultBlock::Video { media } => Content::Video { media },
+            ResultBlock::File { media, name } => Content::File { media, name },
+        }
+    }
+}
+
+/// The narrowing is fallible, not lossy: a tool result never contains a
+/// tool call or a nested result, so those two arms are `Invalid` — a
+/// contract misuse the caller must hear about rather than a silent drop.
+impl TryFrom<Content> for ResultBlock {
+    type Error = crate::error::HostError;
+
+    fn try_from(content: Content) -> Result<Self, Self::Error> {
+        match content {
+            Content::Text { text } => Ok(ResultBlock::Text { text }),
+            Content::Image { media } => Ok(ResultBlock::Image { media }),
+            Content::Audio { media } => Ok(ResultBlock::Audio { media }),
+            Content::Video { media } => Ok(ResultBlock::Video { media }),
+            Content::File { media, name } => Ok(ResultBlock::File { media, name }),
+            Content::ToolCall { .. } | Content::ToolResult { .. } => Err(
+                crate::error::HostError::invalid(
+                    "a tool result block cannot be a tool call or a nested tool result",
+                ),
+            ),
+        }
+    }
+}
+
 /// One message in the conversation: a role plus ordered content blocks.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Message {

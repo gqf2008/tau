@@ -25,6 +25,7 @@ use agent_client_protocol::schema::v1::{
 use agent_client_protocol::{Client, ConnectionTo};
 use serde_json::Value as Json;
 use tau_core::probe::{ProbeHandler, ProbePoint, Verdict};
+use tau_core::probe_payload::ProbePayload;
 
 use super::map;
 
@@ -187,13 +188,14 @@ impl ProbeHandler for PermissionGate {
         &[ProbePoint::BeforeTool]
     }
 
-    async fn probe(&self, _point: ProbePoint, payload: Json) -> Verdict {
-        let Some(name) = payload["name"].as_str() else {
-            // Not a call this probe can reason about. Nothing else emits
-            // one, and a gate that blocked on a shape it did not expect
-            // would be a gate that stops work for no reason.
+    async fn probe(&self, _point: ProbePoint, payload: ProbePayload) -> Verdict {
+        let ProbePayload::BeforeTool(call) = payload else {
+            // Not a firing this gate can reason about. Nothing else routes
+            // one here, and a gate that blocked on a point it did not
+            // expect would be a gate that stops work for no reason.
             return Verdict::Continue;
         };
+        let name = call.name.as_str();
         if !gated(name) {
             return Verdict::Continue;
         }
@@ -201,9 +203,8 @@ impl ProbeHandler for PermissionGate {
             return verdict(name, decision, "for the rest of this session");
         }
 
-        let id = payload["id"].as_str().unwrap_or("call");
-        let args = payload["args"].clone();
-        match self.asker.ask(self.request(name, id, &args)).await {
+        let id = call.id.as_str();
+        match self.asker.ask(self.request(name, id, &call.arguments)).await {
             Ok(RequestPermissionOutcome::Selected(selected)) => {
                 match decide(selected.option_id.0.as_ref()) {
                     Some((decision, remember)) => {
@@ -256,6 +257,7 @@ mod tests {
     use agent_client_protocol::schema::v1::SelectedPermissionOutcome;
 
     use super::*;
+    use tau_core::types::ToolCall;
 
     /// An asker that answers from a script, and remembers what it was
     /// asked, so a test can read both the decisions and the question.
@@ -307,8 +309,12 @@ mod tests {
         ))
     }
 
-    fn call(name: &str) -> Json {
-        serde_json::json!({"id": "demo-call-1", "name": name, "args": {"command": "rm -rf everything"}})
+    fn call(name: &str) -> ProbePayload {
+        ProbePayload::BeforeTool(ToolCall {
+            id: "demo-call-1".into(),
+            name: name.into(),
+            arguments: serde_json::json!({"command": "rm -rf everything"}),
+        })
     }
 
     async fn fire(gate: &PermissionGate, name: &str) -> Verdict {
@@ -326,7 +332,7 @@ mod tests {
     async fn a_call_the_gate_does_not_cover_is_never_asked_about() {
         let (gate, asked) = gate_with(vec![]);
         for name in ["read", "ls", "grep", "find", "upper"] {
-            assert_eq!(fire(&gate, name).await, Verdict::Continue, "{name}");
+            assert!(matches!(fire(&gate, name).await, Verdict::Continue), "{name}");
         }
         assert!(questions(&asked).is_empty(), "the script answered nothing");
     }
@@ -334,7 +340,7 @@ mod tests {
     #[tokio::test]
     async fn the_question_names_the_call_the_client_already_saw() {
         let (gate, asked) = gate_with(vec![selected(ALLOW_ONCE)]);
-        assert_eq!(fire(&gate, "bash").await, Verdict::Continue);
+        assert!(matches!(fire(&gate, "bash").await, Verdict::Continue));
 
         let questions = questions(&asked);
         assert_eq!(questions.len(), 1);
@@ -365,13 +371,13 @@ mod tests {
     #[tokio::test]
     async fn once_is_asked_again_and_always_is_not() {
         let (gate, asked) = gate_with(vec![selected(ALLOW_ONCE), selected(ALLOW_ONCE)]);
-        assert_eq!(fire(&gate, "write").await, Verdict::Continue);
-        assert_eq!(fire(&gate, "write").await, Verdict::Continue);
+        assert!(matches!(fire(&gate, "write").await, Verdict::Continue));
+        assert!(matches!(fire(&gate, "write").await, Verdict::Continue));
         assert_eq!(questions(&asked).len(), 2, "once means once");
 
         let (gate, asked) = gate_with(vec![selected(ALLOW_ALWAYS)]);
-        assert_eq!(fire(&gate, "write").await, Verdict::Continue);
-        assert_eq!(fire(&gate, "write").await, Verdict::Continue);
+        assert!(matches!(fire(&gate, "write").await, Verdict::Continue));
+        assert!(matches!(fire(&gate, "write").await, Verdict::Continue));
         assert_eq!(questions(&asked).len(), 1, "always means the session");
     }
 
@@ -401,7 +407,7 @@ mod tests {
     #[tokio::test]
     async fn what_is_remembered_is_remembered_per_tool() {
         let (gate, asked) = gate_with(vec![selected(ALLOW_ALWAYS), selected(REJECT_ONCE)]);
-        assert_eq!(fire(&gate, "bash").await, Verdict::Continue);
+        assert!(matches!(fire(&gate, "bash").await, Verdict::Continue));
         // A different tool is a different question: allowing a command is
         // not allowing a file to be overwritten. It is asked — the second
         // scripted answer is what decides it — and refused on its own.
