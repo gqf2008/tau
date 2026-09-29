@@ -65,6 +65,12 @@ mod provider_bindings {
         // by the wit_vendored test below.
         path: "wit/tau.wit",
         world: "provider",
+        // Exports awaited (see the `extension` world above) and imports
+        // async too: a provider's `run` spends its life in `http.*`, and a
+        // host import that blocks would park the very worker thread the
+        // run is now awaited on.
+        imports: { default: async },
+        exports: { default: async },
     });
 }
 
@@ -999,7 +1005,10 @@ struct ProviderState {
     table: ResourceTable,
     event_tx: Option<tokio::sync::mpsc::UnboundedSender<tau_core::ModelEvent>>,
     /// Origin-allowlisted HTTP egress, granted by per-fingerprint consent.
-    http: http::HttpRegistry,
+    /// Behind a lock the host import may hand to `spawn_blocking`: the
+    /// registry is the blocking reqwest client, and its methods must not
+    /// run on a runtime worker (`Arc` so the body can move off-thread).
+    http: std::sync::Arc<std::sync::Mutex<http::HttpRegistry>>,
 }
 
 impl WasiView for ProviderState {
@@ -1017,7 +1026,7 @@ impl provider_events::Host for ProviderState {
     /// Typed in 0.2.0: malformed frames are impossible by construction
     /// (the 0.1.0 JSON envelope's silent-skip path is gone); the result
     /// reports the remaining semantic violations to the guest.
-    fn emit(&mut self, event: provider_events::ModelEvent) -> Result<(), String> {
+    async fn emit(&mut self, event: provider_events::ModelEvent) -> Result<(), String> {
         let event = match event {
             provider_events::ModelEvent::TextDelta(text) => tau_core::ModelEvent::TextDelta { text },
             provider_events::ModelEvent::ToolCallDelta(d) => {
@@ -1087,16 +1096,19 @@ struct ProviderFactory {
 }
 
 impl ProviderFactory {
-    fn instantiate(&self) -> Result<ProviderInstance, wasmtime::Error> {
+    async fn instantiate(&self) -> Result<ProviderInstance, wasmtime::Error> {
         let state = ProviderState {
             ctx: self.wasi.ctx_builder().build(),
             table: ResourceTable::new(),
             event_tx: None,
-            http: http::HttpRegistry::new(self.origins.clone()),
+            http: std::sync::Arc::new(std::sync::Mutex::new(http::HttpRegistry::new(
+                self.origins.clone(),
+            ))),
         };
         let mut store = Store::new(&self.engine, state);
         let bindings =
-            provider_bindings::Provider::instantiate(&mut store, &self.component, &self.linker)?;
+            provider_bindings::Provider::instantiate_async(&mut store, &self.component, &self.linker)
+                .await?;
         Ok(ProviderInstance { store, bindings })
     }
 }
@@ -1110,14 +1122,14 @@ impl SharedProviderInstance {
     /// Drop a poisoned instance and build a fresh one. Best-effort: if
     /// re-instantiation somehow fails, the poisoned instance stays and
     /// runs keep surfacing the trap.
-    fn revive(&mut self) {
-        if let Ok(fresh) = self.factory.instantiate() {
+    async fn revive(&mut self) {
+        if let Ok(fresh) = self.factory.instantiate().await {
             self.instance = fresh;
         }
     }
 }
 
-type SharedProvider = Arc<Mutex<SharedProviderInstance>>;
+type SharedProvider = Arc<tokio::sync::Mutex<SharedProviderInstance>>;
 
 /// A model served by a wasm provider component. Events arrive push-mode:
 /// the component calls the imported `events.emit` per chunk; `stream`
@@ -1148,10 +1160,10 @@ impl ExtensionHost {
     ) -> Result<WasmModel, ExtError> {
         let path = path.as_ref().to_path_buf();
         let model = model.into();
-        Self::off_runtime(move || self.load_provider_inner(&path, model, origins, auth))
+        block_on_component(self.load_provider_inner(&path, model, origins, auth))
     }
 
-    fn load_provider_inner(
+    async fn load_provider_inner(
         &self,
         path: &Path,
         model: String,
@@ -1165,7 +1177,7 @@ impl ExtensionHost {
                 reason: e.to_string(),
             })?;
         let mut linker: Linker<ProviderState> = Linker::new(&self.engine);
-        wasmtime_wasi::p2::add_to_linker_sync(&mut linker)?;
+        wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         provider_bindings::Provider::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
         let factory = ProviderFactory {
             engine: self.engine.clone(),
@@ -1174,7 +1186,7 @@ impl ExtensionHost {
             wasi: self.wasi,
             origins,
         };
-        let mut instance = factory.instantiate().map_err(|e| ExtError::Load {
+        let mut instance = factory.instantiate().await.map_err(|e| ExtError::Load {
             path: path.display().to_string(),
             reason: format!("provider instantiation failed: {e}"),
         })?;
@@ -1186,6 +1198,7 @@ impl ExtensionHost {
             .bindings
             .tau_extension_models()
             .call_list_models(&mut instance.store)
+            .await
             .map_err(|e| ExtError::Load {
                 path: path.display().to_string(),
                 reason: format!("list_models trapped: {}", compact_wasm_error(&e)),
@@ -1204,15 +1217,34 @@ impl ExtensionHost {
             });
         }
         Ok(WasmModel {
-            shared: Arc::new(Mutex::new(SharedProviderInstance { instance, factory })),
+            shared: Arc::new(tokio::sync::Mutex::new(SharedProviderInstance {
+                instance,
+                factory,
+            })),
             model,
             auth,
         })
     }
 }
 
+/// Lock a registry, surviving a poisoned mutex: a panic inside one
+/// blocking http call must not poison every later call in the session.
+fn lock_registry(
+    registry: &std::sync::Mutex<http::HttpRegistry>,
+) -> std::sync::MutexGuard<'_, http::HttpRegistry> {
+    registry
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
 impl provider_bindings::tau::extension::http::Host for ProviderState {
-    fn request(
+    /// The registry is the *blocking* reqwest client (its per-call
+    /// timeouts are enforced by reader threads, docs/extensions.md), so
+    /// the calls that touch the network are handed to the blocking pool
+    /// and awaited — awaiting in place would park a runtime worker for
+    /// as long as the peer takes, which is exactly the thread the
+    /// provider's `run` is being awaited on.
+    async fn request(
         &mut self,
         method: String,
         url: String,
@@ -1220,23 +1252,36 @@ impl provider_bindings::tau::extension::http::Host for ProviderState {
         body: Vec<u8>,
         timeout_ms: u32,
     ) -> Result<u64, String> {
-        self.http.request(&method, &url, &headers, &body, timeout_ms)
+        let registry = self.http.clone();
+        tokio::task::spawn_blocking(move || {
+            lock_registry(&registry).request(&method, &url, &headers, &body, timeout_ms)
+        })
+        .await
+        .map_err(|e| format!("http.request: blocking task failed: {e}"))?
     }
 
-    fn status(&mut self, handle: u64) -> Result<u16, String> {
-        self.http.status(handle)
+    async fn status(&mut self, handle: u64) -> Result<u16, String> {
+        lock_registry(&self.http).status(handle)
     }
 
-    fn header(&mut self, handle: u64, name: String) -> Result<Option<String>, String> {
-        self.http.header(handle, &name)
+    async fn header(&mut self, handle: u64, name: String) -> Result<Option<String>, String> {
+        lock_registry(&self.http).header(handle, &name)
     }
 
-    fn read_body(&mut self, handle: u64, max: u32, timeout_ms: u32) -> Result<(Vec<u8>, bool), String> {
-        self.http.read_body(handle, max, timeout_ms)
+    async fn read_body(
+        &mut self,
+        handle: u64,
+        max: u32,
+        timeout_ms: u32,
+    ) -> Result<(Vec<u8>, bool), String> {
+        let registry = self.http.clone();
+        tokio::task::spawn_blocking(move || lock_registry(&registry).read_body(handle, max, timeout_ms))
+            .await
+            .map_err(|e| format!("http.read-body: blocking task failed: {e}"))?
     }
 
-    fn close(&mut self, handle: u64) {
-        self.http.close(handle);
+    async fn close(&mut self, handle: u64) {
+        lock_registry(&self.http).close(handle);
     }
 }
 
@@ -1271,22 +1316,21 @@ impl tau_core::Model for WasmModel {
 
         let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ModelEvent>();
         let shared = self.shared.clone();
-        let call = tokio::task::spawn_blocking(move || {
-            let mut guard = shared
-                .lock()
-                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let call = tokio::spawn(async move {
+            let mut guard = shared.lock().await;
             let instance = &mut guard.instance;
             instance.store.data_mut().event_tx = Some(tx);
             let result = instance
                 .bindings
                 .tau_extension_models()
-                .call_run(&mut instance.store, &request_json);
+                .call_run(&mut instance.store, &request_json)
+                .await;
             instance.store.data_mut().event_tx = None;
             if result.is_err() {
                 // The trap poisoned the guest; rebuild so the next run
                 // reaches a fresh provider instead of trapping for the
                 // rest of the REPL session.
-                guard.revive();
+                guard.revive().await;
             }
             result
         });
