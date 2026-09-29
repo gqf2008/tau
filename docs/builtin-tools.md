@@ -2,7 +2,8 @@
 
 tau ships eight native tools — `read`, `write`, `edit`, `ls`, `grep`,
 `find`, `bash`, `powershell` — so the agent can work on a repository with
-nothing installed first. They are registered into the same
+nothing installed first. A ninth, `load_skill`, joins them in a working
+directory that has skills in it (below, and `docs/skills.md`). They are registered into the same
 `ToolRegistry` that `-e` components fill, and they are **host code**: they
 read, write, and spawn processes with the permissions of the tau process.
 
@@ -30,6 +31,17 @@ can see them.
 | `find` | glob search, paths relative to the search root, `src/**/*.spec.ts` matches as written | 1000 results, 50KB |
 | `bash` | runs a command through bash, stdout and stderr merged in arrival order | last 2000 lines / 50KB, full output to a temp file |
 | `powershell` | the same, through `pwsh.exe` or `powershell.exe` (Windows only) | same |
+
+### `load_skill`
+
+A ninth built-in appears when the working directory offers skills
+(`.agents/skills`, `.claude/skills`, `.goose/skills`, `docs/skills.md`):
+`load_skill` returns a skill's body, or one of the supporting files that
+ships with it, named relative to the skill directory. It is read-only, and
+the two flags treat it like any other built-in — `--tools load_skill`
+selects it, `--no-builtin-tools` removes it, `--demo` may script it only
+when named — and a directory with no skills registers nothing at all,
+which is why the startup line above reads eight tools in a bare directory.
 
 `read`, `write`, `edit`, `ls`, `grep`, `find` are the same tools pi has,
 with pi's schemas, descriptions, output shapes, error texts, and
@@ -146,8 +158,8 @@ permission prompt before they run (`docs/acp.md`).
 
 `--demo` scripts one tool call so a run has something to show. Which tool
 it may script is a policy, not a coin flip: the built-ins carry a demo
-tier, and only the read-only four (`read`, `ls`, `grep`, `find`) that the
-user named with `--tools` are scriptable. The mutating four (`write`,
+tier, and only the read-only five (`read`, `ls`, `grep`, `find`,
+`load_skill`) that the user named with `--tools` are scriptable. The mutating four (`write`,
 `edit`, `bash`, `powershell`) never are, even by name — `tau --tools bash
 --demo -p "rm -rf x"` registers bash and runs nothing.
 
@@ -183,6 +195,11 @@ Deliberate, and each one is in the tool's own module docs:
 (truncation notices, `offset` past the end, grep limits and context, the
 edit error wordings, CRLF/BOM round-trips, gitignore without a repo,
 timeouts that kill a grandchild) — and needs no API key.
+
+3c runs a directory with a skill in it: the manifest and the
+`AGENTS.md` instructions reach the provider request, the skill's body does
+not, `--tools load_skill --demo` returns it, and `--no-builtin-tools`
+takes the manifest away with the tool.
 
 `scripts/validate.sh` carries the CLI legs. 1d and 1e pin the flags:
 the default set is printed, a named read-only tool really runs, the off

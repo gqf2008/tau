@@ -1,6 +1,7 @@
 //! Built-in tools — `read`, `write`, `edit`, `ls`, `grep`, `find`, `bash`,
-//! `powershell` — so tau can work on a repository without a wasm extension
-//! installed first.
+//! `powershell`, and `load_skill` (the on-demand half of skills
+//! discovery, registered only when the working directory has skills) — so
+//! tau can work on a repository without a wasm extension installed first.
 //!
 //! They are ordinary [`tau_core::Tool`]s registered into the same
 //! [`ToolRegistry`] that `-e` components fill; registration is last-wins, so
@@ -40,6 +41,7 @@ mod mime;
 mod paths;
 mod read;
 mod shell;
+mod skills;
 mod walk;
 mod write;
 
@@ -48,6 +50,7 @@ pub use find::FindTool;
 pub use grep::GrepTool;
 pub use ls::LsTool;
 pub use read::ReadTool;
+pub use skills::LoadSkillTool;
 pub use shell::{
     BASH_PATH_VAR, POWERSHELL_PATH_VAR, Shell, ShellKind, ShellTool, find_bash, find_powershell,
 };
@@ -56,11 +59,12 @@ pub use write::WriteTool;
 /// Every built-in this build implements, on this platform. The single source
 /// of truth for [`names`] and [`register`]; a name here without a match arm
 /// in [`build`] fails the tests.
-const IMPLEMENTED: [&str; 8] = [
+const IMPLEMENTED: [&str; 9] = [
     "bash",
     "edit",
     "find",
     "grep",
+    "load_skill",
     "ls",
     "powershell",
     "read",
@@ -68,8 +72,11 @@ const IMPLEMENTED: [&str; 8] = [
 ];
 
 /// Built-ins whose output cannot change the user's machine: the only ones
-/// `--demo` may script, and only when `--tools` named them.
-const READ_ONLY: [&str; 4] = ["find", "grep", "ls", "read"];
+/// `--demo` may script, and only when `--tools` named them. `load_skill`
+/// belongs here — it reads inside a skill directory and nowhere else — and
+/// that is what lets `--tools load_skill --demo -p <name>` exercise the
+/// load path for real (validate.sh 3c).
+const READ_ONLY: [&str; 5] = ["find", "grep", "load_skill", "ls", "read"];
 
 /// Every built-in name this platform can register, sorted — the names
 /// `--tools` accepts.
@@ -89,6 +96,11 @@ pub struct BuiltinTools {
     cwd: PathBuf,
     /// `None` = every built-in; `Some(set)` = exactly those names.
     only: Option<BTreeSet<String>>,
+    /// The skills discovered for this session. `load_skill` needs them —
+    /// without an index the tool is not registered at all, so a session
+    /// whose working directory has no skills is exactly the session it
+    /// was before skills existed.
+    skills: Option<tau_core::SkillIndex>,
 }
 
 impl BuiltinTools {
@@ -97,7 +109,20 @@ impl BuiltinTools {
         Self {
             cwd: cwd.into(),
             only: None,
+            skills: None,
         }
+    }
+
+    /// Attach the session's skills: `load_skill` joins the set (subject to
+    /// the same `--tools` / `--no-builtin-tools` switches as the rest).
+    pub fn with_skills(mut self, skills: tau_core::SkillIndex) -> Self {
+        self.skills = Some(skills);
+        self
+    }
+
+    /// The skills this session discovered, if they were attached.
+    pub fn skills(&self) -> Option<&tau_core::SkillIndex> {
+        self.skills.as_ref()
     }
 
     /// No built-ins at all (`--no-builtin-tools`).
@@ -105,6 +130,7 @@ impl BuiltinTools {
         Self {
             cwd: cwd.into(),
             only: Some(BTreeSet::new()),
+            skills: None,
         }
     }
 
@@ -132,6 +158,7 @@ impl BuiltinTools {
         Self {
             cwd: cwd.into(),
             only: Some(names.iter().cloned().collect()),
+            skills: None,
         }
     }
 
@@ -184,8 +211,23 @@ fn tier(name: &str, named: bool) -> Option<u8> {
 
 /// Build one built-in, or `None` when this build has no such tool (or the
 /// platform has no such tool).
-fn build(name: &str, cwd: &Path, tier: Option<u8>) -> Option<Box<dyn Tool>> {
+fn build(
+    name: &str,
+    cwd: &Path,
+    tier: Option<u8>,
+    skills: Option<&tau_core::SkillIndex>,
+) -> Option<Box<dyn Tool>> {
     match name {
+        // An index with no skills in it is a working directory that
+        // offers none: the tool has nothing to serve, and registering it
+        // anyway would advertise a manifest that is not there. Not
+        // registering it keeps such a directory exactly the run it was
+        // before skills existed.
+        "load_skill" => skills
+            .filter(|skills| !skills.skills().is_empty())
+            .map(|skills| {
+                Box::new(skills::LoadSkillTool::new(skills.clone(), tier)) as Box<dyn Tool>
+            }),
         "bash" => Some(Box::new(shell::ShellTool::bash(cwd, tier))),
         "edit" => Some(Box::new(edit::EditTool::new(cwd, tier))),
         "find" => Some(Box::new(find::FindTool::new(cwd, tier))),
@@ -207,7 +249,12 @@ pub fn register(registry: &mut ToolRegistry, tools: &BuiltinTools) -> Vec<String
         if !tools.selects(name) {
             continue;
         }
-        let Some(tool) = build(name, &tools.cwd, tier(name, tools.only.is_some())) else {
+        let Some(tool) = build(
+            name,
+            &tools.cwd,
+            tier(name, tools.only.is_some()),
+            tools.skills.as_ref(),
+        ) else {
             continue;
         };
         registered.push(tool.def().name.clone());
@@ -233,12 +280,34 @@ mod tests {
         assert!(!names.contains(&"powershell"));
     }
 
+    /// An index with one skill in it: the shape `load_skill` is built for.
+    /// (An empty index builds no tool at all — see
+    /// [`without_skills_the_skill_tool_is_not_registered`].)
+    fn skill_index() -> (tempfile::TempDir, tau_core::SkillIndex) {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let skill = dir.path().join(".agents/skills/foo");
+        std::fs::create_dir_all(&skill).expect("mkdir");
+        let frontmatter = [
+            "---",
+            "name: foo",
+            "description: does foo",
+            "---",
+            "body",
+            "",
+        ]
+        .join("\n");
+        std::fs::write(skill.join("SKILL.md"), frontmatter).expect("write");
+        let index = tau_core::SkillIndex::discover(dir.path());
+        (dir, index)
+    }
+
     #[test]
     fn every_advertised_name_builds() {
         // The drift guard: `names()` is what `--tools` accepts and what the
         // startup line prints, so every name must have an implementation.
+        let (_dir, skills) = skill_index();
         for name in names() {
-            let tool = build(name, Path::new("."), None)
+            let tool = build(name, Path::new("."), None, Some(&skills))
                 .unwrap_or_else(|| panic!("{name} is advertised but not built"));
             assert_eq!(tool.def().name, name);
         }
@@ -246,11 +315,57 @@ mod tests {
 
     #[test]
     fn the_default_registers_every_built_in() {
+        let (_dir, skills) = skill_index();
         let mut registry = ToolRegistry::new();
-        let registered = register(&mut registry, &BuiltinTools::all("."));
+        let all = BuiltinTools::all(".").with_skills(skills);
+        let registered = register(&mut registry, &all);
         assert_eq!(registered, names());
         let defs: Vec<String> = registry.defs().into_iter().map(|d| d.name).collect();
         assert_eq!(defs, names());
+    }
+
+    #[test]
+    fn without_skills_the_skill_tool_is_not_registered() {
+        // The compatibility property: a working directory with no skills
+        // gets exactly the tool set it got before skills existed — whether
+        // no index was attached or an empty one was (the CLI always
+        // discovers, so the empty case is the one that matters).
+        for tools in [
+            BuiltinTools::all("."),
+            BuiltinTools::all(".").with_skills(tau_core::SkillIndex::default()),
+        ] {
+            let mut registry = ToolRegistry::new();
+            let registered = register(&mut registry, &tools);
+            assert!(
+                !registered.contains(&"load_skill".to_string()),
+                "{registered:?}"
+            );
+            assert!(registry.get("load_skill").is_none());
+        }
+    }
+
+    #[test]
+    fn a_named_skill_tool_is_scriptable_but_never_by_default() {
+        // `--tools load_skill` is how validate.sh 3c drives the load path;
+        // a default-on load_skill stays out of the demo transcript.
+        //
+        // Asserted through the registry, not through `tier` alone: the tier
+        // function is only consulted at build time, and a tool that forgets
+        // to carry it silently takes the trait's default — `DEMO_USER_LOADED`,
+        // the front of the queue. (That is exactly what happened once;
+        // `--demo` started running `load_skill` in any directory with a
+        // skill in it.)
+        assert_eq!(tier("load_skill", true), Some(DEMO_USER_NAMED));
+        assert_eq!(tier("load_skill", false), None);
+        let (_dir, skills) = skill_index();
+        let mut default = ToolRegistry::new();
+        register(&mut default, &BuiltinTools::all(".").with_skills(skills.clone()));
+        assert_eq!(default.demo_pick(), None, "a default run must not script a skill load");
+
+        let mut named = ToolRegistry::new();
+        let only = BuiltinTools::selecting(".", &["load_skill".to_string()]).with_skills(skills);
+        assert_eq!(register(&mut named, &only), vec!["load_skill".to_string()]);
+        assert_eq!(named.demo_pick().as_deref(), Some("load_skill"));
     }
 
     #[test]
@@ -295,10 +410,17 @@ mod tests {
     #[test]
     fn the_default_set_is_never_scripted_by_the_demo() {
         // The `--demo` transcript of a plain run must not change just
-        // because built-ins are now on by default.
-        let mut registry = ToolRegistry::new();
-        register(&mut registry, &BuiltinTools::all("."));
-        assert_eq!(registry.demo_pick(), None);
+        // because built-ins are now on by default — nor because the
+        // directory happens to have skills in it.
+        let (_dir, skills) = skill_index();
+        for tools in [
+            BuiltinTools::all("."),
+            BuiltinTools::all(".").with_skills(skills),
+        ] {
+            let mut registry = ToolRegistry::new();
+            register(&mut registry, &tools);
+            assert_eq!(registry.demo_pick(), None);
+        }
     }
 
     #[test]

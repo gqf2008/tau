@@ -83,7 +83,7 @@ pub struct Sessions {
 }
 
 impl Sessions {
-    pub fn new(harness: Harness, dir: PathBuf, system: Option<String>) -> Self {
+    pub fn new(harness: Harness, dir: PathBuf) -> Self {
         let Harness {
             cwd,
             host,
@@ -92,6 +92,7 @@ impl Sessions {
             model,
             model_label,
             mic_consent: _,
+            system,
         } = harness;
         Self {
             host,

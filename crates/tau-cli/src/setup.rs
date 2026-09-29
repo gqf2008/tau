@@ -33,6 +33,12 @@ pub struct Harness {
     /// The CLI holds the user's authority on an explicit command, so the
     /// native paths answer `true`; a wasm provider needs a grant.
     pub mic_consent: bool,
+    /// The system prompt every session on this harness starts with:
+    /// `--system` first, then what the working directory itself offers —
+    /// `AGENTS.md` project instructions, and the skills manifest when
+    /// `load_skill` is in the run (docs/skills.md). `None` when the user
+    /// gave neither.
+    pub system: Option<String>,
 }
 
 /// Build the harness from the command line: register the built-ins, load
@@ -43,6 +49,11 @@ pub async fn build(cli: &Cli) -> Result<Harness> {
     // reports the same value. A directory that cannot be read at startup is
     // not worth failing over — absolute paths still work.
     let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+    // What the directory offers the model besides tools (issue #4): skill
+    // directories under the on-disk conventions, and the `AGENTS.md`
+    // files from here up to the repository root. Discovery never fails a
+    // run — a broken skill is a stderr note and a skip.
+    let skills = tau_core::SkillIndex::discover(&cwd);
     // `--tools` names built-ins *and* component tools (pi's semantics), and
     // the components load below — so a name that is no built-in is not an
     // error yet. Whatever it names that nothing provides is caught after the
@@ -60,7 +71,7 @@ pub async fn build(cli: &Cli) -> Result<Harness> {
     let mut tools = ToolRegistry::new();
     // Built-ins go in first: registration is last-wins, so a component
     // shipping its own `read` shadows the built-in (pi's behaviour too).
-    let builtins = if cli.no_builtin_tools {
+    let selection = if cli.no_builtin_tools {
         tau_tools::BuiltinTools::none(&cwd)
     } else {
         match &requested {
@@ -68,6 +79,10 @@ pub async fn build(cli: &Cli) -> Result<Harness> {
             None => tau_tools::BuiltinTools::all(&cwd),
         }
     };
+    // The skills ride along with the built-ins: `load_skill` needs them,
+    // and the two switches above decide whether it makes the run like any
+    // other built-in. A directory with no skills registers no such tool.
+    let builtins = selection.with_skills(skills.clone());
     let registered = tau_tools::register(&mut tools, &builtins);
     // Always printed, "none" included: a run says which built-in tools it
     // has, and validate.sh asserts on this line.
@@ -79,6 +94,36 @@ pub async fn build(cli: &Cli) -> Result<Harness> {
             registered.join(", ")
         }
     );
+    // Always printed, "none" included, for the same reason the built-in
+    // line is: a run says what the directory offered it, and validate.sh
+    // asserts on the line. The instructions are named individually —
+    // root-first, the order they reach the model in.
+    eprintln!(
+        "[tau] skills: {}",
+        if skills.skills().is_empty() {
+            "none".to_string()
+        } else {
+            skills
+                .skills()
+                .iter()
+                .map(|skill| skill.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        }
+    );
+    for path in skills.hint_paths() {
+        eprintln!("[tau] project instructions: {}", path.display());
+    }
+    // The manifest is advertised only to a run that can load a body: with
+    // `--no-builtin-tools` or a `--tools` list without `load_skill` there
+    // is no such tool, and naming skills the model cannot read would
+    // invite calls that must fail. The instructions go either way.
+    let project_context = if registered.iter().any(|name| name == "load_skill") {
+        skills.system_context()
+    } else {
+        skills.hints_context()
+    };
+
     let mut probes = ProbeRegistry::new();
     let host = if cli.allow_unsigned {
         tau_ext::ExtensionHost::new()
@@ -328,7 +373,19 @@ pub async fn build(cli: &Cli) -> Result<Harness> {
         model: Arc::from(model),
         model_label,
         mic_consent,
+        system: compose_system(cli.system.clone(), project_context),
     })
+}
+
+/// The session's system prompt: the user's own words first, then what the
+/// working directory had to say about itself — nothing is dropped, and a
+/// session with neither gets no system prompt at all (the request keeps
+/// the shape it always had).
+fn compose_system(flag: Option<String>, context: Option<String>) -> Option<String> {
+    match (flag, context) {
+        (Some(flag), Some(context)) => Some(format!("{flag}\n\n{context}")),
+        (flag, context) => flag.or(context),
+    }
 }
 
 /// A [`Model`] that hands every caller the one shared instance.
@@ -521,6 +578,24 @@ mod tests {
         assert_eq!(
             effective_wasi(false, &remembered),
             tau_ext::WasiPolicy::DenyAll
+        );
+    }
+
+    #[test]
+    fn the_system_prompt_is_the_flag_then_the_directory() {
+        assert_eq!(compose_system(None, None), None);
+        assert_eq!(
+            compose_system(Some("be terse".into()), None),
+            Some("be terse".to_string())
+        );
+        assert_eq!(
+            compose_system(None, Some("context".into())),
+            Some("context".to_string())
+        );
+        assert_eq!(
+            compose_system(Some("be terse".into()), Some("context".into())),
+            Some("be terse\n\ncontext".to_string()),
+            "the user's words come first, the directory's after"
         );
     }
 

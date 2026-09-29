@@ -19,6 +19,14 @@ extensible — but extensions are **wasm components**, not in-process scripts.
   `--no-builtin-tools` hands the toolset to the components, and a
   component tool with the same name shadows the built-in. See
   `docs/builtin-tools.md`.
+- **Skills and project instructions**: `.agents/skills`, `.claude/skills` and
+  `.goose/skills` under the working directory are discovered, put one
+  `name: description` line each into the system prompt, and loaded only when
+  a task calls for one — bodies never ride along — through the `load_skill`
+  tool, which also reads a skill's supporting files and refuses any path that
+  leaves the skill directory. `AGENTS.md`, from the working directory up to
+  the repository root, goes into the system prompt root-first. See
+  `docs/skills.md`.
 - **Extensions**: drop a `.wasm` in. Components implement the
   `tau:extension` WIT world (`wit/tau.wit`): `tools` (contribute agent
   tools), `probes` (observe and influence the run), and the `host`
@@ -120,8 +128,9 @@ tau is alive. The tool answered: SHOUT HELLO TAU. (faux model — …)
 
 See `CHANGELOG.md` for what's in each version. `scripts/validate.sh`
 proves the release candidate the way a first user meets it (demo,
-built-in tools, an ACP client over real pipes, signing/trust chain,
-built-in provider against a loopback mock, wasm-provider consent gate)
+built-in tools, skills discovery, an ACP client over real pipes,
+signing/trust chain, built-in provider against a loopback mock,
+wasm-provider consent gate)
 and restores the environment afterwards. `scripts/release.sh` runs the full suite, rebuilds the wasm
 examples, builds the release binary (lto + strip), and assembles
 `dist/tau-<version>-<target>.zip` with the binary, README, LICENSE, docs/,
@@ -138,7 +147,7 @@ and prebuilt (unsigned) example components.
 | `crates/tau-tools` | built-in native tools (read/write/edit/ls/grep/find/bash/powershell) |
 | `crates/tau-cli` | `tau` binary (print, interactive, and `--acp` modes) |
 | `wit/tau.wit` | the extension contract, versioned |
-| `docs/` | architecture (the design doc), extensions (author guide), tutorial (hands-on walkthrough), builtin-tools, acp, probes, events, bridges, signing, oci, media, wasip3-streams, release, perf |
+| `docs/` | architecture (the design doc), extensions (author guide), tutorial (hands-on walkthrough), builtin-tools, skills, acp, probes, events, bridges, signing, oci, media, wasip3-streams, release, perf |
 | `examples/upper` | example wasm extension (tool) |
 | `examples/echo-provider` | example wasm provider (push-mode streaming) |
 | `examples/http-provider` | example wasm provider (consent-gated http) |

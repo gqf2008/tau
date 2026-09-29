@@ -96,6 +96,27 @@
   value); match it. Migration stage 1's two tau-core types — the error
   enum above and these payloads — are both in.
 
+- **Skills and project instructions.** The working directory is read
+  before the first request. `.agents/skills`, `.claude/skills` and
+  `.goose/skills` are searched, in that order, for skill directories (a
+  `SKILL.md` with `name` and `description` frontmatter in it), and each one
+  becomes a single manifest line — `- hello: greets the reader in a set
+  way` — in the system prompt: the bodies are large and are not inlined,
+  which is what the new `load_skill` built-in is for. It returns a body, or
+  a supporting file named relative to the skill directory, and refuses
+  anything that climbs out of it. `AGENTS.md` from the working directory up
+  to the repository root goes into the system prompt root-first, and
+  `--system` precedes both. Every agent run now prints `[tau] skills: …`
+  and one `[tau] project instructions: …` line per file, both `none`-able.
+  `load_skill` is a built-in like the rest — `--tools`/`--no-builtin-tools`
+  decide whether it is in the run, and the manifest is advertised only when
+  it is — and a directory with no skills registers no such tool, so
+  `--demo` transcripts and the default tool set are unchanged. Discovery
+  never fails a run: a broken or duplicated skill is a line on stderr and a
+  skip. `docs/skills.md` is the reference; `scripts/validate.sh` 3c asserts
+  the manifest and the instructions on the provider wire, and that the body
+  is not there.
+
 ### Changed
 
 - `--demo` scripts **the tool the run picked**, not the alphabetically

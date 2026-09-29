@@ -52,11 +52,10 @@ use session::Sessions;
 /// `connect_to` reports it.
 pub async fn serve(cli: &Cli) -> anyhow::Result<()> {
     let harness = crate::setup::build(cli).await?;
-    let sessions = Arc::new(Sessions::new(
-        harness,
-        cli.session_dir(),
-        cli.system.clone(),
-    ));
+    // No `--system` here: the harness already folded it together with
+    // what the working directory offers, and every session on it starts
+    // from that same prompt.
+    let sessions = Arc::new(Sessions::new(harness, cli.session_dir()));
 
     let created = Arc::clone(&sessions);
     let prompted = Arc::clone(&sessions);

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 # First-user validation: prove the release candidate works for someone
 # who just installed tau, in eleven steps — demo, the built-in tools
-# (default set, off switch, no shell through --demo), the ACP mode over
-# the pipes an editor uses, the signing/trust chain (incl. tamper
+# (default set, off switch, no shell through --demo), skills discovery
+# (the manifest on the provider wire, the body on demand), the ACP mode
+# over the pipes an editor uses, the signing/trust chain (incl. tamper
 # rejection), all three built-in providers against a loopback mock (and
 # a real tool-call round trip on that wire), the wasm provider consent
 # gate, the MCP bridge spawn gate, the remembered-consent lifecycle, OCI
@@ -405,6 +406,13 @@ class ChatHandler(BaseHTTPRequestHandler):
                 body = (
                     TOOLCALL_FINAL_SSE_BODY if b'"role":"tool"' in raw else TOOLCALL_SSE_BODY
                 ).encode()
+        elif "/skills" in self.path:
+            # Side channel for step 3c: what the model was told about the
+            # working directory — project instructions, the skills
+            # manifest, and (asserted absent) the skill bodies.
+            with open("skills_requests.jsonl", "ab") as f:
+                f.write(raw + b"\n")
+            body = SSE_BODY.encode()
         elif self.path.endswith("/responses"):
             body = RESPONSES_SSE_BODY.encode()
         elif self.path.endswith("/messages"):
@@ -550,6 +558,91 @@ echo "$SECOND" | grep -qF '"tool_use_id":"toolu_ls_1"' || fail "the anthropic to
 echo "$SECOND" | grep -qF 'tau-3b-marker.txt' \
     || fail "the ls output is missing from the anthropic tool result: $SECOND"
 echo "ok — the Anthropic wire closes the same loop"
+
+# --- step 3c: skills and project instructions (docs/skills.md) --------
+step "3c/11 skills discovery (manifest and AGENTS.md on the wire; body on demand)"
+# A directory shaped like a project: a skill under the `.agents`
+# convention, instructions in it and one level down, and a `.git` marker
+# so the walk up stops here — the tree lives inside the checkout, whose
+# own files must not leak into the assertions.
+SKILLS_ROOT="$WORK/skills"
+rm -rf "$SKILLS_ROOT"
+mkdir -p "$SKILLS_ROOT/.git" "$SKILLS_ROOT/sub" "$SKILLS_ROOT/.agents/skills/hello"
+cat > "$SKILLS_ROOT/.agents/skills/hello/SKILL.md" << 'SKILLEOF'
+---
+name: hello
+description: greets the reader in a set way
+---
+
+# Hello
+
+BODY-MARKER-8431
+SKILLEOF
+echo 'root guidance' > "$SKILLS_ROOT/AGENTS.md"
+echo 'inner guidance' > "$SKILLS_ROOT/sub/AGENTS.md"
+
+# The startup log says what the directory offered, and the instructions
+# are listed root-first — the repository's guidance, then the nearer
+# file. From a subdirectory with no skills of its own, the skills line
+# reads `none`: the skill roots are the working directory's, not the
+# tree's (docs/skills.md, "Deliberate limits").
+OUT="$(cd "$SKILLS_ROOT/sub" && "$TAU" --demo -p "hello" 2>&1)" || fail "subdirectory run: $OUT"
+echo "$OUT" | grep -qxF "[tau] skills: none" \
+    || fail "a subdirectory offers no skills and must say so: $OUT"
+ROOT_LINE="$(echo "$OUT" | grep -nE 'skills.AGENTS[.]md' | sed -n '1p' | cut -d: -f1 || true)"
+INNER_LINE="$(echo "$OUT" | grep -nE 'sub.AGENTS[.]md' | sed -n '1p' | cut -d: -f1 || true)"
+[ -n "$ROOT_LINE" ] && [ -n "$INNER_LINE" ] \
+    || fail "both AGENTS.md files must be reported: $OUT"
+[ "$ROOT_LINE" -lt "$INNER_LINE" ] \
+    || fail "the parent's instructions must be listed first: $OUT"
+
+# What the model is actually told: the manifest and the instructions are
+# in the system prompt, the skill's body is not (it is what load_skill
+# is for), and the tool that serves it is advertised. The mock captures
+# the request; this is the only leg where the system prompt is read.
+rm -f skills_requests.jsonl
+OUT="$(cd "$SKILLS_ROOT" && OPENAI_API_KEY=dummy \
+    OPENAI_BASE_URL=http://127.0.0.1:8401/v1/skills TAU_MODEL=mock-model \
+    "$TAU" --provider openai -p "hello" 2>&1)" || fail "skills wire run: $OUT"
+echo "$OUT" | grep -qxF "[tau] skills: hello" \
+    || fail "the skill was not discovered in the working directory: $OUT"
+[ -f skills_requests.jsonl ] || fail "the mock captured no provider request"
+REQ="$(sed -n '1p' skills_requests.jsonl)"
+[ -n "$REQ" ] || fail "the captured provider request is empty"
+echo "$REQ" | grep -qF 'greets the reader in a set way' \
+    || fail "the skill is not named in the model's context: $REQ"
+echo "$REQ" | grep -qF 'root guidance' \
+    || fail "the project instructions are not in the model's context: $REQ"
+echo "$REQ" | grep -qF '"name":"load_skill"' \
+    || fail "load_skill was not advertised to the provider: $REQ"
+if echo "$REQ" | grep -qF 'BODY-MARKER-8431'; then
+    fail "the skill body was inlined instead of left for load_skill: $REQ"
+fi
+
+# And the load path closes: the demo may script a named read-only
+# built-in, and load_skill reads the skill the prompt named.
+OUT="$(cd "$SKILLS_ROOT" && "$TAU" --tools load_skill --demo -p "hello" 2>&1)" \
+    || fail "load_skill run: $OUT"
+echo "$OUT" | grep -qxF "[tau] built-in tools: load_skill" \
+    || fail "the selection line is wrong: $OUT"
+echo "$OUT" | grep -qF "tool ← load_skill: " || fail "load_skill never executed: $OUT"
+echo "$OUT" | grep -qF 'BODY-MARKER-8431' || fail "the body never came back: $OUT"
+
+# A body the model cannot load is worse than no body: with the tool
+# selected away, the manifest goes with it.
+rm -f skills_requests.jsonl
+OUT="$(cd "$SKILLS_ROOT" && OPENAI_API_KEY=dummy \
+    OPENAI_BASE_URL=http://127.0.0.1:8401/v1/skills TAU_MODEL=mock-model \
+    "$TAU" --provider openai --no-builtin-tools -p "hello" 2>&1)" \
+    || fail "no-builtin-tools wire run: $OUT"
+[ -f skills_requests.jsonl ] || fail "the mock captured no provider request"
+REQ="$(sed -n '1p' skills_requests.jsonl)"
+echo "$REQ" | grep -qF 'root guidance' \
+    || fail "the instructions must go in either way: $REQ"
+if echo "$REQ" | grep -qF 'greets the reader in a set way'; then
+    fail "the manifest was advertised without the tool that serves it: $REQ"
+fi
+echo "ok — the manifest and AGENTS.md reach the model, the body waits for load_skill"
 
 # --- step 4: wasm provider consent gate --------------------------------
 step "4/11 wasm provider consent gate"

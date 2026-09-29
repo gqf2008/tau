@@ -43,6 +43,7 @@ pub mod model;
 pub mod probe;
 pub mod probe_payload;
 pub mod session;
+pub mod skills;
 pub mod sse;
 pub mod tool;
 pub mod types;
@@ -56,5 +57,6 @@ pub use model::{Model, ModelEvent, RealtimeConfig, RealtimeSession, Request, Sto
 pub use probe::{ProbeHandler, ProbePoint, ProbeRegistry, Verdict};
 pub use probe_payload::ProbePayload;
 pub use session::{EntryKind, JsonlStore, SessionEntry, SessionError};
+pub use skills::{SKILL_DIRS, Skill, SkillIndex};
 pub use tool::{Tool, ToolDef, ToolOutput, ToolRegistry};
 pub use types::{Content, Media, MediaSource, Message, ResultBlock, Role, ToolCall};

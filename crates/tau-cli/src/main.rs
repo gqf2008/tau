@@ -514,6 +514,7 @@ async fn main() -> Result<()> {
         model,
         model_label,
         mic_consent,
+        system,
     } = setup::build(&cli).await?;
 
     let session_path = cli.session_file();
@@ -545,7 +546,9 @@ async fn main() -> Result<()> {
     // docs/im-channels.md). Print mode forwards straight through.
     let (inject_tx, inject_rx) = tokio::sync::mpsc::unbounded_channel::<tau_core::Control>();
     host.wire_host_channel(agent.bus(), inject_tx);
-    if let Some(system) = cli.system {
+    // The harness composed this already: `--system` plus whatever the
+    // working directory had to say (docs/skills.md).
+    if let Some(system) = system {
         agent = agent.system(system);
     }
 
