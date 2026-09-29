@@ -1,9 +1,12 @@
 # WIT 接口重设计：0.6.0 → 0.7.0
 
-**状态：提案（owner 审阅用）。** 本文件与 `wit/next/tau.wit`（草案）先行；契约本体
-`wit/tau.wit` 与宿主代码**未动**，22 个 examples 目录（`validate.sh` 构建 15 个 Rust 组件，另 6 个语言见 `docs/wasm-languages.md`）无需重建。草案已通过 `wasm-tools`
-解析、访客侧（wit-bindgen 0.62 / stable `wasm32-wasip2`）与宿主侧（wasmtime 49.0.1）
-的绑定编译，证据见 §5。落地分期见 §6。
+**状态：已落地（迁移期 2 完成，2026-09-29）。** 草案 `wit/next/tau.wit` 已按 §6 的
+分期成为契约本体 `wit/tau.wit`（同步到 `crates/tau-ext/wit/tau.wit`，
+`CONTRACT_VERSION = "0.7.0"`），`wit/next/` 随之下线。22 个 examples 目录已重建：
+15 个 Rust 组件全部通过 `validate.sh` 的门禁腿，6 个语言见 `docs/wasm-languages.md`
+（C / Python 通过验收，C++ / JS / TS / Go 卡在各自的 async 导出支持，逐字记录在那里）。
+下文保留提案时的时态与分期表——§5 的每条证据都是当时实测，不改写；当时的「草案」即今天
+的契约。
 
 参考：Component Model 异步设计
 <https://component-model.bytecodealliance.org/design/async.html>、WIT 类型与标识符
@@ -205,6 +208,44 @@ SPIKE_CHUNKS=1 ./target/debug/spike-async-host.exe 3s                  # 单条�
 （`process`、`http`、`ws`）都要在 `bindgen!` 里点名 `store`，并给每个宿主-owned 资源配
 `with:` 映射；漏掉 `store` 的报错是「trait 上没有这个方法」，漏掉 `with:` 的报错是资源类型
 不可构造——两条都不是运行时才暴露。
+
+### 迁移期 2 实测：访客等不了（2026-09-29）
+
+上面四条说的是宿主怎么用新机器；下面三条说的是**访客**在新机器上的边界。顺序是「先照 0.6.0 的
+形状移植 → 被实测推翻 → 再改契约」，不是推断：
+
+| 腿 | 状态 | 证据 |
+|---|---|---|
+| leg 5：同步降低的导出里 `block_on` 直接 trap | ❌ 形状不成立 | mcp-bridge 的握手 0.6.0 是同步导出里的阻塞读，照搬进 0.7.0 后宿主报 `wasm trap: cannot block a synchronous task before returning`（访客 `wit_bindgen::rt::async_support::block_on`）。⇒ 契约把 `tools.definitions` 改成 `async func`：工具清单活在远端，枚举它就是 connect + initialize + tools/list，而这三步都要等 |
+| leg 6：同步导出里 `spawn_local` 的任务永不被 poll —— **带阳性对照，第三次量到** | ✅ 阴性与阳性都实测 | guard 例子里临时让 `probe` 先 `spawn_local` 打印再返回：`[probe-spawn] the task spawned by a sync probe ran` **0 次**；同一份代码挂在 async 导出上（阳性对照）每次都打印。leg 1b/1c 已经量过两次，这次是为 `ws.poll` 与 `bridge-io.turn` 这两个决定再量一遍 |
+| leg 7：访客拿不到**可 await 的**定时器 | ❌ 工具链事实（非本仓选择） | wit-bindgen 0.62 的 async 支持里没有 `wasi:clocks` 的 `subscribe-duration`：访客能同步读表，但同步读表不能当等待用（在同步访客里轮询等于把这个 run 烧掉）。⇒ 0.6.0 里那些 `timeout-ms` 参数在 0.7.0 **没有访客侧对应物**，预算全部搬到宿主（既有 `TAU_HTTP_REQUEST_TIMEOUT_MS` / `TAU_HTTP_IDLE_TIMEOUT_MS` / `TAU_WS_CONNECT_TIMEOUT_MS`，新增 `TAU_PROCESS_STDIN_IDLE_TIMEOUT_MS` / `TAU_PROCESS_STDOUT_IDLE_TIMEOUT_MS`），访客只报告「还剩多少没写出/没读到」 |
+
+**两条由此而来的契约修订**（都写进了 `wit/tau.wit` 的注释，且都已有用户）：
+
+1. `ws.connection.poll: func() -> result<list<frame>, error>` —— 同步、不等待的抽干。理由不是
+   「同步访客不能 await」（那只是附带的真），而是**泵不能等**：一个 awaited 的帧读取会把这个 run
+   挂在对端的沉默上，而 stream 唯一的读法就是等。一个连接一个消费者：`receive` 与 `poll` 谁先调
+   谁持有，后到者得 `invalid`；`poll` 撞上连接终止时先交出已经到的帧，原因留到下一次调用报告
+   （帧不会被拿去换错误）。用户：feishu / dingtalk 的入站泵（`pump_inbound`）。
+2. `bridge-io.turn: async func(point, payload)` —— 宿主在 `probe` 为同一个点答完之后，在**可以
+   await 的上下文里**用同一份载荷调它。`probes.probe` 保持同步：对扩展它是热路径上的决策点，
+   让它 await 等于允许组件用一次网络调用把整个 run 扣住；而桥的义务恰好落在那些点上
+   （`session-start` 开长连接、`after-response` 回帖），两者在 0.7.0 都是 async func。`turn` 刻意
+   不返回任何东西：决策是 `probe` 的 verdict，桥在这里学到的东西由它自己处置（steer / notify / POST）。
+   用户：四个 IM 桥（feishu / dingtalk / whatsapp / wecom），以及 `mcp-bridge` / `ws-echo-bridge`
+   的显式空实现（世界强制导出，空实现是「这个点我不需要异步」的答案）。
+
+**迁移期 2 的四个形状记录**（写进例子的注释，也是后来者最容易踩的四处）：
+
+- `ingress.registration` 是资源：**丢掉它就停止服务这条路由**，所以监听方必须持有它（whatsapp /
+  wecom 把它放在 `thread_local` 的状态里——资源不是 `Sync`，不能进 `static`）。
+- 访客状态不能用 `static Mutex`：连接、注册、订阅都是资源（非 `Sync`），且访客本就单线程（宿主在
+  实例锁上串行化每一次导出调用），所以 `thread_local! + RefCell` 是形状，不是妥协。
+- 需要 await 的资源调用要**先把它从 cell 里取出来**（借用不能跨 await），用完放回——放不回去
+  等于把连接关掉（dingtalk 的 `turn` 就是「取出 → 泵 + 回帖 → 放回」，任何提前返回都不丢连接）。
+- 宿主错误是 variant：`{e}`（Display）打印的是 `Refused("…")` 这样的 Debug 形状，不是句子。
+  访客应当**按 kind 分支、把 detail 原样交给读者**（`host_error(verb, error)` 这个三行函数在四个
+  桥、notifier、guard、streamer 里各有一份）。
 
 ### 语言矩阵（本轮实测；工具链本机全部已有）
 

@@ -2,6 +2,73 @@
 
 ## [Unreleased]
 
+### Breaking — contract `tau:extension@0.7.0`: exports that wait are async, probes carry types, resources replace handles
+
+`wit/tau.wit` (identically vendored at `crates/tau-ext/wit/tau.wit`) is
+`tau:extension@0.7.0`. This is the release where the guest side of the
+async ABI starts to bind, so it is the largest contract change so far. By
+theme:
+
+- **Exports that wait are `async func`.** A synchronously lowered export
+  cannot wait, and both ways of faking it are dead ends: a task spawned
+  from one is never polled, and `block_on` inside one traps the instance
+  (`wasm trap: cannot block a synchronous task before returning`). Both
+  measured, with positive controls — docs/wit-redesign.md section 5. So
+  `tools.definitions` / `tools.execute` (enumerating a remote tool list is
+  connect + initialize + tools/list), `models.run`, the `session`
+  resource, `http.request`, `ws.connection.connect` / `.send`,
+  `ingress-handler.handle-request` and the new `bridge-io.turn` are async.
+  `probes.probe` stays **synchronous on purpose**: it is the decision
+  point on the run's hot path, and letting it await would let one
+  component hold a whole run on one network call.
+- **Probes carry types, not JSON strings.** `point` is an enum (12 arms),
+  `payload` a variant (one arm per point), the answer a `verdict`
+  (`continue` / `replace(payload)` / `block(string)`), and a host call's
+  failure is `types.error` (`refused` / `failed` / `invalid`). The host
+  still validates the pairing: a `before-tool` probe cannot answer with a
+  `navigation` payload.
+- **Resources replace the `u64` handles**: `process.child`,
+  `http.response`, `ws.connection`, `ingress.registration`,
+  `host.subscription`, `session.session`. Dropping one releases it, which
+  made `ingress.registration` turn "close a route that was never
+  registered" — an error 0.6.0 had to define — into something
+  inexpressible.
+- **Streams and futures replace the read/write-with-budget calls.**
+  `process.child.stdin(data: stream<u8>) -> future<…>` (the host pumps;
+  backpressure is the stream's), `.stdout()` / `.stderr()` and
+  `http.response.body()` return streams, `ws.connection.receive()` returns
+  `tuple<stream<frame>, future<…>>`. 0.6.0's "taken count" made a bounded
+  write honest; a stream makes the bound unnecessary, so the parameter and
+  the count are gone with it.
+- **`bridge-io.turn(point, payload)` is new**, exported by `world bridge`:
+  the host calls it right after `probe` has answered for the same point,
+  in a context where the guest may await. It returns nothing — decisions
+  stay `probe`'s — so a bridge keeps its decision synchronous and does its
+  waiting (open the socket, post the reply) here. Both bridges that need
+  no such hook export an explicit no-op.
+- **`ws.connection.poll()` is new**: a synchronous, never-waiting drain of
+  the frames that have arrived, because a pump must not wait and a
+  sync-lowered probe cannot await a stream read. One consumer per
+  connection — `receive` and `poll` split nothing, the second caller gets
+  `invalid` — and frames that did arrive are delivered before a terminal
+  reason, which surfaces on the next call.
+- **Every `timeout-ms` parameter is gone.** They were 0.5.0's and 0.6.0's
+  answer, and 0.7.0 has no guest-side counterpart for them: a wasm guest
+  has no clock it can await. The budgets are host knobs now —
+  `TAU_HTTP_REQUEST_TIMEOUT_MS` (30s), `TAU_HTTP_IDLE_TIMEOUT_MS` (120s),
+  `TAU_WS_CONNECT_TIMEOUT_MS` (30s), and the new
+  `TAU_PROCESS_STDIN_IDLE_TIMEOUT_MS` (30s) /
+  `TAU_PROCESS_STDOUT_IDLE_TIMEOUT_MS` (120s). Each message names its
+  budget and its duration, so the gate shortens one and greps for it.
+
+An old component is rejected by name: `component targets
+tau:extension@0.6.0; this host requires @0.7.0; rebuild with the 0.7.0
+bindings (wit/tau.wit), see CHANGELOG.md`. All fifteen Rust examples are
+rebuilt on 0.7.0, and so is the language matrix — C and Python build and
+pass the acceptance run, while C++, JavaScript/TypeScript and Go are
+blocked on their toolchains' async-export support, recorded verbatim in
+docs/wasm-languages.md.
+
 ### Added
 
 - **Built-in tools** (`crates/tau-tools`): `read`, `write`, `edit`, `ls`,
@@ -68,12 +135,11 @@
 - **`HostError`** (tau-core): the three-way host-call error that the
   0.7.0 contract's `types.error` projects — `Refused` (nobody granted
   this), `Failed` (granted, and it broke), `Invalid` (never a valid call
-  here). 0.6.0's ABI still answers every host call with
-  `result<_, string>`, so `From<HostError> for String` is the edge until
-  the contract carries the arm itself; the point of the type is that a
-  guest branches on the arm instead of matching English prose, and that
-  the same detail string under two different arms stays two different
-  values (docs/wit-redesign.md 投影规则).
+  here). The 0.7.0 contract carries the arm (`types.error`), so a guest
+  branches on the variant instead of matching English prose; the point of
+  the type is exactly that — the same detail string under two different
+  arms is two different values — and `From<HostError> for String` is what
+  the paths that predate the arm still use (docs/wit-redesign.md 投影规则).
 - **Typed probe payloads** (tau-core): `ProbeHandler::probe` takes a
   `ProbePayload` — one arm per point, with records named after the 0.7.0
   contract's (`BeforeRun`, `AssembledContext`, `FinalRequest`,
@@ -84,10 +150,11 @@
   `ProbePayload::point()` is the only way to ask which one it is, and a
   renamed field is now a compile error rather than a runtime no-op.
   `Agent::observe` takes the same type (`session_start` / `branch` /
-  `session_end` carry `SessionFacts` / `Branch`). The component ABI is
-  unchanged — guests still get `payload-json` and answer `replace-json` —
-  and `ProbePayload::to_json` / `merge_json` are the compatibility edge
-  that reproduces 0.6.0's shapes and replacement semantics field by field.
+  `session_end` carry `SessionFacts` / `Branch`). The contract carries the
+  same arms since 0.7.0 and the projection is field by field
+  (`crates/tau-ext/src/convert.rs`); `ProbePayload::to_json` /
+  `merge_json` keep the JSON shapes and 0.6.0's replacement semantics for
+  everything that still speaks JSON.
   One behaviour change: a replacement that does not fit the point it
   answers (a missing `prompt`, a `messages` that is not a list) used to
   fail the run; it now degrades to `continue` with a line on stderr, like a

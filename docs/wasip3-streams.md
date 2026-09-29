@@ -7,7 +7,7 @@
 > `wasm32-wasip2` 就能编出 `async func` + `stream` 的组件（无需 nightly、无需
 > `-Zbuild-std`）——等的是 wasip3 的 **std**，不是 Component Model 的异步 ABI，
 > 本文此前把两者绑在了一起。见文末「追加 Spike（2026-09-29）」；契约层面的重设计见
-> `docs/wit-redesign.md` 与草案 `wit/next/tau.wit`。
+> `docs/wit-redesign.md`——那份契约重设计已落地为 `wit/tau.wit` 的 0.7.0。
 
 ## TL;DR
 
