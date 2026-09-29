@@ -172,6 +172,27 @@ impl HostConnection {
         Ok(out)
     }
 
+    /// A connection with no socket behind it, for tests: the returned
+    /// sender scripts what the actor would have queued (frames, then the
+    /// terminal reason).
+    #[cfg(test)]
+    pub(crate) fn scripted() -> (
+        Self,
+        tokio::sync::mpsc::UnboundedSender<Result<WsFrame, String>>,
+    ) {
+        let (cmd, _commands) = mpsc::channel::<WsCommand>();
+        let (frames, queue) = tokio::sync::mpsc::unbounded_channel();
+        (
+            HostConnection {
+                cmd,
+                frames: Arc::new(std::sync::Mutex::new(queue)),
+                inbound: Inbound::Free,
+                ended: None,
+            },
+            frames,
+        )
+    }
+
     /// The command channel to the actor. The guest path clones this out of
     /// the resource table and awaits [`send_frame`]; holding the sender is
     /// what keeps the actor's command loop alive, so it never leaves the
@@ -441,28 +462,11 @@ mod tests {
     /// next call.
     #[test]
     fn the_inbox_has_one_consumer_and_the_drain_is_lossless() {
-        fn connection() -> (
-            HostConnection,
-            tokio::sync::mpsc::UnboundedSender<Result<WsFrame, String>>,
-        ) {
-            let (cmd, _commands) = mpsc::channel::<WsCommand>();
-            let (frames, queue) = tokio::sync::mpsc::unbounded_channel();
-            (
-                HostConnection {
-                    cmd,
-                    frames: Arc::new(std::sync::Mutex::new(queue)),
-                    inbound: Inbound::Free,
-                    ended: None,
-                },
-                frames,
-            )
-        }
-
         // The async stream takes the inbox: `receive` is handed out once,
         // and a `poll` after it is refused rather than silently splitting
         // the frames between two consumers. The refusal is the contract's
         // `invalid`, not the connection's terminal reason.
-        let (mut stream_owner, _frames) = connection();
+        let (mut stream_owner, _frames) = HostConnection::scripted();
         assert!(stream_owner.take_inbound().is_ok(), "the first take wins");
         assert_eq!(
             stream_owner.take_inbound().unwrap_err(),
@@ -479,7 +483,7 @@ mod tests {
         // the guest meets as a refused `receive`: the sync pump owns the
         // queue, so the stream's take is refused instead of ending as if
         // the connection were over (the receipt carries the reason).
-        let (mut poll_first, _frames) = connection();
+        let (mut poll_first, _frames) = HostConnection::scripted();
         assert!(poll_first.poll_inbound().unwrap().is_empty(), "nothing yet is not an end");
         assert_eq!(
             poll_first.take_inbound().unwrap_err(),
@@ -489,7 +493,7 @@ mod tests {
 
         // The sync drain: everything queued, nothing when the peer is
         // quiet, and the terminal reason only after the frames it follows.
-        let (mut poller, frames) = connection();
+        let (mut poller, frames) = HostConnection::scripted();
         frames.send(Ok(WsFrame::Text("one".into()))).unwrap();
         frames.send(Ok(WsFrame::Binary(vec![2]))).unwrap();
         assert_eq!(

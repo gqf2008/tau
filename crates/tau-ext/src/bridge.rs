@@ -612,6 +612,20 @@ fn ws_error_to_bridge(error: crate::ws::WsError) -> bridge_types::Error {
     }
 }
 
+/// The ws inbound refusal in this world's `types.error`: losing the
+/// single-consumer race is the contract's `invalid` (a misuse of the
+/// interface, and the variant a guest matches on -- the string is detail,
+/// never the discriminator), while the connection's own terminal reason
+/// is `failed`. `poll` and `receive` both map through here, so the two
+/// directions cannot drift apart and the split is testable without a
+/// store. `misuse` is the AlreadyOwned detail; `Ended` carries its own.
+fn inbound_error_to_bridge(error: crate::ws::InboundError, misuse: &str) -> bridge_types::Error {
+    match error {
+        crate::ws::InboundError::AlreadyOwned => bridge_types::Error::Invalid(misuse.into()),
+        crate::ws::InboundError::Ended(why) => bridge_types::Error::Failed(why),
+    }
+}
+
 /// The host channel's own failures in this world's `types.error`: same
 /// three-way classification as the extension world's `From` impl (bindgen
 /// generates the error type once per world, so the lift is written twice).
@@ -822,12 +836,11 @@ impl<U> bridge_ws::HostConnectionWithStore<U> for HasSelf<BridgeState> {
             // the variant a guest matches on (the string is detail, not
             // the discriminator; 0.7.0 typed these errors so nobody has to
             // parse them).
-            Err(crate::ws::InboundError::AlreadyOwned) => Err(bridge_types::Error::Invalid(
+            Err(error) => Err(inbound_error_to_bridge(
+                error,
                 "ws.poll: receive() already owns this connection's frames \
-                 (one consumer per connection)"
-                    .into(),
+                 (one consumer per connection)",
             )),
-            Err(crate::ws::InboundError::Ended(why)) => Err(bridge_types::Error::Failed(why)),
         }
     }
 
@@ -855,21 +868,18 @@ impl<U> bridge_ws::HostConnectionWithStore<U> for HasSelf<BridgeState> {
             .map(crate::ws::HostConnection::take_inbound)
         {
             Ok(Ok(frames)) => (Some(frames), None),
-            Ok(Err(crate::ws::InboundError::AlreadyOwned)) => (
-                None,
-                Some(bridge_types::Error::Invalid(
-                    "ws.receive: poll() already owns this connection's frames \
-                     (one consumer per connection)"
-                        .into(),
-                )),
-            ),
             // `take_inbound` hands out the queue or refuses it; it has no
             // terminal reason of its own. Kept total anyway, so a variant
             // added later cannot be silently folded into "the stream just
             // ended".
-            Ok(Err(crate::ws::InboundError::Ended(why))) => {
-                (None, Some(bridge_types::Error::Failed(why)))
-            }
+            Ok(Err(error)) => (
+                None,
+                Some(inbound_error_to_bridge(
+                    error,
+                    "ws.receive: poll() already owns this connection's frames \
+                     (one consumer per connection)",
+                )),
+            ),
             Err(_) => (
                 None,
                 Some(bridge_types::Error::Invalid(
@@ -2319,5 +2329,74 @@ mod tests {
         let child = spawn_child(&echo_child_argv()).expect("spawn");
         std::thread::sleep(std::time::Duration::from_millis(300));
         drop(child);
+    }
+
+    // The ws error mapping's machine guard. 0.7.0 typed `types.error` so a
+    // guest matches the VARIANT and never the string -- which is exactly
+    // why the mapping's three arms need these tests: the last arm-swap
+    // here compiled clean and passed every test under a variant-blind
+    // `is_err()` assertion. The host-side trait methods need a store to
+    // call, so each test drives a scripted connection into the exact
+    // refusal the method would meet and pushes it through the one mapping
+    // function both methods delegate to.
+
+    /// `poll` after `receive` took the inbox: the contract's `invalid`,
+    /// never the connection's `failed`.
+    #[test]
+    fn ws_poll_after_receive_is_invalid_never_failed() {
+        let (mut connection, _frames) = crate::ws::HostConnection::scripted();
+        connection.take_inbound().expect("the first take wins");
+        let refusal = connection.poll_inbound().unwrap_err();
+        assert!(
+            matches!(
+                inbound_error_to_bridge(refusal, "ws.poll: test"),
+                bridge_types::Error::Invalid(_)
+            ),
+            "poll after receive is a contract misuse: `invalid`"
+        );
+    }
+
+    /// `receive` after `poll` owns the drain: the refusal rides the
+    /// verdict future, and it is the same `invalid` in the other
+    /// direction.
+    #[test]
+    fn ws_receive_after_poll_is_invalid_never_failed() {
+        let (mut connection, _frames) = crate::ws::HostConnection::scripted();
+        assert!(
+            connection.poll_inbound().unwrap().is_empty(),
+            "nothing yet is not an end"
+        );
+        let refusal = connection.take_inbound().unwrap_err();
+        assert!(
+            matches!(
+                inbound_error_to_bridge(refusal, "ws.receive: test"),
+                bridge_types::Error::Invalid(_)
+            ),
+            "a refused receive's verdict is a contract misuse: `invalid`"
+        );
+    }
+
+    /// The connection's own terminal reason is `failed` -- the one arm
+    /// that must never come out `invalid`.
+    #[test]
+    fn ws_terminal_reason_is_failed_never_invalid() {
+        let (mut connection, frames) = crate::ws::HostConnection::scripted();
+        frames
+            .send(Err("ws: peer closed the connection".into()))
+            .unwrap();
+        assert!(
+            connection.poll_inbound().unwrap().is_empty(),
+            "the end follows its frames"
+        );
+        let ended = connection.poll_inbound().unwrap_err();
+        match inbound_error_to_bridge(ended, "ws.poll: test") {
+            bridge_types::Error::Failed(why) => {
+                assert_eq!(why, "ws: peer closed the connection");
+            }
+            bridge_types::Error::Invalid(_) => {
+                panic!("the connection's terminal reason must not be `invalid`")
+            }
+            _ => panic!("the connection's terminal reason must be `failed`"),
+        }
     }
 }
