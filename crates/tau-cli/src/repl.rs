@@ -1671,6 +1671,36 @@ mod tests {
         assert_eq!(exported.entries().len(), 2, "export: {:?}", exported.entries());
     }
 
+    #[tokio::test]
+    async fn hotkeys_prints_the_key_bindings() {
+        let (_dir, tx, capture, task) = rig();
+        tx.send(LineEvent::Line("/hotkeys".into())).unwrap();
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        let text = capture.text();
+        assert!(text.contains("keys: Enter send"), "output: {text}");
+        assert!(
+            text.contains("Ctrl-C mid-run: abort the turn"),
+            "output: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn changelog_falls_back_to_a_pointer_without_a_file() {
+        // cargo test runs with cwd = crates/tau-cli and the test binary in
+        // target/debug/deps: none of the three CHANGELOG.md candidates
+        // exist, so the fallback line is deterministic in this environment.
+        let (_dir, tx, capture, task) = rig();
+        tx.send(LineEvent::Line("/changelog".into())).unwrap();
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        let text = capture.text();
+        let fallback = "no CHANGELOG.md found here — see https://github.com/gqf2008/tau/blob/main/CHANGELOG.md";
+        assert!(text.contains(fallback), "output: {text}");
+    }
+
     /// Records the text of every request; the compaction instructions
     /// must reach the summarizer (pi's `/compact [instructions]`).
     struct RecordingModel {
