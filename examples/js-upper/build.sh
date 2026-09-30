@@ -7,7 +7,7 @@ set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p target
 npm install --no-fund --no-audit --silent
-npx jco componentize src/upper.js \
+npx @bytecodealliance/jco componentize src/upper.js \
     --wit ../../wit/tau.wit --world-name extension \
     --disable http fetch-event \
     -o target/js_upper.wasm

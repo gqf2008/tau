@@ -2,6 +2,15 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- `examples/{js,ts}-upper/build.sh`: invoke jco as `@bytecodealliance/jco`
+  explicitly. The unscoped `jco` on npm is a dependency-confusion placeholder
+  (1.0.0, published 2026-01, ships a stub `jco` bin). The scripts were safe
+  only implicitly — `npm install` pins the scoped package locally and npx's
+  local-first resolution masked the name collision; an ad-hoc `npx jco`
+  outside the project would fetch the placeholder. Say the real name.
+
 ### Docs
 
 - `docs/wasm-languages.md`: dated 2026-09-30 toolchain recheck of the three

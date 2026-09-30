@@ -140,7 +140,8 @@ Caused by:
   （三个 async `FunctionKind`、三个 async `AbiVariant`、`Future`/`Stream`
   的定义与类型命名、`Handle`、`FixedLengthList`、`ErrorContext`）——
   不是「新版已发我们没试」，而是**上游工作树里还没有实现**。
-- **JavaScript / TypeScript**：npm registry 的 jco 最新仍是 **1.35.0**，
+- **JavaScript / TypeScript**：npm registry 的 `@bytecodealliance/jco` 最新仍是 **1.35.0**
+  （注意：无 scope 的 `jco` 是 2026-01 注册的占位包 1.0.0，占位 bin 存在、暖缓存会掩盖——裸 `npx jco` 在冷机器上跑的是占位桩，构建脚本须指名 scoped 包），
   splicer panic（bindgen.rs:506，无 async-lift）原样未动。
 - **Go**：TinyGo 最新发布仍是 **v0.42.0**（2026-09-01），
   `runtime.wasiOnIdle` 仍未实现。
@@ -148,7 +149,7 @@ Caused by:
 矩阵因此不变：✅ 仍只有 C 与 Python 两格，本轮未重建任何产物。下次复查
 触发条件＝上游三者任一发布新版。查询口径备忘（本机实测）：crates.io API
 对本机 403，rsproxy 稀疏索引对 wit-bindgen 系路径 404；可靠来源是 GitHub
-Releases（wit-bindgen、TinyGo）与 npm registry（jco）。
+Releases（wit-bindgen、TinyGo）与 npm registry（`@bytecodealliance/jco`）。
 
 ## C —— 零依赖 freestanding 路线
 
@@ -231,7 +232,7 @@ app 模块里必须定义名字恰为 `Tools` / `Hooks` 的类，分别继承
 ## JavaScript / TypeScript —— jco（StarlingMonkey）
 
 ```bash
-npx jco componentize src/upper.js --wit ../../wit/tau.wit --world-name extension \
+npx @bytecodealliance/jco componentize src/upper.js --wit ../../wit/tau.wit --world-name extension \
     --disable http fetch-event -o target/js_upper.wasm
 ```
 
