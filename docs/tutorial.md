@@ -2,19 +2,13 @@
 
 The hands-on version of `docs/extensions.md`: an empty directory → a loaded
 tool → a signed component → a registry digest you can pin. Every command
-below was run against tau 0.6.0 (contract `tau:extension@0.6.0`); outputs
-are trimmed to the lines that carry meaning, and paths are elided where they
-are machine-specific. Fingerprints and digests in the transcripts come from
-the machine this was written on and yours will differ — a digest covers the
-exact bytes, and those carry your build paths. That is the point of them.
-
-> **Contract note (2026-09-29):** the contract at HEAD is
-> `tau:extension@0.7.0` — exports that wait are `async`, probes are
-> typed, and resources replaced the `u64` handles (see `CHANGELOG.md`).
-> The transcripts below remain the 0.6.0 capture this header declares;
-> the re-run rule under "Keeping this document honest" applies before
-> the next release. The API walkthrough in `docs/extensions.md` is
-> already 0.7.0-shaped.
+below was run against tau 0.7.0 (contract `tau:extension@0.7.0` — exports
+that wait are `async`, probes are typed, resources replaced the `u64`
+handles; see `CHANGELOG.md`); outputs are trimmed to the lines that carry
+meaning, and paths are elided where they are machine-specific. Fingerprints
+and digests in the transcripts come from the machine this was written on and
+yours will differ — a digest covers the exact bytes, and those carry your
+build paths. That is the point of them.
 
 Read alongside: `docs/extensions.md` (the API surface, the three worlds),
 `wit/tau.wit` (the contract itself), `docs/signing.md`, `docs/oci.md`.
@@ -35,7 +29,7 @@ reproducible when the contract moves.
 ```bash
 mkdir -p wordcount/src wordcount/wit && cd wordcount
 curl -fsSL -o wit/tau.wit \
-    https://raw.githubusercontent.com/gqf2008/tau/v0.6.0/wit/tau.wit
+    https://raw.githubusercontent.com/gqf2008/tau/v0.7.0/wit/tau.wit
 ```
 
 Match that tag to the tau you will load with — the `package` line in the
@@ -54,7 +48,7 @@ edition = "2024"
 crate-type = ["cdylib"]
 
 [dependencies]
-wit-bindgen = "0.46"
+wit-bindgen = "0.62"
 serde_json = "1"
 
 [workspace]
@@ -70,14 +64,14 @@ wit_bindgen::generate!({
     world: "extension",
 });
 
-use exports::tau::extension::probes::{Action, Guest as Probes, Verdict};
+use exports::tau::extension::probes::{Guest as Probes, Payload, Point, Verdict};
 use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
 use tau::extension::types::ResultBlock;
 
 struct Wordcount;
 
 impl Tools for Wordcount {
-    fn definitions() -> Vec<Definition> {
+    async fn definitions() -> Vec<Definition> {
         vec![Definition {
             name: "wordcount".into(),
             description: "Count the words and characters in a text".into(),
@@ -90,7 +84,7 @@ impl Tools for Wordcount {
         }]
     }
 
-    fn execute(name: String, arguments_json: String) -> ToolResult {
+    async fn execute(name: String, arguments_json: String) -> ToolResult {
         if name != "wordcount" {
             return ToolResult {
                 content: vec![ResultBlock::Text(format!("unknown tool: {name}"))],
@@ -116,15 +110,11 @@ impl Tools for Wordcount {
 }
 
 impl Probes for Wordcount {
-    fn points() -> Vec<String> {
+    fn points() -> Vec<Point> {
         Vec::new() // this extension handles no probe points
     }
-    fn probe(_point: String, _payload_json: String) -> Verdict {
-        Verdict {
-            action: Action::Continue,
-            payload_json: None,
-            reason: None,
-        }
+    fn probe(_point: Point, _payload: Payload) -> Verdict {
+        Verdict::Continue
     }
 }
 
@@ -137,6 +127,15 @@ Four things about that listing:
   `tools` and `probes`, so both are implemented even though this extension
   never probes. An empty `points()` means the host never calls `probe` —
   the interface contract, not a stub you have to grow into.
+- The tool methods are `async fn` since 0.7.0: a tool that talks to the
+  host (http, ws, processes) awaits those calls in place. This one has
+  nothing to wait for, so the bodies are unchanged from a sync reading —
+  but the `async` in the signature is the contract, not a style choice.
+- Probes are typed since 0.7.0: `points()` returns `Vec<Point>` (an enum,
+  not free strings), `probe` receives a `Point` plus a typed `Payload`, and
+  "no opinion" is the `Verdict::Continue` arm rather than a record with
+  three loose fields. A probe that handles nothing cannot be handed an
+  unknown point.
 - `parameters_json` is a JSON Schema **string**: JSON Schema is a schema
   language tau does not own, so it stays JSON where the message trunk is
   typed.
@@ -154,11 +153,11 @@ cargo build --target wasm32-wasip2 --release
 
 ```
    Compiling wordcount v0.1.0 (…\wordcount)
-    Finished `release` profile [optimized] target(s) in 23.14s
+    Finished `release` profile [optimized] target(s) in 45.68s
 ```
 
-The artifact is `target/wasm32-wasip2/release/wordcount.wasm` — 116 KB
-here. One naming detail: a crate named `my-ext` produces `my_ext.wasm`
+The artifact is `target/wasm32-wasip2/release/wordcount.wasm` — 191 KB
+here (the async ABI plus wit-bindgen 0.62 grew it from 0.6.0's 116 KB). One naming detail: a crate named `my-ext` produces `my_ext.wasm`
 (dashes become underscores), which is exactly how the shipped examples are
 named (`examples/media-tool` → `media_tool.wasm`).
 
@@ -174,6 +173,7 @@ tau --allow-unsigned -e target/wasm32-wasip2/release/wordcount.wasm --demo \
 
 ```
 [tau] built-in tools: bash, edit, find, grep, ls, powershell, read, write
+[tau] skills: none
 [tau] loaded extension: wordcount
 [tau]   tool: wordcount
 
@@ -224,6 +224,10 @@ key generated and trusted: f7fecae971a390ca
   secret: C:\Users\gxh\.tau\keys\f7fecae971a390ca.key
 ```
 
+(That transcript is the original capture: `keygen` is once per machine and
+unchanged since, so the re-run rule leaves it standing — this machine's
+keyring was already populated.)
+
 `keygen` writes the secret to `~/.tau/keys/<fingerprint>.key` and the pubkey
 to `~/.tau/trust/<fingerprint>.pub` — a key you generate is a key you trust.
 The fingerprint is the first 16 hex chars of the pubkey's SHA-256; it is
@@ -237,7 +241,7 @@ tau sign target/wasm32-wasip2/release/wordcount.wasm
 ```
 
 ```
-signed target/wasm32-wasip2/release/wordcount.wasm with f7fecae971a390ca
+signed target/wasm32-wasip2/release/wordcount.wasm with ce9277467d935963
 ```
 
 The signature is an embedded custom section (`tau-signature`), so the file
@@ -257,6 +261,7 @@ Now the run from §3 works unchanged, without the escape hatch:
 
 ```
 [tau] built-in tools: bash, edit, find, grep, ls, powershell, read, write
+[tau] skills: none
 [tau] loaded extension: wordcount
 [tau]   tool: wordcount
 
@@ -305,7 +310,7 @@ i.e. exercise the same bearer dance a real registry does.)
 The push, against `oci://127.0.0.1:8406/test/component:v1`:
 
 ```
-pushed oci://127.0.0.1:8406/test/component:v1 (sha256:ac210b76b27f855cdd3322a7fe2290e5fab28e67663b27fe5583fdc0f2a933ca)
+pushed oci://127.0.0.1:8406/test/component:v1 (sha256:07bca1a0b4d3f705cd86c04dcb58ee65701326cd441a2546fa36590c02ad12b1)
 ```
 
 Loading it back is the same load path as a local file — the bytes are pulled
@@ -314,9 +319,10 @@ checked for signature and trust exactly as in §4:
 
 ```
 [tau] built-in tools: bash, edit, find, grep, ls, powershell, read, write
-[tau] oci: oci://127.0.0.1:8406/test/component:v1 -> sha256:ac210b76… (…\.tau\oci\blobs\sha256_ac210b76…)
-[tau] note: mutable tag — pin @sha256:ac210b76b27f855cdd3322a7fe2290e5fab28e67663b27fe5583fdc0f2a933ca for reproducible loads
-[tau] loaded extension: sha256_ac210b76b27f855cdd3322a7fe2290e5fab28e67663b27fe5583fdc0f2a933ca
+[tau] skills: none
+[tau] oci: oci://127.0.0.1:8406/test/component:v1 -> sha256:07bca1a0… (…\.tau\oci\blobs\sha256_07bca1a0…)
+[tau] note: mutable tag — pin @sha256:07bca1a0b4d3f705cd86c04dcb58ee65701326cd441a2546fa36590c02ad12b1 for reproducible loads
+[tau] loaded extension: sha256_07bca1a0b4d3f705cd86c04dcb58ee65701326cd441a2546fa36590c02ad12b1
 [tau]   tool: wordcount
 
 [tau] tool → wordcount
@@ -330,7 +336,7 @@ mutable tag sees new digests), while blobs are cached under
 `~/.tau/oci/blobs/<sha256:… with : as _>`:
 
 ```bash
-tau -e oci://127.0.0.1:8406/test/component@sha256:ac210b76b27f855cdd3322a7fe2290e5fab28e67663b27fe5583fdc0f2a933ca \
+tau -e oci://127.0.0.1:8406/test/component@sha256:07bca1a0b4d3f705cd86c04dcb58ee65701326cd441a2546fa36590c02ad12b1 \
     --demo -p "count the words in this sentence"
 ```
 
@@ -342,7 +348,7 @@ signature section embeds the signer's pubkey, and `tau trust
 before trusting it. It accepts `oci://` references:
 
 ```
-trusted: f7fecae971a390ca (from oci://127.0.0.1:8406/test/component:v1)
+trusted: ce9277467d935963 (from oci://127.0.0.1:8406/test/component:v1)
 verify this fingerprint out-of-band before relying on it
 ```
 
@@ -388,9 +394,9 @@ that read like something else.
 - **A vendored WIT that no longer matches the host.** After a contract bump
   the refusal names both versions and the fix, which is why it is worth
   vendor *and* re-vendor deliberately:
-  `no exported instance named tau:extension/tools@0.6.0 [component targets
-  tau:extension@0.5.0; this host requires @0.6.0; rebuild with the 0.6.0
-  bindings (wit/tau.wit), see CHANGELOG.md]`.
+  ``no exported instance named `tau:extension/tools@0.7.0` [component targets
+  tau:extension@0.6.0; this host requires @0.7.0; rebuild with the 0.7.0
+  bindings (wit/tau.wit), see CHANGELOG.md]``.
 - **More than one key in the keyring** → `tau sign` refuses until you pass
   `--key <fingerprint>` (see §4).
 - **A rebuild erases the signature.** `tau sign` is a post-build step; a
@@ -404,11 +410,11 @@ that read like something else.
 
 ## Keeping this document honest
 
-Every command above was run as written against tau 0.6.0 — the `tau sign`
-refusal in §4 was re-captured on the fix that followed it, as it says — and
-the two listings were compiled by extracting them from *this file*, not
-copied from a source tree that happens to be in sync. That is also the
-maintenance rule: when the listings or the contract change, re-run the
-document the same way before trusting it. A tutorial that quotes output is a
-tutorial that has to be re-run — `116 KB`, the digest, and `6 words, 32
-characters` are 0.6.0's numbers, and none of them ages well on its own.
+Every command above was run as written against tau 0.7.0 — the §4 `keygen`
+transcript excepted, as marked there — and the two listings were compiled by
+extracting them from *this file*, not copied from a source tree that happens
+to be in sync. That is also the maintenance rule: when the listings or the
+contract change, re-run the document the same way before trusting it. A
+tutorial that quotes output is a tutorial that has to be re-run — `191 KB`,
+the digest, and `6 words, 32 characters` are 0.7.0's numbers, and none of
+them ages well on its own.
