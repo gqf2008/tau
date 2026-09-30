@@ -141,7 +141,9 @@ Caused by:
   的定义与类型命名、`Handle`、`FixedLengthList`、`ErrorContext`）——
   不是「新版已发我们没试」，而是**上游工作树里还没有实现**。
 - **JavaScript / TypeScript**：npm registry 的 `@bytecodealliance/jco` 最新仍是 **1.35.0**
-  （注意：无 scope 的 `jco` 是 2026-01 注册的占位包 1.0.0，占位 bin 存在、暖缓存会掩盖——裸 `npx jco` 在冷机器上跑的是占位桩，构建脚本须指名 scoped 包），
+  （注意：无 scope 的 `jco` 是 2026-01 注册的占位包 1.0.0、带占位 bin——
+  构建脚本此前靠 `npm install` 先装好 scoped 包、npx 本地优先解析才没踩到；
+  脚本与本文命令已改指名 `@bytecodealliance/jco`，去掉这层隐含依赖），
   splicer panic（bindgen.rs:506，无 async-lift）原样未动。
 - **Go**：TinyGo 最新发布仍是 **v0.42.0**（2026-09-01），
   `runtime.wasiOnIdle` 仍未实现。
