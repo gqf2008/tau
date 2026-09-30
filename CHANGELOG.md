@@ -2,6 +2,21 @@
 
 ## [Unreleased]
 
+### Added
+
+- Interactive REPL: the idle-prompt command surface now aligns with pi's
+  slash commands (`docs/repl.md` has the mapping table, scope ruling, and
+  the declared non-goals). New commands: `/session`, `/tree`, `/new`,
+  `/clone`, `/import <path>`, `/export [path]`, `/hotkeys`, `/changelog`;
+  `/compact` accepts optional instructions that steer the summary; `/` +
+  Tab completes command names; `/help` is grouped the way pi groups its
+  list. `/mic` and `/live` stay as tau extension commands; `/exit`
+  remains an alias of `/quit`.
+- `Agent::compact_guided(history, instructions)` (tau-core): `compact`
+  with optional user instructions appended to the summarization request;
+  `compact` is unchanged and delegates. `JsonlStore::path()` exposes the
+  session file the store appends to.
+
 ### Fixed
 
 - `examples/{js,ts}-upper/build.sh`: invoke jco as `@bytecodealliance/jco`

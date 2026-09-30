@@ -331,5 +331,6 @@ digest）、blob 先验 sha256 再落盘、内容寻址缓存命中校验、腐�
 | `docs/oci.md` | OCI 分发链路 |
 | `docs/media.md` | 多模态与 blob 存储 |
 | `docs/realtime-av.md` | 实时音视频：RealtimeSession、WIT world realtime、设备 consent 门类 |
+| `docs/repl.md` | REPL 与 pi 的命令面对齐：对照表、口径、分层挂账 |
 | `docs/wasip3-streams.md` | wasip3 stream 迁移的工具链现状与解锁条件 |
 | `docs/release.md` / `docs/perf.md` | 发布流程 / 性能基线 |

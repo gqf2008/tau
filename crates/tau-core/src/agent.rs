@@ -300,6 +300,18 @@ impl Agent {
     /// originals stay in the session tree. The `before_compaction` probe
     /// may substitute the message set or veto the compaction.
     pub async fn compact(&self, history: &[Message]) -> Result<Message, AgentError> {
+        self.compact_guided(history, None).await
+    }
+
+    /// `compact` with optional user instructions steering the summary
+    /// (pi's `/compact [instructions]`): the notes are appended to the
+    /// summarization request, so the brief emphasizes what the user asked
+    /// to keep.
+    pub async fn compact_guided(
+        &self,
+        history: &[Message],
+        instructions: Option<&str>,
+    ) -> Result<Message, AgentError> {
         use futures::StreamExt;
 
         let messages = match self
@@ -320,19 +332,20 @@ impl Agent {
             Verdict::Continue => history.to_vec(),
         };
 
+        let mut ask = concat!(
+            "Summarize the conversation so far for continuation: ",
+            "the goal, decisions made, open tasks, and key facts. ",
+            "Terse, plain text, no preamble."
+        )
+        .to_string();
+        if let Some(notes) = instructions.map(str::trim).filter(|n| !n.is_empty()) {
+            ask.push_str(&format!(" Additional instructions from the user: {notes}"));
+        }
         let request = Request {
             system: Some(
                 "You condense conversation history into a compact continuation brief.".into(),
             ),
-            messages: [
-                messages,
-                vec![Message::user(concat!(
-                    "Summarize the conversation so far for continuation: ",
-                    "the goal, decisions made, open tasks, and key facts. ",
-                    "Terse, plain text, no preamble."
-                ))],
-            ]
-            .concat(),
+            messages: [messages, vec![Message::user(ask)]].concat(),
             tools: vec![],
         };
         let mut stream = self.model.stream(&request).await;

@@ -788,7 +788,7 @@ pub(crate) fn warn_torn_tail(store: &JsonlStore) {
     }
 }
 
-fn entry_depths(entries: &[SessionEntry]) -> Vec<usize> {
+pub(crate) fn entry_depths(entries: &[SessionEntry]) -> Vec<usize> {
     let mut by_id: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
     entries
         .iter()

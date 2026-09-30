@@ -179,6 +179,11 @@ impl JsonlStore {
         self.torn_tail.as_ref()
     }
 
+    /// The session file this store parses and appends to.
+    pub fn path(&self) -> &Path {
+        &self.path
+    }
+
     /// Attach a blob store: large media is externalized to
     /// `MediaSource::Blob` at append time (see `blobs` module).
     pub fn with_blobs(mut self, store: crate::blobs::BlobStore) -> Self {

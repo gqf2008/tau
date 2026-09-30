@@ -8,7 +8,12 @@
 //! end), `!`-prefixed text steers (lands after the current turn's tool
 //! results), Ctrl-C aborts the run. At an idle prompt: `/help`, `/quit`,
 //! Ctrl-D.
+//!
+//! The idle-prompt command surface is aligned with pi's interactive
+//! commands (owner ruling 2026-10-01, thread `repl-pi-alignment`); the
+//! mapping table and the deliberate non-goals live in `docs/repl.md`.
 
+use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
@@ -41,6 +46,137 @@ pub(crate) enum LineEvent {
     Eof,
 }
 
+// ---- the idle-prompt command surface (pi-aligned, docs/repl.md) ------------
+
+/// pi's grouping for the command list (slash-commands.md): the headers
+/// `/help` prints, in pi's order, plus tau's own extension group.
+#[derive(Clone, Copy, PartialEq)]
+enum Group {
+    Session,
+    Export,
+    Runtime,
+    Tau,
+}
+
+/// One idle-prompt command: usage as `/help` shows it, one-line description,
+/// group. The first whitespace/`[`-delimited token of `usage` is the word
+/// Tab-completion offers.
+struct SlashCommand {
+    usage: &'static str,
+    desc: &'static str,
+    group: Group,
+}
+
+const COMMANDS: &[SlashCommand] = &[
+    SlashCommand { usage: "/new", desc: "start a fresh session file", group: Group::Session },
+    SlashCommand { usage: "/session", desc: "session file, entries, head, model", group: Group::Session },
+    SlashCommand { usage: "/tree", desc: "print the session tree, head marked", group: Group::Session },
+    SlashCommand { usage: "/fork [#index|id-prefix]", desc: "fork history at an older entry", group: Group::Session },
+    SlashCommand { usage: "/clone", desc: "duplicate the session file, continue in the copy", group: Group::Session },
+    SlashCommand { usage: "/compact [instructions]", desc: "compact context; instructions steer the summary", group: Group::Session },
+    SlashCommand { usage: "/import <path>", desc: "open another session JSONL and continue it here", group: Group::Session },
+    SlashCommand { usage: "/export [path]", desc: "write the session JSONL out (default: export-<id>.jsonl)", group: Group::Export },
+    SlashCommand { usage: "/hotkeys", desc: "key bindings", group: Group::Runtime },
+    SlashCommand { usage: "/changelog", desc: "recent changelog entries (nearest CHANGELOG.md)", group: Group::Runtime },
+    SlashCommand { usage: "/help", desc: "this list", group: Group::Runtime },
+    SlashCommand { usage: "/quit", desc: "exit (alias: /exit)", group: Group::Runtime },
+    SlashCommand { usage: "/mic <sec> [sine]", desc: "record a voice message (sine synthesizes)", group: Group::Tau },
+    SlashCommand { usage: "/live <sec> [sine]", desc: "full-duplex live session", group: Group::Tau },
+];
+
+/// The command word of a usage string ("/fork [#index|id-prefix]" → "/fork").
+fn command_word(usage: &str) -> &str {
+    usage
+        .split([' ', '['].as_ref())
+        .next()
+        .unwrap_or(usage)
+}
+
+/// Tab-completion candidates for a `/`-prefixed line start.
+fn slash_candidates(prefix: &str) -> Vec<String> {
+    COMMANDS
+        .iter()
+        .map(|c| command_word(c.usage))
+        .filter(|word| word.starts_with(prefix) && *word != prefix)
+        .map(str::to_string)
+        .collect()
+}
+
+/// `/help`: the full command list, grouped the way pi groups it.
+fn print_help(print: &impl Fn(&str)) {
+    for (group, header) in [
+        (Group::Session, "sessions and context:"),
+        (Group::Export, "export and share:"),
+        (Group::Runtime, "runtime and project:"),
+        (Group::Tau, "tau extensions:"),
+    ] {
+        print(header);
+        for c in COMMANDS.iter().filter(|c| c.group == group) {
+            print(&format!("  {:<26} {}", c.usage, c.desc));
+        }
+    }
+    print("type / then Tab to complete · mid-run: !text steers, text follows up, Ctrl-C aborts");
+}
+
+/// `/changelog`: the first two sections of the nearest CHANGELOG.md
+/// (cwd, then beside the executable), or a pointer when none is around —
+/// the installed binary does not carry the file.
+fn print_changelog(print: &impl Fn(&str)) {
+    let mut candidates = vec![PathBuf::from("CHANGELOG.md")];
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent()
+    {
+        candidates.push(dir.join("CHANGELOG.md"));
+        candidates.push(dir.join("../CHANGELOG.md"));
+    }
+    for candidate in &candidates {
+        if let Ok(text) = std::fs::read_to_string(candidate) {
+            print(&format!("changelog ({}):", candidate.display()));
+            let mut sections = 0;
+            for line in text.lines() {
+                if line.starts_with("## [") {
+                    sections += 1;
+                    if sections > 2 {
+                        break;
+                    }
+                }
+                print(&format!("  {line}"));
+            }
+            return;
+        }
+    }
+    print("changelog: no CHANGELOG.md found here — see https://github.com/gqf2008/tau/blob/main/CHANGELOG.md");
+}
+
+/// Tab-completion for slash commands (rustyline calls it on the line so
+/// far); everything else about the editor stays stock.
+struct SlashHelper;
+
+impl rustyline::completion::Completer for SlashHelper {
+    type Candidate = String;
+
+    fn complete(
+        &self,
+        line: &str,
+        pos: usize,
+        _ctx: &rustyline::Context<'_>,
+    ) -> rustyline::Result<(usize, Vec<String>)> {
+        let prefix = &line[..pos];
+        if !prefix.starts_with('/') {
+            return Ok((pos, Vec::new()));
+        }
+        Ok((0, slash_candidates(prefix)))
+    }
+}
+
+impl rustyline::hint::Hinter for SlashHelper {
+    type Hint = String;
+}
+
+impl rustyline::highlight::Highlighter for SlashHelper {}
+impl rustyline::validate::Validator for SlashHelper {}
+impl rustyline::Helper for SlashHelper {}
+
 /// Entry point from main: build the rustyline input thread and run the
 /// loop on the real terminal.
 /// `base` is the fork base from --continue-from: the parent the next
@@ -60,7 +196,9 @@ pub(crate) async fn interactive(
 
     // rustyline owns stdin on a dedicated thread; readline blocks.
     std::thread::spawn(move || {
-        let mut editor = rustyline::DefaultEditor::new().expect("line editor");
+        let mut editor =
+            rustyline::Editor::<SlashHelper, _>::new().expect("line editor");
+        editor.set_helper(Some(SlashHelper));
         let history_path = tau_core::BlobStore::default_dir()
             .parent()
             .map(|p| p.join("repl_history.txt"));
@@ -295,6 +433,10 @@ pub(crate) async fn drive(
 
     // The renderer is attached; session_start observes now so its
     // notices render (observe leg, probes.md — verdicts ignored).
+    let model_label = session_start
+        .as_ref()
+        .map(|facts| facts.model.clone())
+        .unwrap_or_else(|| "(unknown)".to_string());
     if let Some(facts) = session_start {
         agent
             .observe(ProbePoint::SessionStart, ProbePayload::SessionStart(facts))
@@ -347,8 +489,7 @@ pub(crate) async fn drive(
                             break;
                         }
                         "/help" => {
-                            print("commands: /help /compact /fork [#index|id-prefix] /mic <sec> [sine] /live <sec> [sine] /quit /exit");
-                            print("  !<text> while running: steer; plain text while running: follow-up");
+                            print_help(&print);
                             continue;
                         }
                         // Phase 0 push-to-talk (docs/realtime-av.md):
@@ -405,13 +546,15 @@ pub(crate) async fn drive(
                             }
                             continue;
                         }
-                        "/compact" => {
+                        line if line == "/compact" || line.starts_with("/compact ") => {
+                            let notes = text.strip_prefix("/compact").unwrap().trim();
+                            let notes = if notes.is_empty() { None } else { Some(notes) };
                             if history.is_empty() {
                                 print("nothing to compact");
                                 continue;
                             }
                             print("[tau] compacting…");
-                            match agent.compact(&history).await {
+                            match agent.compact_guided(&history, notes).await {
                                 Ok(summary) => {
                                     let entry = tau_core::SessionEntry {
                                         id: tau_core::session::new_id(),
@@ -538,6 +681,187 @@ pub(crate) async fn drive(
                                     "[tau] this model has no realtime session                                      (Model::realtime → None — try --demo)",
                                 ),
                             }
+                            continue;
+                        }
+                        // ---- pi-aligned session commands (docs/repl.md) ----
+                        "/session" => {
+                            let entries = store.entries();
+                            print(&format!("session: {}", store.path().display()));
+                            print(&format!(
+                                "  entries: {} · context: {} messages · model: {model_label}",
+                                entries.len(),
+                                history.len()
+                            ));
+                            match store.head() {
+                                Some(head) => print(&format!(
+                                    "  head: {} {}",
+                                    &head.id[..12.min(head.id.len())],
+                                    tau_core::session::entry_summary(head)
+                                )),
+                                None => print("  head: (empty session)"),
+                            }
+                            continue;
+                        }
+                        "/tree" => {
+                            let entries = store.entries();
+                            if entries.is_empty() {
+                                print("(empty session)");
+                                continue;
+                            }
+                            let head = store.head().map(|h| h.id.clone());
+                            let depths = crate::entry_depths(entries);
+                            for (index, entry) in entries.iter().enumerate() {
+                                let mark = if Some(&entry.id) == head.as_ref() {
+                                    " ← head"
+                                } else {
+                                    ""
+                                };
+                                print(&format!(
+                                    "{}#{index} {} {}{mark}",
+                                    "  ".repeat(depths[index]),
+                                    &entry.id[..12.min(entry.id.len())],
+                                    tau_core::session::entry_summary(entry)
+                                ));
+                            }
+                            continue;
+                        }
+                        "/new" => {
+                            if live.is_some() {
+                                print("[tau] live session active — end it first (Ctrl-C or /quit)");
+                                continue;
+                            }
+                            let old = store.path().to_path_buf();
+                            let dir = old.parent().map(PathBuf::from).unwrap_or_default();
+                            let path = dir.join(format!(
+                                "session-{}.jsonl",
+                                &tau_core::session::new_id()[..8]
+                            ));
+                            match JsonlStore::open(&path) {
+                                Ok(fresh) => {
+                                    store = fresh;
+                                    history = Vec::new();
+                                    parent = None;
+                                    print(&format!("[tau] new session: {}", path.display()));
+                                    print(&format!(
+                                        "  (previous: {} — /import it or restart with --session to return)",
+                                        old.display()
+                                    ));
+                                }
+                                Err(e) => print(&format!("[tau] /new failed: {e}")),
+                            }
+                            continue;
+                        }
+                        "/clone" => {
+                            if live.is_some() {
+                                print("[tau] live session active — end it first (Ctrl-C or /quit)");
+                                continue;
+                            }
+                            let source = store.path().to_path_buf();
+                            let dir = source.parent().map(PathBuf::from).unwrap_or_default();
+                            let path = dir.join(format!(
+                                "session-{}.jsonl",
+                                &tau_core::session::new_id()[..8]
+                            ));
+                            let cloned = std::fs::copy(&source, &path)
+                                .map_err(|e| e.to_string())
+                                .and_then(|_| {
+                                    JsonlStore::open(&path).map_err(|e| e.to_string())
+                                });
+                            match cloned {
+                                // history/parent stay: the copy holds the
+                                // same entries, so the parent id resolves.
+                                Ok(copy) => {
+                                    store = copy;
+                                    print(&format!(
+                                        "[tau] cloned into {} — continuing there",
+                                        path.display()
+                                    ));
+                                }
+                                Err(e) => print(&format!("[tau] /clone failed: {e}")),
+                            }
+                            continue;
+                        }
+                        line if line == "/import" || line.starts_with("/import ") => {
+                            if live.is_some() {
+                                print("[tau] live session active — end it first (Ctrl-C or /quit)");
+                                continue;
+                            }
+                            let arg = text.strip_prefix("/import").unwrap().trim();
+                            if arg.is_empty() {
+                                print("usage: /import <path-to-session.jsonl>");
+                                continue;
+                            }
+                            let path = PathBuf::from(arg);
+                            if !path.exists() {
+                                print(&format!("[tau] no such session file: {}", path.display()));
+                                continue;
+                            }
+                            match JsonlStore::open(&path) {
+                                Ok(opened) => {
+                                    if let Some(torn) = opened.torn_tail() {
+                                        print(&format!(
+                                            "[tau] discarded a torn tail at line {} ({} bytes)",
+                                            torn.line, torn.discarded_bytes
+                                        ));
+                                    }
+                                    let count = opened.entries().len();
+                                    let head = opened.head().map(|h| h.id.clone());
+                                    let branch = match &head {
+                                        Some(id) => {
+                                            opened.active_branch(id).unwrap_or_default()
+                                        }
+                                        None => Vec::new(),
+                                    };
+                                    store = opened;
+                                    parent = head;
+                                    history = branch;
+                                    print(&format!(
+                                        "[tau] imported {} — {} entries, {} messages in context",
+                                        path.display(),
+                                        count,
+                                        history.len()
+                                    ));
+                                }
+                                Err(e) => print(&format!("[tau] import failed: {e}")),
+                            }
+                            continue;
+                        }
+                        line if line == "/export" || line.starts_with("/export ") => {
+                            let arg = text.strip_prefix("/export").unwrap().trim();
+                            let target = if arg.is_empty() {
+                                let dir =
+                                    store.path().parent().map(PathBuf::from).unwrap_or_default();
+                                dir.join(format!(
+                                    "export-{}.jsonl",
+                                    &tau_core::session::new_id()[..8]
+                                ))
+                            } else {
+                                PathBuf::from(arg)
+                            };
+                            if target.exists() {
+                                print(&format!(
+                                    "[tau] not overwriting existing file: {}",
+                                    target.display()
+                                ));
+                                continue;
+                            }
+                            match std::fs::copy(store.path(), &target) {
+                                Ok(bytes) => print(&format!(
+                                    "[tau] exported {} ({} bytes, JSONL)",
+                                    target.display(),
+                                    bytes
+                                )),
+                                Err(e) => print(&format!("[tau] export failed: {e}")),
+                            }
+                            continue;
+                        }
+                        "/hotkeys" => {
+                            print("keys: Enter send · ↑/↓ prompt history · Tab complete /commands");
+                            print("  Ctrl-C idle: hint · Ctrl-C mid-run: abort the turn (barge-in when live) · Ctrl-D: exit");
+                            continue;
+                        }
+                        "/changelog" => {
+                            print_changelog(&print);
                             continue;
                         }
                         _ if text.starts_with('/') => {
@@ -1127,7 +1451,7 @@ mod tests {
         task.await.unwrap().unwrap();
 
         let text = capture.text();
-        assert!(text.contains("commands:"), "output: {text}");
+        assert!(text.contains("sessions and context:"), "output: {text}");
         assert!(text.contains("unknown command /bogus"), "output: {text}");
     }
 
@@ -1143,6 +1467,281 @@ mod tests {
         })
         .await
         .unwrap_or_else(|_| panic!("output gains {needle:?}: {}", capture.text()));
+    }
+
+    // ---- pi-aligned command surface (thread repl-pi-alignment) -------------
+
+    /// Spawn a drive loop on a temp session; returns (dir, input, capture,
+    /// join). StaticModel answers every turn with "tau is alive.".
+    fn rig() -> (
+        tempfile::TempDir,
+        UnboundedSender<LineEvent>,
+        Arc<Capture>,
+        tokio::task::JoinHandle<Result<()>>,
+    ) {
+        let (dir, store) = store();
+        let agent = Arc::new(Agent::new(Box::new(StaticModel), ToolRegistry::new()));
+        let capture = Arc::new(Capture {
+            lines: Mutex::new(Vec::new()),
+            ready: Notify::new(),
+        });
+        let (tx, rx) = unbounded_channel();
+        let printer = capture.printer();
+        let task = tokio::spawn(drive(
+            agent,
+            store,
+            Vec::new(),
+            None,
+            rx,
+            printer,
+            None,
+            unbounded_channel().1,
+            true,
+        ));
+        (dir, tx, capture, task)
+    }
+
+    /// The .jsonl session files in `dir` other than session.jsonl itself.
+    fn extra_session_files(dir: &std::path::Path) -> Vec<PathBuf> {
+        let mut files: Vec<PathBuf> = std::fs::read_dir(dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.path())
+            .filter(|path| {
+                path.extension().is_some_and(|ext| ext == "jsonl")
+                    && path.file_name().unwrap() != "session.jsonl"
+            })
+            .collect();
+        files.sort();
+        files
+    }
+
+    #[tokio::test]
+    async fn help_lists_pi_groups_and_all_commands() {
+        let (_dir, tx, capture, task) = rig();
+        tx.send(LineEvent::Line("/help".into())).unwrap();
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        let text = capture.text();
+        for header in [
+            "sessions and context:",
+            "export and share:",
+            "runtime and project:",
+            "tau extensions:",
+        ] {
+            assert!(text.contains(header), "help lacks {header}: {text}");
+        }
+        for command in [
+            "/new", "/session", "/tree", "/fork", "/clone", "/compact", "/import", "/export",
+            "/hotkeys", "/changelog", "/help", "/quit", "/mic", "/live",
+        ] {
+            assert!(text.contains(command), "help lacks {command}: {text}");
+        }
+    }
+
+    #[tokio::test]
+    async fn session_reports_file_entries_and_head() {
+        let (_dir, tx, capture, task) = rig();
+        tx.send(LineEvent::Line("one".into())).unwrap();
+        capture.ready.notified().await;
+        tx.send(LineEvent::Line("/session".into())).unwrap();
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        let text = capture.text();
+        assert!(text.contains("session:"), "output: {text}");
+        assert!(text.contains("entries: 2"), "output: {text}");
+        assert!(text.contains("context: 2 messages"), "output: {text}");
+        assert!(text.contains("head:"), "output: {text}");
+    }
+
+    #[tokio::test]
+    async fn tree_indents_entries_and_marks_head() {
+        let (_dir, tx, capture, task) = rig();
+        tx.send(LineEvent::Line("one".into())).unwrap();
+        capture.ready.notified().await;
+        tx.send(LineEvent::Line("/tree".into())).unwrap();
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        let text = capture.text();
+        assert!(text.contains("#0"), "output: {text}");
+        assert!(text.contains("#1"), "output: {text}");
+        assert!(text.contains("← head"), "output: {text}");
+    }
+
+    #[tokio::test]
+    async fn new_starts_a_fresh_session_file() {
+        let (dir, tx, capture, task) = rig();
+        tx.send(LineEvent::Line("one".into())).unwrap();
+        capture.ready.notified().await;
+        tx.send(LineEvent::Line("/new".into())).unwrap();
+        wait_for(&capture, "[tau] new session:").await;
+        tx.send(LineEvent::Line("two".into())).unwrap();
+        capture.ready.notified().await;
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        // The old file holds only the first turn; the second turn landed
+        // in the fresh file.
+        let old = JsonlStore::open(dir.path().join("session.jsonl")).unwrap();
+        assert_eq!(old.entries().len(), 2, "old session grew after /new");
+        let fresh = extra_session_files(dir.path());
+        assert_eq!(fresh.len(), 1, "expected one new session file: {fresh:?}");
+        let fresh = JsonlStore::open(&fresh[0]).unwrap();
+        assert_eq!(fresh.entries().len(), 2, "fresh file: {:?}", fresh.entries());
+        let head = fresh.head().unwrap().id.clone();
+        let branch: Vec<String> = fresh
+            .active_branch(&head)
+            .unwrap()
+            .iter()
+            .map(|m| m.text())
+            .collect();
+        assert_eq!(branch, vec!["two".to_string(), "tau is alive.".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn clone_duplicates_and_continues_in_the_copy() {
+        let (dir, tx, capture, task) = rig();
+        tx.send(LineEvent::Line("one".into())).unwrap();
+        capture.ready.notified().await;
+        tx.send(LineEvent::Line("/clone".into())).unwrap();
+        wait_for(&capture, "[tau] cloned into").await;
+        tx.send(LineEvent::Line("two".into())).unwrap();
+        capture.ready.notified().await;
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        // The original is frozen at the first turn; the copy has both.
+        let old = JsonlStore::open(dir.path().join("session.jsonl")).unwrap();
+        assert_eq!(old.entries().len(), 2, "original changed after /clone");
+        let copies = extra_session_files(dir.path());
+        assert_eq!(copies.len(), 1, "expected one clone file: {copies:?}");
+        let copy = JsonlStore::open(&copies[0]).unwrap();
+        assert_eq!(copy.entries().len(), 4, "copy: {:?}", copy.entries());
+    }
+
+    #[tokio::test]
+    async fn import_switches_to_the_given_session_file() {
+        let (dir, tx, capture, task) = rig();
+        // A foreign session file with one old turn.
+        let foreign_path = dir.path().join("foreign.jsonl");
+        let mut foreign = JsonlStore::open(&foreign_path).unwrap();
+        foreign
+            .append(tau_core::SessionEntry {
+                id: tau_core::session::new_id(),
+                parent: None,
+                kind: tau_core::EntryKind::Message {
+                    message: Message::user("an old turn"),
+                },
+            })
+            .unwrap();
+        drop(foreign);
+
+        tx.send(LineEvent::Line(format!("/import {}", foreign_path.display())))
+            .unwrap();
+        wait_for(&capture, "[tau] imported").await;
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        let text = capture.text();
+        assert!(
+            text.contains("1 entries, 1 messages in context"),
+            "output: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn export_writes_a_copy_and_refuses_to_overwrite() {
+        let (dir, tx, capture, task) = rig();
+        tx.send(LineEvent::Line("one".into())).unwrap();
+        capture.ready.notified().await;
+        let target = dir.path().join("out.jsonl");
+        tx.send(LineEvent::Line(format!("/export {}", target.display())))
+            .unwrap();
+        wait_for(&capture, "[tau] exported").await;
+        tx.send(LineEvent::Line(format!("/export {}", target.display())))
+            .unwrap();
+        wait_for(&capture, "not overwriting").await;
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        let exported = JsonlStore::open(&target).unwrap();
+        assert_eq!(exported.entries().len(), 2, "export: {:?}", exported.entries());
+    }
+
+    /// Records the text of every request; the compaction instructions
+    /// must reach the summarizer (pi's `/compact [instructions]`).
+    struct RecordingModel {
+        seen: Arc<Mutex<Vec<String>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl Model for RecordingModel {
+        async fn stream(&self, req: &Request) -> futures::stream::BoxStream<'static, ModelEvent> {
+            use futures::StreamExt;
+            let text: Vec<String> = req.messages.iter().map(|m| m.text()).collect();
+            self.seen.lock().unwrap().push(text.join("\n---\n"));
+            futures::stream::iter([
+                ModelEvent::TextDelta {
+                    text: "the brief.".into(),
+                },
+                ModelEvent::Done {
+                    stop: StopReason::Stop,
+                },
+            ])
+            .boxed()
+        }
+    }
+
+    #[tokio::test]
+    async fn compact_passes_instructions_to_the_summarizer() {
+        let (_dir, store) = store();
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let agent = Arc::new(Agent::new(
+            Box::new(RecordingModel { seen: seen.clone() }),
+            ToolRegistry::new(),
+        ));
+        let capture = Arc::new(Capture {
+            lines: Mutex::new(Vec::new()),
+            ready: Notify::new(),
+        });
+        let (tx, rx) = unbounded_channel();
+        let printer = capture.printer();
+        let task = tokio::spawn(drive(
+            agent,
+            store,
+            Vec::new(),
+            None,
+            rx,
+            printer,
+            None,
+            unbounded_channel().1,
+            true,
+        ));
+        tx.send(LineEvent::Line("one".into())).unwrap();
+        capture.ready.notified().await;
+        tx.send(LineEvent::Line("/compact keep the cats".into())).unwrap();
+        wait_for(&capture, "compacted").await;
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        let seen = seen.lock().unwrap();
+        assert!(
+            seen.iter().any(|request| request.contains("keep the cats")),
+            "instructions never reached the summarizer: {seen:?}"
+        );
+    }
+
+    #[test]
+    fn slash_candidates_complete_on_slash_prefix() {
+        assert_eq!(slash_candidates("/f"), vec!["/fork".to_string()]);
+        let all = slash_candidates("/");
+        assert_eq!(all.len(), COMMANDS.len(), "every command completes: {all:?}");
+        assert!(all.contains(&"/quit".to_string()));
+        assert_eq!(slash_candidates("/q"), vec!["/quit".to_string()]);
+        assert!(slash_candidates("/zzz").is_empty());
     }
 
     #[tokio::test]
