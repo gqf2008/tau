@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [0.7.0] — 2026-09-30
 
 ### Breaking — contract `tau:extension@0.7.0`: exports that wait are async, probes carry types, resources replace handles
 

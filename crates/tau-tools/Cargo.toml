@@ -10,7 +10,7 @@ categories.workspace = true
 description = "Built-in native tools for the tau agent harness (read/write/edit/grep/find/ls/bash/powershell)"
 
 [dependencies]
-tau-core = { path = "../tau-core", version = "0.6.0" }
+tau-core = { path = "../tau-core", version = "0.7.0" }
 serde_json.workspace = true
 async-trait.workspace = true
 # The shell tools wait on a child process with `spawn_blocking`.

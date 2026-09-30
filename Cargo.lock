@@ -3290,7 +3290,7 @@ checksum = "adb6935a6f5c20170eeceb1a3835a49e12e19d792f6dd344ccc76a985ca5a6ca"
 
 [[package]]
 name = "tau-anthropic"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3305,7 +3305,7 @@ dependencies = [
 
 [[package]]
 name = "tau-cli"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "agent-client-protocol",
  "anyhow",
@@ -3329,7 +3329,7 @@ dependencies = [
 
 [[package]]
 name = "tau-core"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3346,7 +3346,7 @@ dependencies = [
 
 [[package]]
 name = "tau-ext"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3370,7 +3370,7 @@ dependencies = [
 
 [[package]]
 name = "tau-openai"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-stream",
  "async-trait",
@@ -3385,7 +3385,7 @@ dependencies = [
 
 [[package]]
 name = "tau-tools"
-version = "0.6.0"
+version = "0.7.0"
 dependencies = [
  "async-trait",
  "dirs",
