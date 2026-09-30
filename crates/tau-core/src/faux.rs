@@ -186,6 +186,21 @@ impl Model for FauxModel {
     }
 
     async fn stream(&self, req: &Request) -> BoxStream<'static, ModelEvent> {
+        // `TAU_DEMO_STALL_MS`: hold the answer for N ms before streaming it.
+        // The faux model replies in nanoseconds, which no real provider
+        // does — a gate leg that needs the run to stay alive while a
+        // host-side channel delivers (the IM loopback's inbound frame
+        // racing the guest's pump) sets this so the call point is not
+        // raced out of existence. Same species as `TAU_ACP_STALL_MS`;
+        // the parse rule is the budget knobs': anything that is not a
+        // positive number means no stall, never a panic.
+        if let Some(ms) = std::env::var("TAU_DEMO_STALL_MS")
+            .ok()
+            .and_then(|v| v.trim().parse::<u64>().ok())
+            .filter(|&ms| ms > 0)
+        {
+            tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        }
         // Demo rounds are synthesized from the request, not scripted.
         if self.demo.load(std::sync::atomic::Ordering::Relaxed) {
             return stream::iter(demo_round(req, self.demo_pick.as_deref())).boxed();

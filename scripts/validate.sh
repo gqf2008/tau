@@ -885,13 +885,18 @@ IM_PORT=$(sed -n 's/^im mock ready //p' im_mock.log)
 # the faux model owns the reply wording. The mapping config file
 # (docs/im-channels.md) is written once the mock's port is known — the
 # channel endpoint must equal the consented TAU_MCP_URL.
+# TAU_DEMO_STALL_MS on all three runs: the faux model answers in
+# nanoseconds, so the single in-run pump at after_response races the host
+# ws actor delivering the frame the mock pushed at connect. A real provider
+# answers in seconds; the stall restores that window (the pump semantics
+# under test are unchanged — only the demo's instant answer is slowed).
 cat > im-config.json <<CONFIG
 {"version": 1, "channels": [{"id": "feishu-loopback", "platform": "feishu",
   "endpoint": "ws://127.0.0.1:$IM_PORT/im",
   "chats": {"loopback-c1": {"session": ".tau/sessions/feishu-loopback-c1.jsonl", "threads": "branch"}},
   "users": {"allow": ["loopback-user"]}}]}
 CONFIG
-OUT="$(TAU_IM_CONFIG="$WORK/im-config.json" "$TAU" --allow-unsigned --mcp-bridge "$FEISHU"     --mcp-url "ws://127.0.0.1:$IM_PORT/im" --allow-inject --demo -p "hi" 2>&1)" || fail "im run: $OUT"
+OUT="$(TAU_IM_CONFIG="$WORK/im-config.json" TAU_DEMO_STALL_MS=500 "$TAU" --allow-unsigned --mcp-bridge "$FEISHU"     --mcp-url "ws://127.0.0.1:$IM_PORT/im" --allow-inject --demo -p "hi" 2>&1)" || fail "im run: $OUT"
 echo "$OUT" | grep -q "steer: .IM chat loopback-c1"     || fail "IM message was not steered into the session: $OUT"
 echo "$OUT" | grep -q "chat loopback-c1 → .tau/sessions/feishu-loopback-c1.jsonl"     || fail "session mapping did not come from the config file: $OUT"
 echo "$OUT" | grep -q "feishu: reply posted to loopback-c1"     || fail "reply was not posted back: $OUT"
@@ -909,7 +914,7 @@ done
 IM_PORT=$(sed -n 's/^im mock ready //p' im_mock_intruder.log)
 [ -n "$IM_PORT" ] || fail "im mock (identity leg) did not start: $(cat im_mock_intruder.log)"
 sed "s/endpoint\": \"ws:\/\/127.0.0.1:[0-9]*/endpoint\": \"ws:\/\/127.0.0.1:$IM_PORT/" im-config.json > im-config-intruder.json
-OUT="$(TAU_IM_CONFIG="$WORK/im-config-intruder.json" "$TAU" --allow-unsigned --mcp-bridge "$FEISHU"     --mcp-url "ws://127.0.0.1:$IM_PORT/im" --allow-inject --demo -p "hi" 2>&1)" || fail "im identity run: $OUT"
+OUT="$(TAU_IM_CONFIG="$WORK/im-config-intruder.json" TAU_DEMO_STALL_MS=500 "$TAU" --allow-unsigned --mcp-bridge "$FEISHU"     --mcp-url "ws://127.0.0.1:$IM_PORT/im" --allow-inject --demo -p "hi" 2>&1)" || fail "im identity run: $OUT"
 kill "$IM_MOCK_PID" 2> /dev/null || true
 echo "$OUT" | grep -q "feishu: ignored message (chat loopback-c1 configured: true, user intruder-user allowed: false)"     || fail "unauthorized user was not ignored: $OUT"
 echo "$OUT" | grep -q "steer: .IM chat"     && fail "unauthorized user was steered into the session: $OUT"
@@ -929,7 +934,7 @@ IM_PORT=$(sed -n 's/^im mock ready //p' im_mock2.log)
 # fail-closed identity gate eats the message before steer is even
 # attempted, and this leg would stop measuring injection consent.
 sed "s/endpoint\": \"ws:\/\/127.0.0.1:[0-9]*/endpoint\": \"ws:\/\/127.0.0.1:$IM_PORT/" im-config.json > im-config-refusal.json
-OUT="$(TAU_IM_CONFIG="$WORK/im-config-refusal.json" "$TAU" --allow-unsigned --mcp-bridge "$FEISHU"     --mcp-url "ws://127.0.0.1:$IM_PORT/im" --demo -p "hi" 2>&1)" || fail "im refusal run: $OUT"
+OUT="$(TAU_IM_CONFIG="$WORK/im-config-refusal.json" TAU_DEMO_STALL_MS=500 "$TAU" --allow-unsigned --mcp-bridge "$FEISHU"     --mcp-url "ws://127.0.0.1:$IM_PORT/im" --demo -p "hi" 2>&1)" || fail "im refusal run: $OUT"
 kill "$IM_MOCK_PID" 2> /dev/null || true
 echo "$OUT" | grep -q "feishu: steer refused: session injection not consented"     || fail "unconsented steer was not refused: $OUT"
 grep -q "IM REPLY: " im_mock2.log     && fail "reply left without inject consent: $(cat im_mock2.log)"
