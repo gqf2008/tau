@@ -9,6 +9,9 @@
   upstream release and its `main` still `todo!()`s the async paths the C++
   cell needs; jco still 1.35.0; TinyGo still v0.42.0). Matrix unchanged: C
   and Python pass, nothing rebuilt this round.
+- `docs/release.md`: the post-publish acceptance loop now lists only the
+  components the zip actually ships (`upper`, `c_upper`); cpp/go rejoin when
+  their toolchains unblock.
 
 ## [0.7.0] — 2026-09-30
 
