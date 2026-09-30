@@ -1,5 +1,15 @@
 # Changelog
 
+## [Unreleased]
+
+### Docs
+
+- `docs/wasm-languages.md`: dated 2026-09-30 toolchain recheck of the three
+  blocked cells — all blockers stand (wit-bindgen v0.62.0 is still the latest
+  upstream release and its `main` still `todo!()`s the async paths the C++
+  cell needs; jco still 1.35.0; TinyGo still v0.42.0). Matrix unchanged: C
+  and Python pass, nothing rebuilt this round.
+
 ## [0.7.0] — 2026-09-30
 
 ### Breaking — contract `tau:extension@0.7.0`: exports that wait are async, probes carry types, resources replace handles

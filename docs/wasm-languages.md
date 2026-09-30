@@ -131,6 +131,25 @@ Caused by:
 版本门禁两个方向都硬（0.4.0 轮已留过反向实录），所以**「产物还在」不等于
 「能跑」**：矩阵的 ✅ 只在被重建的那一轮成立。
 
+**0.7.0 工具链复查（2026-09-30）**：照上轮留下的「下一轮先看这几个字符串
+有没有变」，把三处工具链缺口的上游逐个核对到最新，结论：**全部原地未动**。
+
+- **C++**：上游 bytecodealliance/wit-bindgen 最新发布仍是 **v0.62.0**
+  （2026-09-10，即本矩阵所试版本）。进一步实读上游 `main` 分支的
+  `crates/cpp/src/lib.rs`：13 处 `todo!()` 仍钉在矩阵需要的路径上
+  （三个 async `FunctionKind`、三个 async `AbiVariant`、`Future`/`Stream`
+  的定义与类型命名、`Handle`、`FixedLengthList`、`ErrorContext`）——
+  不是「新版已发我们没试」，而是**上游工作树里还没有实现**。
+- **JavaScript / TypeScript**：npm registry 的 jco 最新仍是 **1.35.0**，
+  splicer panic（bindgen.rs:506，无 async-lift）原样未动。
+- **Go**：TinyGo 最新发布仍是 **v0.42.0**（2026-09-01），
+  `runtime.wasiOnIdle` 仍未实现。
+
+矩阵因此不变：✅ 仍只有 C 与 Python 两格，本轮未重建任何产物。下次复查
+触发条件＝上游三者任一发布新版。查询口径备忘（本机实测）：crates.io API
+对本机 403，rsproxy 稀疏索引对 wit-bindgen 系路径 404；可靠来源是 GitHub
+Releases（wit-bindgen、TinyGo）与 npm registry（jco）。
+
 ## C —— 零依赖 freestanding 路线
 
 不需要任何 wasi sysroot：clang 直出 freestanding 核心模块
