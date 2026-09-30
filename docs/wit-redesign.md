@@ -367,3 +367,24 @@ Promise/AsyncIterable）。**这也没证明什么**：`wit-bindgen-cpp` 缺的�
 **注（Jev 第二意见未取得）**：本轮按指示把上述判断交给 Jev 复核，但本机没有可用凭据——
 环境无 `OPENROUTER_API_KEY`、`~/.agents/skills/keepassxc/scripts/kp.sh` 不存在、技能根也没有
 `key.txt`——因此**没有第二意见**，以上是 agent 依据 §5 实测证据与已落地工作作出的裁定。
+
+## 9. 期 4（1.0.0）出口条件（补记，2026-09-30）
+
+§8 定夺 3 留话「1.0.0 留到期 4 之后——可以写成期 4 的出口条件」。本节即该出口条件
+的成文裁定：经协作层 thread `stage-4-exit-criteria` 提案（每项附可选档），以 Jev
+（typesafe/jev-1.13-20260917，四问并行：A2 0.87 / B1 0.97 / C p=0.79 / D p=0.68）为
+第二意见，owner 于 2026-09-30 裁定如下。四项为**合取**条件；1.0.0 发布本身仍按惯例
+须 owner 当次授权。
+
+1. **语言矩阵口径：务实（A2）。** ≥3 种语言全绿、其余格挂「上游阻塞＋复查触发条件」
+   即可议 1.0.0。现状 2 格（C、Python），差 1 格。复查触发条件沿用
+   `docs/wasm-languages.md` 的 2026-09-30 复查段：上游三者（wit-bindgen cpp 生成器 /
+   `@bytecodealliance/jco` / TinyGo）任一发布新版即复查。
+2. **浸泡期：固定 4 周（B1）。** 自 0.7.0 发布日（2026-09-30）起满 4 周（至
+   2026-10-28）且无契约破坏级缺陷，方可议 1.0.0。
+3. **契约冻结：采纳。** 浸泡期内不做 ABI 破坏 bump；若被迫出 0.8.0，则 1.0.0 时钟
+   归零重计（浸泡期自 0.8.0 发布日重新起算）。
+4. **上游跟踪：授权一次。** 向 bytecodealliance/wit-bindgen（cpp 生成器 async 路径的
+   `todo!()`）、bytecodealliance/jco（splicer panic，无 async-lift）、tinygo-org/tinygo
+   （`runtime.wasiOnIdle` 未实现）各开一条 tracking issue。按惯例外联动作逐次授权，
+   本次授权仅覆盖这三条。

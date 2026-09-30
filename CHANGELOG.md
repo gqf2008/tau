@@ -21,6 +21,13 @@
 - `docs/release.md`: the post-publish acceptance loop now lists only the
   components the zip actually ships (`upper`, `c_upper`); cpp/go rejoin when
   their toolchains unblock.
+- `docs/wit-redesign.md`: new section 9 records the stage-4 (1.0.0) exit
+  criteria as ruled on 2026-09-30 — pragmatic language-matrix bar (≥3 green,
+  blocked cells carry an upstream-blocked note plus a recheck trigger), a
+  fixed 4-week soak from the 0.7.0 release date (through 2026-10-28) with no
+  contract-breaking defects, a contract freeze during the soak (a forced
+  0.8.0 resets the clock), and a one-time authorization to file three
+  upstream tracking issues (wit-bindgen cpp / jco / TinyGo).
 
 ## [0.7.0] — 2026-09-30
 
