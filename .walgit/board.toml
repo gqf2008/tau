@@ -1,0 +1,43 @@
+# tau 仓协作看板列定义（schema 依据：walgit docs/BOARD.md，version = 1）。
+# 卡片按 card_status 进入【第一个】满足谓词的列；未命中任何列的线程不显示。
+# 移动卡片 = 追加签名 status 条目，不是改这个文件。
+
+version = 1
+
+[sort]
+by = "ts"
+direction = "desc"
+
+# 列顺序 = 首列命中顺序，覆盖本仓实际使用的状态取值：
+# open -> in-progress -> needs-review -> blocked -> needs-human -> merged -> closed -> other(兜底)
+[[column]]
+name = "open"
+status = "open"
+
+[[column]]
+name = "in-progress"
+status = "in-progress"
+
+[[column]]
+name = "needs-review"
+status = "needs-review"
+
+[[column]]
+name = "blocked"
+status = "blocked"
+
+[[column]]
+name = "needs-human"
+status = "needs-human"
+
+[[column]]
+name = "merged"
+status = "merged"
+
+[[column]]
+name = "closed"
+status = "closed"
+
+# catch-all：字段全空，承接其余取值（如 done），必须置末。
+[[column]]
+name = "other"
