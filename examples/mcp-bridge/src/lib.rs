@@ -443,8 +443,7 @@ impl StdioConnection {
 /// returned bytes are the answer, and `Dropped` is the stream's only
 /// terminal state.
 async fn read_chunk(stream: &mut StreamReader<u8>) -> Result<Vec<u8>, String> {
-    let mut buf = Vec::new();
-    buf.reserve(READ_CHUNK);
+    let buf = Vec::with_capacity(READ_CHUNK);
     let (status, filled) = stream.read(buf).await;
     match status {
         StreamResult::Complete(_) => Ok(filled),
