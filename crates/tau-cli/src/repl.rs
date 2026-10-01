@@ -1366,6 +1366,10 @@ pub(crate) async fn drive(
                                     Ok(reloaded) => {
                                         renderer.abort();
                                         agent = reloaded.agent;
+                                        // The swap drops the old agent's sink;
+                                        // without this the sidecar goes silent
+                                        // and crash recovery is off until restart.
+                                        agent.set_frame_sink(Some(frames.sink()));
                                         model_label = reloaded.model_label;
                                         let (rx, streamed, task) = spawn_renderer(&agent);
                                         render_rx = rx;
@@ -2544,6 +2548,55 @@ mod tests {
             .map(|m| m.text())
             .collect();
         assert_eq!(branch, vec!["again", "recovered"]);
+    }
+
+    #[tokio::test]
+    async fn reload_reattaches_the_frame_sink() {
+        let (_dir, store) = store();
+        let agent = Arc::new(Agent::new(Box::new(StaticModel), ToolRegistry::new()));
+        let capture = Arc::new(Capture {
+            lines: Mutex::new(Vec::new()),
+            ready: Notify::new(),
+        });
+        let (tx, rx) = unbounded_channel();
+        // The swapped-in agent dies mid-turn: only a re-attached sink lets
+        // salvage recover its partial.
+        let factory: ReloadFactory = Box::new(move || {
+            Box::pin(async move {
+                Ok(Reloaded {
+                    agent: Arc::new(Agent::new(
+                        Box::new(FauxModel::scripted(vec![vec![
+                            ModelEvent::TextDelta {
+                                text: "partial after reload".into(),
+                            },
+                            ModelEvent::Error {
+                                message: "boom".into(),
+                            },
+                            ModelEvent::Done {
+                                stop: StopReason::Error,
+                            },
+                        ]])),
+                        ToolRegistry::new(),
+                    )),
+                    model_label: "reloaded-model".to_string(),
+                    keep_alive: Box::new(()),
+                })
+            })
+        });
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, Some(factory)));
+        tx.send(LineEvent::Line("/reload".into())).unwrap();
+        wait_for(&capture, "reloaded from the startup flags").await;
+        tx.send(LineEvent::Line("hi".into())).unwrap();
+        wait_for(&capture, "recovered the interrupted run").await;
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        let store = JsonlStore::open(_dir.path().join("session.jsonl")).unwrap();
+        let branch = store.active_branch(&store.head().unwrap().id).unwrap();
+        assert!(
+            branch.iter().any(|m| m.text().contains("partial after reload")),
+            "frames stopped at the swap — nothing to salvage: {branch:?}"
+        );
     }
 
     #[tokio::test]

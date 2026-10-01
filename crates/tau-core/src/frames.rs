@@ -240,7 +240,13 @@ pub fn salvage(store: &mut JsonlStore) -> Result<Option<Salvage>, SessionError> 
     let mut appended = 0;
     let mut text_chars = 0;
     let mut unknown = 0;
-    let last = turns.len().saturating_sub(1);
+    // The notice belongs to the last turn that committed content: a run
+    // can die right after a TurnStart, and an empty trailing turn is
+    // skipped below — marking by index would lose the notice (and the
+    // idempotency marker with it).
+    let last_nonempty = turns
+        .iter()
+        .rposition(|turn| !turn.text.is_empty() || !turn.calls.is_empty());
     for (index, turn) in turns.into_iter().enumerate() {
         let mut content: Vec<Content> = Vec::new();
         if !turn.text.is_empty() {
@@ -263,7 +269,7 @@ pub fn salvage(store: &mut JsonlStore) -> Result<Option<Salvage>, SessionError> 
         if content.is_empty() {
             continue;
         }
-        if index == last {
+        if Some(index) == last_nonempty {
             content.push(Content::Text {
                 text: INTERRUPTED_NOTICE.to_string(),
             });
@@ -501,6 +507,44 @@ mod tests {
         );
         assert_eq!(store.entries().len(), entries, "no double append");
         assert!(!frames_path_for(&dir.path().join("session.jsonl")).exists());
+    }
+
+    #[test]
+    fn salvage_marks_the_last_nonempty_turn_when_the_final_turn_is_empty() {
+        let (dir, mut store) = store_with_user_turn();
+        write_frames(
+            dir.path(),
+            &[
+                Frame::TurnStart,
+                Frame::TextDelta {
+                    text: "turn one partial".into(),
+                },
+                // The run died right after the next turn began.
+                Frame::TurnStart,
+            ],
+        );
+        let recovered = salvage(&mut store).unwrap().expect("frames to recover");
+        assert_eq!(recovered.entries, 1, "the empty trailing turn is skipped");
+        let head = store.head().unwrap().id.clone();
+        let branch = store.active_branch(&head).unwrap();
+        assert!(
+            branch[1].text().contains(INTERRUPTED_NOTICE),
+            "the notice (and idempotency marker) survives: {:?}",
+            branch[1].text()
+        );
+        // A crash between appending and retiring must not double-append.
+        std::fs::write(
+            frames_path_for(&dir.path().join("session.jsonl")),
+            "{\"type\":\"turnStart\"}
+",
+        )
+        .unwrap();
+        assert_eq!(
+            salvage(&mut store).unwrap(),
+            None,
+            "notice marks the salvage"
+        );
+        assert_eq!(store.entries().len(), 2, "user + salvaged assistant");
     }
 
     #[test]
