@@ -10,7 +10,6 @@
 //! the bridge component speaks whatever protocol it likes over the pipes.
 //! (Ambient WASI follows the host's WasiPolicy — allow-all by default.)
 
-use std::collections::HashSet;
 use std::io::{Read, Write};
 use std::path::Path;
 use std::pin::Pin;
@@ -30,10 +29,7 @@ use wasmtime::{AsContextMut, Engine, Store, StoreContextMut};
 use wasmtime_wasi::{WasiCtx, WasiCtxView, WasiView};
 
 use crate::http::HttpRegistry;
-use crate::{
-    ExtError, ExtensionHost, HostChannel, LoadedExtension, WasiPolicy,
-    bridge_bindings,
-};
+use crate::{ExtError, ExtensionHost, HostChannel, LoadedExtension, bridge_bindings};
 use bridge_bindings::exports::tau::extension::probes as bridge_probes;
 
 impl bridge_bindings::tau::extension::types::Host for BridgeState {}
@@ -50,9 +46,8 @@ struct BridgeState {
     http: std::sync::Arc<std::sync::Mutex<HttpRegistry>>,
     ws: std::sync::Arc<std::sync::Mutex<crate::ws::WsRegistry>>,
     /// Host channel sinks (late-bound via wire_host_channel, same as
-    /// extensions) + this bridge's session-injection consent.
+    /// extensions).
     channel: Arc<HostChannel>,
-    inject: bool,
     /// Webhook ingress (docs/im-channels.md): consented listen
     /// addresses + this bridge's routes/servers. Arc-shared with the
     /// factory so a trap rebuild keeps the listener (and its routes)
@@ -143,7 +138,10 @@ fn idle_expired(
     idle: std::time::Duration,
 ) -> bool {
     let sleep = timer.get_or_insert_with(|| Box::pin(tokio::time::sleep(idle)));
-    matches!(std::future::Future::poll(sleep.as_mut(), cx), Poll::Ready(()))
+    matches!(
+        std::future::Future::poll(sleep.as_mut(), cx),
+        Poll::Ready(())
+    )
 }
 
 /// One child's stdout or stderr: what the reader thread has queued. Shared
@@ -230,8 +228,11 @@ fn spawn_child(argv: &[String]) -> Result<HostChild, String> {
     let done_waker = Arc::new(std::sync::Mutex::new(None));
     {
         let mut stdin = stdin;
-        let (room, done, done_waker) =
-            (Arc::clone(&room), Arc::clone(&done), Arc::clone(&done_waker));
+        let (room, done, done_waker) = (
+            Arc::clone(&room),
+            Arc::clone(&done),
+            Arc::clone(&done_waker),
+        );
         std::thread::spawn(move || {
             // A thread of its own writes the pipe, so a child that has
             // stopped reading can never park the host (wit-review F12).
@@ -422,16 +423,16 @@ impl<D> StreamConsumer<D> for StdinSink {
                 Err(std::sync::mpsc::TrySendError::Full(chunk)) => {
                     this.pending = chunk;
                     *this.room.lock().unwrap_or_else(|e| e.into_inner()) = Some(cx.waker().clone());
-                // The guest has bytes the child is not taking: the only
-                // stall this budget covers.
-                if idle_expired(&mut this.timer, cx, this.idle) {
-                    eprintln!(
-                        "tau process.stdin: the child took nothing for {}ms -- is it reading?",
-                        this.idle.as_millis()
-                    );
-                    return Poll::Ready(Ok(StreamResult::Dropped));
-                }
-                return Poll::Pending;
+                    // The guest has bytes the child is not taking: the only
+                    // stall this budget covers.
+                    if idle_expired(&mut this.timer, cx, this.idle) {
+                        eprintln!(
+                            "tau process.stdin: the child took nothing for {}ms -- is it reading?",
+                            this.idle.as_millis()
+                        );
+                        return Poll::Ready(Ok(StreamResult::Dropped));
+                    }
+                    return Poll::Pending;
                 }
                 // The writer thread is gone: the pipe broke (the future
                 // says why) -- stop reading the guest's stream.
@@ -485,7 +486,9 @@ impl<D> StreamConsumer<D> for StdinSink {
 /// The exit status in the contract's shape. Windows has no signals, so
 /// `signal` stays `none` there and a killed child reports no code (the OS
 /// has none to give).
-fn exit_status(status: std::process::ExitStatus) -> bridge_bindings::tau::extension::process::ExitStatus {
+fn exit_status(
+    status: std::process::ExitStatus,
+) -> bridge_bindings::tau::extension::process::ExitStatus {
     #[cfg(unix)]
     let signal = {
         use std::os::unix::process::ExitStatusExt;
@@ -498,27 +501,21 @@ fn exit_status(status: std::process::ExitStatus) -> bridge_bindings::tau::extens
         signal,
     }
 }
-/// Explicit user consent for one bridge load. Passing it IS the consent UX:
-/// `command` is the argv the bridge may spawn (delivered as TAU_MCP_COMMAND),
-/// `origins` the scheme://host[:port] prefixes HTTP requests may target
-/// (the bridge learns its endpoint via TAU_MCP_URL).
+/// Per-load configuration for a bridge: what it runs and where it connects.
+/// Not a grant since 0.8.0 (docs/wit-0.8-draft.md ruling 1 — the runtime
+/// capability gates are gone): installing the component is the authorization,
+/// and the host provides the capabilities the bridge world declares.
 #[derive(Default, Clone)]
-pub struct BridgeConsent {
+pub struct BridgeConfig {
     /// The argv the bridge may spawn (delivered as TAU_MCP_COMMAND).
     pub command: Option<Vec<String>>,
     /// The MCP endpoint URL (delivered as TAU_MCP_URL).
     pub mcp_url: Option<String>,
-    /// `scheme://host[:port]` prefixes HTTP requests may target.
-    pub origins: HashSet<String>,
-    /// Session injection: the bridge may push messages into the session
-    /// (host.steer / follow-up) — the IM inbound leg. Same gate and same
-    /// remembered grant as extensions.
-    pub inject: bool,
-    /// Webhook ingress: the `addr:port` list the bridge may listen on
-    /// (CLI `--ingress`; the IM webhook leg for WhatsApp/企微-class
-    /// platforms — docs/im-channels.md). Empty = listen() fails naming
-    /// the missing consent.
-    pub ingress: Vec<String>,
+    /// Host configuration: the `addr:port` list the host's ingress server
+    /// serves (CLI `--ingress`). A host with none configured has no server for
+    /// `ingress.listen` to register a route on — a configuration fact, not a
+    /// per-component grant.
+    pub listen: Vec<String>,
 }
 
 /// Extract the consent origin ("scheme://host[:port]") from an http(s) URL.
@@ -574,9 +571,9 @@ pub(crate) fn ingress_dispatch(
     })
 }
 
-use bridge_bindings::tau::extension::{host as bridge_host, process as bridge_process};
 use bridge_bindings::exports::tau::extension::tools as bridge_tools;
 use bridge_bindings::tau::extension::ws as bridge_ws;
+use bridge_bindings::tau::extension::{host as bridge_host, process as bridge_process};
 
 // ---- http -----------------------------------------------------------------
 
@@ -586,7 +583,6 @@ use bridge_bindings::tau::extension::ws as bridge_ws;
 fn http_error_to_bridge(error: crate::http::HttpError) -> bridge_types::Error {
     use bridge_types::Error;
     match error {
-        crate::http::HttpError::Refused(detail) => Error::Refused(detail),
         crate::http::HttpError::Failed(detail) => Error::Failed(detail),
         crate::http::HttpError::Invalid(detail) => Error::Invalid(detail),
     }
@@ -596,7 +592,6 @@ fn http_error_to_bridge(error: crate::http::HttpError) -> bridge_types::Error {
 fn ingress_error(error: crate::ingress::IngressError) -> bridge_types::Error {
     use bridge_types::Error;
     match error {
-        crate::ingress::IngressError::Refused(detail) => Error::Refused(detail),
         crate::ingress::IngressError::Failed(detail) => Error::Failed(detail),
         crate::ingress::IngressError::Invalid(detail) => Error::Invalid(detail),
     }
@@ -606,7 +601,6 @@ fn ingress_error(error: crate::ingress::IngressError) -> bridge_types::Error {
 fn ws_error_to_bridge(error: crate::ws::WsError) -> bridge_types::Error {
     use bridge_types::Error;
     match error {
-        crate::ws::WsError::Refused(detail) => Error::Refused(detail),
         crate::ws::WsError::Failed(detail) => Error::Failed(detail),
         crate::ws::WsError::Invalid(detail) => Error::Invalid(detail),
     }
@@ -632,8 +626,9 @@ fn inbound_error_to_bridge(error: crate::ws::InboundError, misuse: &str) -> brid
 fn channel_error(error: tau_core::error::HostError) -> bridge_types::Error {
     use tau_core::error::HostError;
     match error {
-        HostError::Refused(detail) => bridge_types::Error::Refused(detail),
-        HostError::Failed(detail) => bridge_types::Error::Failed(detail),
+        HostError::Refused(detail) | HostError::Failed(detail) => {
+            bridge_types::Error::Failed(detail)
+        }
         HostError::Invalid(detail) => bridge_types::Error::Invalid(detail),
     }
 }
@@ -903,20 +898,20 @@ impl<U> bridge_ws::HostConnectionWithStore<U> for HasSelf<BridgeState> {
             std::future::poll_fn(
                 |cx| -> Poll<Result<Result<(), bridge_types::Error>, wasmtime::Error>> {
                     let slot = verdict.lock().unwrap_or_else(|e| e.into_inner());
-                match &*slot {
-                    Some(Ok(())) => Poll::Ready(Ok(Ok(()))),
-                    // The one thing that reaches a guest here: the
-                    // connection's terminal reason, or the `invalid` a
-                    // refused `receive` settled before the stream was even
-                    // handed out.
-                    Some(Err(err)) => Poll::Ready(Ok(Err(err.clone()))),
-                    None => {
-                        drop(slot);
-                        *verdict_waker.lock().unwrap_or_else(|e| e.into_inner()) =
-                            Some(cx.waker().clone());
-                        Poll::Pending
+                    match &*slot {
+                        Some(Ok(())) => Poll::Ready(Ok(Ok(()))),
+                        // The one thing that reaches a guest here: the
+                        // connection's terminal reason, or the `invalid` a
+                        // refused `receive` settled before the stream was even
+                        // handed out.
+                        Some(Err(err)) => Poll::Ready(Ok(Err(err.clone()))),
+                        None => {
+                            drop(slot);
+                            *verdict_waker.lock().unwrap_or_else(|e| e.into_inner()) =
+                                Some(cx.waker().clone());
+                            Poll::Pending
+                        }
                     }
-                }
                 },
             )
             .await
@@ -1121,20 +1116,20 @@ impl<U> bridge_process::HostChildWithStore<U> for HasSelf<BridgeState> {
             std::future::poll_fn(
                 |cx| -> Poll<Result<Result<(), bridge_types::Error>, wasmtime::Error>> {
                     let slot = done.lock().unwrap_or_else(|e| e.into_inner());
-                match &*slot {
-                    // The pipe closed with everything passed on: EOF at the
-                    // child.
-                    Some(Ok(())) => Poll::Ready(Ok(Ok(()))),
-                    Some(Err(why)) => {
-                        Poll::Ready(Ok(Err(bridge_types::Error::Failed(why.clone()))))
+                    match &*slot {
+                        // The pipe closed with everything passed on: EOF at the
+                        // child.
+                        Some(Ok(())) => Poll::Ready(Ok(Ok(()))),
+                        Some(Err(why)) => {
+                            Poll::Ready(Ok(Err(bridge_types::Error::Failed(why.clone()))))
+                        }
+                        None => {
+                            drop(slot);
+                            *done_waker.lock().unwrap_or_else(|e| e.into_inner()) =
+                                Some(cx.waker().clone());
+                            Poll::Pending
+                        }
                     }
-                    None => {
-                        drop(slot);
-                        *done_waker.lock().unwrap_or_else(|e| e.into_inner()) =
-                            Some(cx.waker().clone());
-                        Poll::Pending
-                    }
-                }
                 },
             )
             .await
@@ -1328,30 +1323,17 @@ impl bridge_host::Host for BridgeState {
         crate::channel_emit(&self.channel, event_json).map_err(channel_error)
     }
 
-    async fn steer(
-        &mut self,
-        message: bridge_types::Message,
-    ) -> Result<(), bridge_types::Error> {
-        crate::inject_message(
-            &self.channel,
-            self.inject,
-            bridge_message_to_host(message),
-            true,
-        )
-        .map_err(channel_error)
+    async fn steer(&mut self, message: bridge_types::Message) -> Result<(), bridge_types::Error> {
+        crate::inject_message(&self.channel, bridge_message_to_host(message), true)
+            .map_err(channel_error)
     }
 
     async fn follow_up(
         &mut self,
         message: bridge_types::Message,
     ) -> Result<(), bridge_types::Error> {
-        crate::inject_message(
-            &self.channel,
-            self.inject,
-            bridge_message_to_host(message),
-            false,
-        )
-        .map_err(channel_error)
+        crate::inject_message(&self.channel, bridge_message_to_host(message), false)
+            .map_err(channel_error)
     }
 
     async fn subscribe(
@@ -1408,13 +1390,10 @@ struct BridgeFactory {
     engine: Engine,
     component: Component,
     linker: Linker<BridgeState>,
-    wasi: WasiPolicy,
-    consent: BridgeConsent,
+    config: BridgeConfig,
     /// Shared with every other component loaded from the same host —
     /// late-bound sinks, see [`HostChannel`].
     channel: Arc<HostChannel>,
-    /// Session-injection consent for this bridge (steer/follow-up).
-    inject: bool,
     /// One per load_bridge; the listener survives instance revivals and
     /// dies with the factory (see Drop).
     ingress: std::sync::Arc<crate::ingress::IngressRegistry>,
@@ -1432,25 +1411,20 @@ impl Drop for BridgeFactory {
 
 impl BridgeFactory {
     async fn instantiate(&self) -> Result<BridgeInstance, wasmtime::Error> {
-        let mut ctx = self.wasi.ctx_builder();
-        if let Some(command) = &self.consent.command {
+        let mut ctx = crate::ambient_wasi_ctx();
+        if let Some(command) = &self.config.command {
             let command_json = serde_json::to_string(command).unwrap_or_else(|_| "[]".into());
             ctx.env("TAU_MCP_COMMAND", &command_json);
         }
-        if let Some(url) = &self.consent.mcp_url {
+        if let Some(url) = &self.config.mcp_url {
             ctx.env("TAU_MCP_URL", url);
         }
         let state = BridgeState {
             ctx: ctx.build(),
             table: ResourceTable::new(),
-            http: std::sync::Arc::new(std::sync::Mutex::new(HttpRegistry::new(
-                self.consent.origins.clone(),
-            ))),
-            ws: std::sync::Arc::new(std::sync::Mutex::new(crate::ws::WsRegistry::new(
-                self.consent.origins.clone(),
-            ))),
+            http: std::sync::Arc::new(std::sync::Mutex::new(HttpRegistry::new())),
+            ws: std::sync::Arc::new(std::sync::Mutex::new(crate::ws::WsRegistry::new())),
             channel: self.channel.clone(),
-            inject: self.inject,
             ingress: self.ingress.clone(),
         };
         let mut store = Store::new(&self.engine, state);
@@ -1484,12 +1458,11 @@ pub(crate) type SharedBridgeInner = tokio::sync::Mutex<SharedBridgeInstance>;
 pub(crate) type SharedBridge = Arc<SharedBridgeInner>;
 
 impl ExtensionHost {
-    /// Load a bridge component. `consent` carries everything the bridge is
-    /// allowed to touch: the spawn argv (delivered via TAU_MCP_COMMAND),
-    /// the HTTP/WS origins it may reach (its endpoint via TAU_MCP_URL) and
-    /// session injection (`inject` — the IM inbound leg). Passing the
-    /// consent IS the consent; with everything empty the bridge loads but
-    /// every capability call fails permission-denied.
+    /// Load a bridge component. `config` carries what it runs and where it
+    /// connects (the argv via TAU_MCP_COMMAND, the endpoint via TAU_MCP_URL)
+    /// plus the host's ingress listen addresses. Configuration, not a grant:
+    /// since 0.8.0 the runtime capability gates are gone, and the host simply
+    /// provides the capabilities the bridge world declares.
     ///
     /// Returns the tools AND the probes the bridge contributed (the IM
     /// outbound leg observes `after_response`; a bridge with nothing to
@@ -1497,16 +1470,16 @@ impl ExtensionHost {
     pub fn load_bridge(
         &self,
         path: impl AsRef<Path>,
-        consent: BridgeConsent,
+        config: BridgeConfig,
     ) -> Result<LoadedExtension, ExtError> {
         let path = path.as_ref().to_path_buf();
-        crate::block_on_component(self.load_bridge_inner(&path, consent))
+        crate::block_on_component(self.load_bridge_inner(&path, config))
     }
 
     async fn load_bridge_inner(
         &self,
         path: &Path,
-        consent: BridgeConsent,
+        config: BridgeConfig,
     ) -> Result<LoadedExtension, ExtError> {
         let bytes = self.read_verified(path)?;
         let component =
@@ -1517,17 +1490,14 @@ impl ExtensionHost {
         let mut linker: Linker<BridgeState> = Linker::new(&self.engine);
         wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
         bridge_bindings::Bridge::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
-        let ingress = std::sync::Arc::new(crate::ingress::IngressRegistry::new(
-            consent.ingress.clone(),
-        ));
+        let ingress =
+            std::sync::Arc::new(crate::ingress::IngressRegistry::new(config.listen.clone()));
         let factory = BridgeFactory {
             engine: self.engine.clone(),
             component,
             linker,
-            wasi: self.wasi,
             channel: self.channel.clone(),
-            inject: consent.inject,
-            consent,
+            config,
             ingress,
         };
         let mut instance = factory.instantiate().await.map_err(|e| ExtError::Load {
@@ -1575,8 +1545,10 @@ impl ExtensionHost {
                 reason: format!("bridge points() trapped: {}", crate::compact_wasm_error(&e)),
             })?;
 
-        let shared: SharedBridge =
-            Arc::new(tokio::sync::Mutex::new(SharedBridgeInstance { instance, factory }));
+        let shared: SharedBridge = Arc::new(tokio::sync::Mutex::new(SharedBridgeInstance {
+            instance,
+            factory,
+        }));
         // Late-bind the dispatch target: requests arriving between the
         // listener's first accept and this line answer 503, never
         // dispatch into a half-built bridge.
@@ -1696,10 +1668,12 @@ fn payload_to_bridge(payload: &ProbePayload) -> bridge_probes::Payload {
                 is_error: p.is_error,
             })
         }
-        ProbePayload::BeforeRunEnd(p) => bridge_probes::Payload::BeforeRunEnd(bridge_probes::RunEnd {
-            messages: p.messages.iter().map(message_to_bridge).collect(),
-            stop: stop_to_bridge(p.stop),
-        }),
+        ProbePayload::BeforeRunEnd(p) => {
+            bridge_probes::Payload::BeforeRunEnd(bridge_probes::RunEnd {
+                messages: p.messages.iter().map(message_to_bridge).collect(),
+                stop: stop_to_bridge(p.stop),
+            })
+        }
         ProbePayload::BeforeCompaction(p) => {
             bridge_probes::Payload::BeforeCompaction(bridge_probes::Compaction {
                 reason: p.reason.clone(),
@@ -1723,13 +1697,13 @@ fn payload_to_bridge(payload: &ProbePayload) -> bridge_probes::Payload {
             previous: p.previous.clone(),
             to: p.to.clone(),
         }),
-        ProbePayload::SessionEnd(p) => bridge_probes::Payload::SessionEnd(
-            bridge_probes::SessionFacts {
+        ProbePayload::SessionEnd(p) => {
+            bridge_probes::Payload::SessionEnd(bridge_probes::SessionFacts {
                 session: p.session.clone(),
                 cwd: p.cwd.clone(),
                 model: p.model.clone(),
-            },
-        ),
+            })
+        }
     }
 }
 
@@ -1787,9 +1761,7 @@ fn bridge_content_to_host(
             media: bridge_media_to_host(file.media),
             name: file.name,
         }),
-        bridge_types::Content::ToolCall(call) => {
-            ht::Content::ToolCall(tool_call_from_bridge(call))
-        }
+        bridge_types::Content::ToolCall(call) => ht::Content::ToolCall(tool_call_from_bridge(call)),
         bridge_types::Content::ToolResult(result) => ht::Content::ToolResult(ht::ToolResult {
             call_id: result.call_id,
             content: result
@@ -1855,13 +1827,13 @@ fn payload_from_bridge(
         bridge_probes::Payload::BeforeTool(call) => {
             host_probes::Payload::BeforeTool(tool_call_from_bridge(call))
         }
-        bridge_probes::Payload::AfterTool(p) => {
-            host_probes::Payload::AfterTool(crate::bindings::exports::tau::extension::probes::ToolOutcome {
+        bridge_probes::Payload::AfterTool(p) => host_probes::Payload::AfterTool(
+            crate::bindings::exports::tau::extension::probes::ToolOutcome {
                 call: tool_call_from_bridge(p.call),
                 content: p.content.into_iter().map(bridge_block_to_host).collect(),
                 is_error: p.is_error,
-            })
-        }
+            },
+        ),
         bridge_probes::Payload::BeforeRunEnd(p) => {
             host_probes::Payload::BeforeRunEnd(host_probes::RunEnd {
                 messages: p.messages.into_iter().map(bridge_message_to_host).collect(),
@@ -1880,24 +1852,24 @@ fn payload_from_bridge(
                 summary: p.summary,
             })
         }
-        bridge_probes::Payload::SessionStart(p) => host_probes::Payload::SessionStart(
-            host_probes::SessionFacts {
+        bridge_probes::Payload::SessionStart(p) => {
+            host_probes::Payload::SessionStart(host_probes::SessionFacts {
                 session: p.session,
                 cwd: p.cwd,
                 model: p.model,
-            },
-        ),
+            })
+        }
         bridge_probes::Payload::Branch(p) => host_probes::Payload::Branch(host_probes::Branch {
             previous: p.previous,
             to: p.to,
         }),
-        bridge_probes::Payload::SessionEnd(p) => host_probes::Payload::SessionEnd(
-            host_probes::SessionFacts {
+        bridge_probes::Payload::SessionEnd(p) => {
+            host_probes::Payload::SessionEnd(host_probes::SessionFacts {
                 session: p.session,
                 cwd: p.cwd,
                 model: p.model,
-            },
-        ),
+            })
+        }
     }
 }
 
@@ -1949,10 +1921,7 @@ fn content_to_bridge(content: &tau_core::types::Content) -> bridge_types::Conten
             is_error,
         } => bridge_types::Content::ToolResult(bridge_types::ToolResult {
             call_id: call_id.clone(),
-            content: content
-                .iter()
-                .map(content_block_to_bridge)
-                .collect(),
+            content: content.iter().map(content_block_to_bridge).collect(),
             is_error: *is_error,
         }),
     }
@@ -1965,9 +1934,7 @@ fn media_to_bridge(media: &tau_core::types::Media) -> bridge_types::Media {
             tau_core::types::MediaSource::Bytes(bytes) => {
                 bridge_types::MediaSource::Bytes(bytes.clone())
             }
-            tau_core::types::MediaSource::Url(url) => {
-                bridge_types::MediaSource::Url(url.clone())
-            }
+            tau_core::types::MediaSource::Url(url) => bridge_types::MediaSource::Url(url.clone()),
             tau_core::types::MediaSource::Blob { hash } => {
                 bridge_types::MediaSource::Blob(hash.clone())
             }
@@ -2194,9 +2161,7 @@ impl ProbeHandler for BridgeProbes {
         match result {
             Ok(verdict) => match verdict {
                 bridge_probes::Verdict::Continue => Verdict::Continue,
-                bridge_probes::Verdict::Replace(payload) => {
-                    replace_bridge_payload(point, payload)
-                }
+                bridge_probes::Verdict::Replace(payload) => replace_bridge_payload(point, payload),
                 bridge_probes::Verdict::Block(reason) => Verdict::Block { reason },
             },
             // A broken bridge degrades to Continue, never wedges the run.
@@ -2224,13 +2189,22 @@ mod tests {
             let waker = std::task::Waker::noop();
             let mut cx = Context::from_waker(waker);
             let mut timer = None;
-            assert!(!idle_expired(&mut timer, &mut cx, idle), "fired on the first poll");
+            assert!(
+                !idle_expired(&mut timer, &mut cx, idle),
+                "fired on the first poll"
+            );
             assert!(timer.is_some(), "the deadline was never armed");
             tokio::time::sleep(std::time::Duration::from_millis(200)).await;
-            assert!(idle_expired(&mut timer, &mut cx, idle), "the deadline never fired");
+            assert!(
+                idle_expired(&mut timer, &mut cx, idle),
+                "the deadline never fired"
+            );
             // Progress clears it; the next silence starts a fresh budget.
             timer = None;
-            assert!(!idle_expired(&mut timer, &mut cx, idle), "a disarmed deadline fired");
+            assert!(
+                !idle_expired(&mut timer, &mut cx, idle),
+                "a disarmed deadline fired"
+            );
         });
     }
 
@@ -2288,13 +2262,15 @@ mod tests {
         let mut child = spawn_child(&echo_child_argv()).expect("spawn");
         let queue = child.stdout.take().expect("stdout");
         let mut text = Vec::new();
-        let saw_eof = wait_for(&queue, |queue| loop {
-            match queue.try_recv() {
-                Ok(Ok(chunk)) => text.extend_from_slice(&chunk),
-                Ok(Err(why)) => panic!("pipe error: {why}"),
-                // Every chunk is in `text` once the sender is gone.
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return true,
-                Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return false,
+        let saw_eof = wait_for(&queue, |queue| {
+            loop {
+                match queue.try_recv() {
+                    Ok(Ok(chunk)) => text.extend_from_slice(&chunk),
+                    Ok(Err(why)) => panic!("pipe error: {why}"),
+                    // Every chunk is in `text` once the sender is gone.
+                    Err(tokio::sync::mpsc::error::TryRecvError::Disconnected) => return true,
+                    Err(tokio::sync::mpsc::error::TryRecvError::Empty) => return false,
+                }
             }
         });
         assert!(saw_eof, "stdout never reached EOF");
@@ -2396,7 +2372,6 @@ mod tests {
             bridge_types::Error::Invalid(_) => {
                 panic!("the connection's terminal reason must not be `invalid`")
             }
-            _ => panic!("the connection's terminal reason must be `failed`"),
         }
     }
 }

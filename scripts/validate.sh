@@ -1,15 +1,14 @@
 #!/usr/bin/env bash
 # First-user validation: prove the release candidate works for someone
-# who just installed tau, in eleven steps — demo, the built-in tools
+# who just installed tau — demo, the built-in tools
 # (default set, off switch, no shell through --demo), skills discovery
 # (the manifest on the provider wire, the body on demand), the ACP mode
 # over the pipes an editor uses, the signing/trust chain (incl. tamper
 # rejection), all three built-in providers against a loopback mock (and
-# a real tool-call round trip on that wire), the wasm provider consent
-# gate, the MCP bridge spawn gate, the remembered-consent lifecycle, OCI
-# distribution, blob GC, compaction, probe verdicts, and the interactive
-# REPL over a real pty (skipped with a note when pywinpty is not
-# installed).
+# a real tool-call round trip on that wire), the MCP bridge (spawn + tools,
+# ws/IM/webhook legs), OCI distribution, blob GC, compaction, probe
+# verdicts, the host channel, and the interactive REPL over a real pty
+# (skipped with a note when pywinpty is not installed).
 #
 # Usage: scripts/validate.sh
 #
@@ -17,7 +16,7 @@
 # so ~/.tau is the REAL one): the script keygens one throwaway key,
 # records its fingerprint, and removes exactly that key + pub and the
 # blobs it seeded on exit (even on FAIL).
-# Nothing else in ~/.tau is touched; the consent store is not written.
+# Nothing else in ~/.tau is touched.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
@@ -55,7 +54,7 @@ trap cleanup EXIT
 # EXAMPLES list below — two hand-maintained copies drift silently
 # (LESSON_两处本该一致的逻辑分开维护漂移不报错). Assert equality
 # before building.
-EXAMPLES="upper http-provider mcp-bridge guard echo-provider notifier media-tool streamer ws-echo-bridge feishu-bridge whatsapp-bridge wecom-bridge dingtalk-bridge realtime-echo"
+EXAMPLES="upper mcp-bridge guard notifier media-tool streamer ws-echo-bridge feishu-bridge whatsapp-bridge wecom-bridge dingtalk-bridge"
 rel_build=$(sed -n 's/^for ex in \(.*\); do$/\1/p' "$ROOT/scripts/release.sh" | head -1)
 rel_zip=$(sed -n 's/^for ex in \(.*\); do$/\1/p' "$ROOT/scripts/release.sh" | sed -n '2p' | tr '_' '-')
 [ "$(echo $EXAMPLES | tr ' ' '\n' | sort)" = "$(echo $rel_build | tr ' ' '\n' | sort)" ] \
@@ -77,10 +76,8 @@ for ex in $EXAMPLES; do
         --target wasm32-wasip2 --release --quiet
 done
 UPPER="$ROOT/examples/upper/target/wasm32-wasip2/release/upper.wasm"
-HTTP_PROVIDER="$ROOT/examples/http-provider/target/wasm32-wasip2/release/http_provider.wasm"
 MCP_BRIDGE="$ROOT/examples/mcp-bridge/target/wasm32-wasip2/release/mcp_bridge.wasm"
 GUARD="$ROOT/examples/guard/target/wasm32-wasip2/release/guard.wasm"
-ECHO_PROVIDER="$ROOT/examples/echo-provider/target/wasm32-wasip2/release/echo_provider.wasm"
 NOTIFIER="$ROOT/examples/notifier/target/wasm32-wasip2/release/notifier.wasm"
 MEDIA_TOOL="$ROOT/examples/media-tool/target/wasm32-wasip2/release/media_tool.wasm"
 STREAMER="$ROOT/examples/streamer/target/wasm32-wasip2/release/streamer.wasm"
@@ -90,12 +87,8 @@ WHATSAPP="$ROOT/examples/whatsapp-bridge/target/wasm32-wasip2/release/whatsapp_b
 WECOM="$ROOT/examples/wecom-bridge/target/wasm32-wasip2/release/wecom_bridge.wasm"
 DINGTALK="$ROOT/examples/dingtalk-bridge/target/wasm32-wasip2/release/dingtalk_bridge.wasm"
 [ -f "$UPPER" ] || fail "upper example missing"
-[ -f "$HTTP_PROVIDER" ] || fail "http-provider example missing"
 [ -f "$MCP_BRIDGE" ] || fail "mcp-bridge example missing"
 [ -f "$GUARD" ] || fail "guard example missing"
-[ -f "$ECHO_PROVIDER" ] || fail "echo-provider example missing"
-REALTIME_ECHO="$ROOT/examples/realtime-echo/target/wasm32-wasip2/release/realtime_echo.wasm"
-[ -f "$REALTIME_ECHO" ] || fail "realtime-echo example missing"
 [ -f "$NOTIFIER" ] || fail "notifier example missing"
 [ -f "$MEDIA_TOOL" ] || fail "media-tool example missing"
 [ -f "$STREAMER" ] || fail "streamer example missing"
@@ -450,7 +443,8 @@ class HelloHandler(BaseHTTPRequestHandler):
             time.sleep(3)
             return
         if self.path.startswith("/redirect"):
-            # A consent-escaping redirect: the client must NOT follow it.
+            # A redirect: the client must NOT follow it — the request goes where
+            # the component asked, nowhere else.
             self.send_response(302)
             self.send_header("location", "http://evil.invalid/loot")
             self.send_header("content-length", "0")
@@ -644,158 +638,10 @@ if echo "$REQ" | grep -qF 'greets the reader in a set way'; then
 fi
 echo "ok — the manifest and AGENTS.md reach the model, the body waits for load_skill"
 
-# --- step 4: wasm provider consent gate --------------------------------
-step "4/11 wasm provider consent gate"
-if "$TAU" --allow-unsigned \
-    --provider-wasm "$HTTP_PROVIDER" --model http \
-    -p "http://127.0.0.1:8402/" 2>&1 | grep -q "STATUS 200"; then
-    fail "http fetch succeeded with no consent — consent gate is open"
-fi
-echo "ok — no consent: fetch denied"
-
-OUT="$("$TAU" --allow-unsigned \
-    --provider-wasm "$HTTP_PROVIDER" --model http \
-    --provider-origin http://127.0.0.1:8402 \
-    -p "http://127.0.0.1:8402/" 2>&1)" || fail "consented fetch: $OUT"
-echo "$OUT" | grep -q "STATUS 200: hello from mock origin" \
-    || fail "consented fetch did not land: $OUT"
-echo "ok — with --provider-origin the fetch flows"
-
-# A redirect would escape consent: the consented origin answers 302 to
-# an unconsented host, and the guest must see the 302, not the target.
-OUT="$("$TAU" --allow-unsigned \
-    --provider-wasm "$HTTP_PROVIDER" --model http \
-    --provider-origin http://127.0.0.1:8402 \
-    -p "http://127.0.0.1:8402/redirect" 2>&1)" || fail "redirect run: $OUT"
-echo "$OUT" | grep -q "STATUS 302" \
-    || fail "redirect was followed — consent escaped: $OUT"
-echo "ok — consented origin's 302 is shown, never followed"
-
-# A peer that sends headers and then goes quiet must surface as an error,
-# not a hang: the body's idle budget is the HOST's since 0.7.0 (the guest
-# no longer passes a timeout), so the knob shortens it for this gate. The
-# reason goes to stderr and the guest's stream simply ends (wit-review F9).
-OUT="$(TAU_HTTP_IDLE_TIMEOUT_MS=300 "$TAU" --allow-unsigned \
-    --provider-wasm "$HTTP_PROVIDER" --model http \
-    --provider-origin http://127.0.0.1:8402 \
-    -p "http://127.0.0.1:8402/quiet" 2>&1 || true)"
-echo "$OUT" | grep -q "no bytes within 300ms" \
-    || fail "idle budget never fired — the body stream blocked or swallowed it: $OUT"
-echo "ok — a quiet peer ends the body stream with an explicit timeout"
-
-# A peer that accepts the connection and then sends NOTHING — no headers,
-# no error, no FIN — must surface as an error too: the wait for response
-# headers carries its own bound, separate from the body's, and it is the
-# HOST's bound as well since 0.7.0 (wit-review F11). This failure reaches
-# the guest as the import's error, so the model output is what names it.
-OUT="$(TAU_HTTP_REQUEST_TIMEOUT_MS=300 "$TAU" --allow-unsigned \
-    --provider-wasm "$HTTP_PROVIDER" --model http \
-    --provider-origin http://127.0.0.1:8402 \
-    -p "http://127.0.0.1:8402/mute" 2>&1 || true)"
-echo "$OUT" | grep -q "no response headers within 300ms" \
-    || fail "headers budget never fired — request blocked or swallowed it: $OUT"
-echo "ok — a peer that never sends headers returns an explicit timeout"
-
-# Origin matching sees the same host the client dials: userinfo inside
-# the authority is stripped (flows), a backslash after the authority is
-# path material (stays on the consented host), and the delimiter tricks
-# plus the trailing-dot twin are refused as unconsented.
-OUT="$("$TAU" --allow-unsigned \
-    --provider-wasm "$HTTP_PROVIDER" --model http \
-    --provider-origin http://127.0.0.1:8402 \
-    -p "http://user:pw@127.0.0.1:8402/" 2>&1)" || fail "userinfo run: $OUT"
-echo "$OUT" | grep -q "STATUS 200: hello" \
-    || fail "userinfo-inside-authority fetch did not land: $OUT"
-OUT="$("$TAU" --allow-unsigned \
-    --provider-wasm "$HTTP_PROVIDER" --model http \
-    --provider-origin http://127.0.0.1:8402 \
-    -p 'http://127.0.0.1:8402\@evil.invalid/' 2>&1)" || fail "backslash run: $OUT"
-echo "$OUT" | grep -q "STATUS 200: hello" \
-    || fail "backslash-after-authority left the consented host: $OUT"
-for evil in 'http://evil.invalid\@127.0.0.1:8402/' \
-            'http://evil.invalid?@127.0.0.1:8402/' \
-            'http://127.0.0.1:8402./'; do
-    OUT="$("$TAU" --allow-unsigned \
-        --provider-wasm "$HTTP_PROVIDER" --model http \
-        --provider-origin http://127.0.0.1:8402 \
-        -p "$evil" 2>&1 || true)"
-    echo "$OUT" | grep -q "not in consent allowlist" \
-        || fail "consent bypass reached the network: $evil → $OUT"
-    if echo "$OUT" | grep -q "STATUS 200"; then
-        fail "consent bypass was served: $evil"
-    fi
-done
-echo "ok — origin gate: userinfo/backslash stay home, tricks and twins refused"
-
-# The load contract is enforced: an unadvertised model id is refused at
-# load, naming the ids the component actually lists — never silently
-# running whatever the guest does with a model it does not advertise.
-OUT="$("$TAU" --allow-unsigned \
-    --provider-wasm "$HTTP_PROVIDER" --model nosuch \
-    --provider-origin http://127.0.0.1:8402 \
-    -p "http://127.0.0.1:8402/" 2>&1 || true)"
-echo "$OUT" | grep -q "model 'nosuch' not provided" \
-    || fail "unknown model id was not refused: $OUT"
-echo "$OUT" | grep -q "available: http" \
-    || fail "refusal does not name the available ids: $OUT"
-echo "ok — unknown model id refused at load, available ids named"
-
-# --- step 4b: large payload over the component boundary ----------------
-step "4b/11 large media crosses the component boundary intact"
-# A 3 MiB image in the session history must cross the session →
-# materialize → wasm boundary whole — not choked, truncated, or refused.
-# Since 0.7.0 the echo provider's "probe" keyword reports the byte length
-# and the FNV-1a of the RAW media bytes it received (the serialized
-# request JSON is a host-side wire detail now; the guest sees typed
-# records). A length alone is a weak leg, so the script recomputes the
-# checksum over the very bytes it sent: corruption is a mismatch,
-# truncation a short count. (tau-ext's large_payload_tests pin the same
-# length+checksum contract against a hand-built component; here the real
-# CLI drives it.)
-python - << 'PYEOF'
-import base64, json, random
-random.seed()
-data = random.randbytes(3 * 1024 * 1024)
-msg = {
-    "id": "big", "parent": None, "type": "message",
-    "message": {"role": "user", "content": [
-        {"type": "text", "text": "big media attached"},
-        {"type": "image", "media": {"media_type": "image/png",
-            "source": "base64", "data": base64.b64encode(data).decode()}},
-    ]},
-}
-with open("big-session.jsonl", "w") as f:
-    f.write(json.dumps(msg) + "\n")
-h = 0xcbf29ce484222325
-for b in data:
-    h ^= b
-    h = (h * 0x100000001b3) & 0xFFFFFFFFFFFFFFFF
-with open("big-fnv.txt", "w") as f:
-    f.write("%016x" % h)
-PYEOF
-OUT="$("$TAU" --allow-unsigned \
-    --provider-wasm "$ECHO_PROVIDER" --model echo \
-    --session big-session.jsonl --continue \
-    -p "probe" 2>&1)" || fail "large-payload run: $OUT"
-BYTES=$(echo "$OUT" | grep -o 'bytes=[0-9]*' | head -1 | cut -d= -f2)
-[ -n "$BYTES" ] || fail "guest never reported the payload size: $OUT"
-[ "$BYTES" -eq 3145728 ] \
-    || fail "payload truncated at the boundary: guest saw only $BYTES bytes"
-echo "$OUT" | grep -q "fnv1a=$(cat big-fnv.txt)" \
-    || fail "payload corrupted at the boundary (checksums differ): $OUT"
-echo "ok — 3 MiB of media crossed session→guest whole ($BYTES bytes, FNV-1a matches)"
-
-# --- step 5: MCP bridge (consent-gated spawn) --------------------------
-step "5/11 MCP bridge (consent-gated spawn)"
-# Without --mcp-command the bridge has nothing it may spawn: the load
-# must fail, not silently degrade.
-if "$TAU" --allow-unsigned --mcp-bridge "$MCP_BRIDGE" --demo -p hi > /dev/null 2>&1; then
-    fail "bridge ran with no command consent — spawn gate is open"
-fi
-echo "ok — no command consent: bridge load refused"
-
-# With the command granted (passing it IS the consent), the mock MCP
-# server comes up, its echo tool registers, and the demo drives it.
+step "5/11 MCP bridge (spawn + tools)"
+# Since 0.8.0 there is no spawn gate to test (docs/wit-0.8-draft.md ruling 1):
+# --mcp-command is configuration, so the mock MCP server comes up, its echo
+# tool registers, and the demo drives it.
 # Windows python needs a Windows-form path with forward slashes.
 ROOT_WIN=$(cygpath -m "$ROOT" 2> /dev/null || echo "$ROOT")
 OUT="$("$TAU" --allow-unsigned --mcp-bridge "$MCP_BRIDGE" \
@@ -803,7 +649,7 @@ OUT="$("$TAU" --allow-unsigned --mcp-bridge "$MCP_BRIDGE" \
     --demo -p "bridge validation ok" 2>&1)" || fail "bridge run: $OUT"
 echo "$OUT" | grep -q "tool ← echo: bridge validation ok" \
     || fail "bridged echo tool did not close the loop: $OUT"
-echo "ok — consent-gated spawn served the echo tool through the MCP bridge"
+echo "ok — the MCP bridge spawned its server and served the echo tool"
 
 # A server that never reads its stdin must not wedge the bridge (wit-review
 # F12). The wait is the HOST budget since 0.7.0 — a wasm guest has no clock
@@ -837,7 +683,7 @@ kill "$WS_MOCK_PID" 2> /dev/null || true
 # The faux model decides the exact payload wording; assert the round
 # trip (echo: prefix = frame came back) and the payload's survival.
 echo "$OUT" | grep -qE "tool ← ws_echo: echo: .*frame-pipe-ok" || fail "ws echo did not close the loop: $OUT"
-echo "ok — frame crossed guest→host→ws→echo→back (consent-gated origin)"
+echo "ok — frame crossed guest→host→ws→echo→back"
 
 # A listener that accepts the TCP connection and never upgrades it: the
 # handshake wait is the HOST's budget since 0.7.0 (the guest no longer
@@ -880,11 +726,10 @@ for _ in $(seq 1 20); do
 done
 IM_PORT=$(sed -n 's/^im mock ready //p' im_mock.log)
 [ -n "$IM_PORT" ] || fail "im mock did not start: $(cat im_mock.log)"
-# Consented: ws origin covers the connect AND the reply POST (same
-# origin), --allow-inject consents the steer. Semantic anchors only —
-# the faux model owns the reply wording. The mapping config file
-# (docs/im-channels.md) is written once the mock's port is known — the
-# channel endpoint must equal the consented TAU_MCP_URL.
+# The ws endpoint carries the connect AND the reply POST; the mapping
+# config file (docs/im-channels.md) is written once the mock's port is
+# known — the channel endpoint must equal TAU_MCP_URL. Semantic anchors
+# only: the faux model owns the reply wording.
 # TAU_DEMO_STALL_MS on all three runs: the faux model answers in
 # nanoseconds, so the single in-run pump at after_response races the host
 # ws actor delivering the frame the mock pushed at connect. A real provider
@@ -896,7 +741,7 @@ cat > im-config.json <<CONFIG
   "chats": {"loopback-c1": {"session": ".tau/sessions/feishu-loopback-c1.jsonl", "threads": "branch"}},
   "users": {"allow": ["loopback-user"]}}]}
 CONFIG
-OUT="$(TAU_IM_CONFIG="$WORK/im-config.json" TAU_DEMO_STALL_MS=500 "$TAU" --allow-unsigned --mcp-bridge "$FEISHU"     --mcp-url "ws://127.0.0.1:$IM_PORT/im" --allow-inject --demo -p "hi" 2>&1)" || fail "im run: $OUT"
+OUT="$(TAU_IM_CONFIG="$WORK/im-config.json" TAU_DEMO_STALL_MS=500 "$TAU" --allow-unsigned --mcp-bridge "$FEISHU"     --mcp-url "ws://127.0.0.1:$IM_PORT/im" --demo -p "hi" 2>&1)" || fail "im run: $OUT"
 echo "$OUT" | grep -q "steer: .IM chat loopback-c1"     || fail "IM message was not steered into the session: $OUT"
 echo "$OUT" | grep -q "chat loopback-c1 → .tau/sessions/feishu-loopback-c1.jsonl"     || fail "session mapping did not come from the config file: $OUT"
 echo "$OUT" | grep -q "feishu: reply posted to loopback-c1"     || fail "reply was not posted back: $OUT"
@@ -914,35 +759,16 @@ done
 IM_PORT=$(sed -n 's/^im mock ready //p' im_mock_intruder.log)
 [ -n "$IM_PORT" ] || fail "im mock (identity leg) did not start: $(cat im_mock_intruder.log)"
 sed "s/endpoint\": \"ws:\/\/127.0.0.1:[0-9]*/endpoint\": \"ws:\/\/127.0.0.1:$IM_PORT/" im-config.json > im-config-intruder.json
-OUT="$(TAU_IM_CONFIG="$WORK/im-config-intruder.json" TAU_DEMO_STALL_MS=500 "$TAU" --allow-unsigned --mcp-bridge "$FEISHU"     --mcp-url "ws://127.0.0.1:$IM_PORT/im" --allow-inject --demo -p "hi" 2>&1)" || fail "im identity run: $OUT"
+OUT="$(TAU_IM_CONFIG="$WORK/im-config-intruder.json" TAU_DEMO_STALL_MS=500 "$TAU" --allow-unsigned --mcp-bridge "$FEISHU"     --mcp-url "ws://127.0.0.1:$IM_PORT/im" --demo -p "hi" 2>&1)" || fail "im identity run: $OUT"
 kill "$IM_MOCK_PID" 2> /dev/null || true
 echo "$OUT" | grep -q "feishu: ignored message (chat loopback-c1 configured: true, user intruder-user allowed: false)"     || fail "unauthorized user was not ignored: $OUT"
 echo "$OUT" | grep -q "steer: .IM chat"     && fail "unauthorized user was steered into the session: $OUT"
 grep -q "IM REPLY: " im_mock_intruder.log     && fail "unauthorized user got a reply: $(cat im_mock_intruder.log)"
-# Refusal path: without --allow-inject the steer must fail loud and no
-# reply may leave. Fresh mock + fresh log (truncating a live mock's log
-# file fights its open fd).
-python "$ROOT/scripts/im_mock.py" > im_mock2.log 2>&1 &
-IM_MOCK_PID=$!
-for _ in $(seq 1 20); do
-    grep -q "im mock ready" im_mock2.log 2> /dev/null && break
-    sleep 0.5
-done
-IM_PORT=$(sed -n 's/^im mock ready //p' im_mock2.log)
-[ -n "$IM_PORT" ] || fail "im mock (refusal leg) did not start: $(cat im_mock2.log)"
-# The refusal leg carries an authorized config too — without it the
-# fail-closed identity gate eats the message before steer is even
-# attempted, and this leg would stop measuring injection consent.
-sed "s/endpoint\": \"ws:\/\/127.0.0.1:[0-9]*/endpoint\": \"ws:\/\/127.0.0.1:$IM_PORT/" im-config.json > im-config-refusal.json
-OUT="$(TAU_IM_CONFIG="$WORK/im-config-refusal.json" TAU_DEMO_STALL_MS=500 "$TAU" --allow-unsigned --mcp-bridge "$FEISHU"     --mcp-url "ws://127.0.0.1:$IM_PORT/im" --demo -p "hi" 2>&1)" || fail "im refusal run: $OUT"
-kill "$IM_MOCK_PID" 2> /dev/null || true
-echo "$OUT" | grep -q "feishu: steer refused: session injection not consented"     || fail "unconsented steer was not refused: $OUT"
-grep -q "IM REPLY: " im_mock2.log     && fail "reply left without inject consent: $(cat im_mock2.log)"
-echo "ok — IM loop closed (ws inbound → steer → turn → reply POST); config-gated identity: unauthorized user ignored; unconsented steer refused"
+echo "ok — IM loop closed (ws inbound → steer → turn → reply POST); config-gated identity: unauthorized user ignored"
 
 # --- step 5d: webhook ingress (whatsapp-shaped adapter, docs/im-channels.md)
 # The dual of 5c's ws leg: WASI has no listen, so the host binds the
-# consented --ingress address and pushes each webhook request into the
+# configured --ingress address and pushes each webhook request into the
 # component's ingress-handler export. Delivery lands while the session
 # IDLES — the acceptance must be the interactive REPL over a pty (print
 # mode's sub-second run would be a race), so it needs pywinpty like 11.
@@ -957,8 +783,7 @@ fi
 # --- step 5e: wecom ingress with the crypto gate (docs/im-channels.md)
 # 5d proved the pipe; 5e proves the component-side red line: signature
 # verification and AES decryption live in the guest (the mock signs and
-# encrypts for real, NIST-self-tested). The no-consent refusal leg is
-# 5d's (same consent gate); 5e's assertions are the crypto legs.
+# encrypts for real, NIST-self-tested); 5e's assertions are the crypto legs.
 step "5e/11 wecom webhook (bad-signature 403 → echostr round-trip → encrypted message → reply)"
 if python -c "import winpty" 2> /dev/null; then
     python "$ROOT/scripts/wecom_ingress_e2e.py" "$TAU" "$WECOM" "$WORK/wecom-e2e"         || fail "wecom ingress e2e failed"
@@ -981,7 +806,7 @@ for _ in $(seq 1 20); do
 done
 DT_PORT=$(sed -n 's/^dt mock ready //p' dt_mock.log)
 [ -n "$DT_PORT" ] || fail "dt mock did not start: $(cat dt_mock.log)"
-OUT="$("$TAU" --allow-unsigned --mcp-bridge "$DINGTALK"     --mcp-url "ws://127.0.0.1:$DT_PORT/dt" --allow-inject --demo -p "hi" 2>&1)" || fail "dingtalk run: $OUT"
+OUT="$("$TAU" --allow-unsigned --mcp-bridge "$DINGTALK"     --mcp-url "ws://127.0.0.1:$DT_PORT/dt" --demo -p "hi" 2>&1)" || fail "dingtalk run: $OUT"
 kill "$DT_MOCK_PID" 2> /dev/null || true
 echo "$OUT" | grep -q "steer: .IM dingtalk"     || fail "dingtalk message was not steered into the session: $OUT"
 echo "$OUT" | grep -q "dingtalk: reply posted to loopback-user"     || fail "reply was not posted back: $OUT"
@@ -989,106 +814,6 @@ grep -q "DT ACK: " dt_mock.log     || fail "the ack frame never reached the plat
 grep -q "DT REPLY: " dt_mock.log     || fail "mock never received the reply POST: $(cat dt_mock.log)"
 echo "ok — dingtalk loop closed (CALLBACK → double-decode → in-band ack → steer → reply POST)"
 
-# --- step 6: remembered consent lifecycle ------------------------------
-step "6/11 remembered consent (--remember / --list / --revoke)"
-# Consent is keyed by signing fingerprint, so the provider copy is
-# signed with the throwaway key — the real trust store and any real
-# consent records stay untouched.
-cp "$HTTP_PROVIDER" prov.wasm
-"$TAU" sign prov.wasm --key "$THROWAWAY_FP" > /dev/null || fail "sign provider"
-CONSENT_FILE="$HOME/.tau/consent/$THROWAWAY_FP.json"
-
-OUT="$("$TAU" --provider-wasm prov.wasm --model http \
-    --provider-origin http://127.0.0.1:8402 --remember \
-    -p "http://127.0.0.1:8402/" 2>&1)" || fail "remembered run: $OUT"
-echo "$OUT" | grep -q "STATUS 200" || fail "remembered run fetch: $OUT"
-[ -f "$CONSENT_FILE" ] || fail "--remember persisted nothing"
-LIST="$("$TAU" consent --list)" || fail "consent --list: $LIST"
-echo "$LIST" | grep -q "$THROWAWAY_FP" || fail "--list hides the grant: $LIST"
-echo "$LIST" | grep -q "origin: http://127.0.0.1:8402" \
-    || fail "--list hides the origin: $LIST"
-echo "ok — grant persisted and listed"
-
-# The remembered grant flows without the flag.
-OUT="$("$TAU" --provider-wasm prov.wasm --model http \
-    -p "http://127.0.0.1:8402/" 2>&1)" || fail "recalled run: $OUT"
-echo "$OUT" | grep -q "STATUS 200" || fail "recalled grant did not flow: $OUT"
-echo "ok — remembered origin flows without --provider-origin"
-
-OUT="$("$TAU" consent --revoke "$THROWAWAY_FP")" || fail "consent --revoke: $OUT"
-echo "$OUT" | grep -q "revoked: $THROWAWAY_FP" || fail "revoke output: $OUT"
-[ ! -f "$CONSENT_FILE" ] || fail "revoke left the consent file"
-if "$TAU" --provider-wasm prov.wasm --model http \
-    -p "http://127.0.0.1:8402/" 2>&1 | grep -q "STATUS 200"; then
-    fail "fetch flowed after revoke — the gate is open"
-fi
-echo "ok — revoked grant is gone and the gate closes again"
-
-# Credential delivery: passing --provider-auth IS the consent, the token
-# reaches the origin through the guest, and the secret is never
-# persisted — the grant stores only the auth_delivery boolean.
-OUT="$("$TAU" --provider-wasm prov.wasm --model http \
-    --provider-origin http://127.0.0.1:8402 --provider-auth sekrit-123 --remember \
-    -p "http://127.0.0.1:8402/" 2>&1)" || fail "auth run: $OUT"
-echo "$OUT" | grep -q "STATUS 200 \[auth\]" || fail "guest did not get the token: $OUT"
-grep -q "Bearer sekrit-123" auth_capture.log \
-    || fail "token did not reach the origin: $(cat auth_capture.log)"
-grep -q "sekrit-123" "$CONSENT_FILE" \
-    && fail "consent file persisted the secret: $(cat "$CONSENT_FILE")"
-grep -q "sekrit-123" .tau/session.jsonl \
-    && fail "session file persisted the secret"
-echo "ok — token delivered to the origin; consent + session carry no secret"
-
-# With the recalled grant, TAU_PROVIDER_AUTH flows without the flag.
-: > auth_capture.log
-OUT="$(TAU_PROVIDER_AUTH=sekrit-456 "$TAU" --provider-wasm prov.wasm --model http \
-    -p "http://127.0.0.1:8402/" 2>&1)" || fail "env recall run: $OUT"
-echo "$OUT" | grep -q "STATUS 200 \[auth\]" \
-    || fail "recalled grant did not deliver the env token: $OUT"
-grep -q "Bearer sekrit-456" auth_capture.log \
-    || fail "env token did not reach the origin"
-echo "ok — recalled grant delivers TAU_PROVIDER_AUTH"
-
-# The same env var without any grant: delivered nowhere, noted loudly.
-"$TAU" consent --revoke "$THROWAWAY_FP" > /dev/null || fail "second revoke"
-: > auth_capture.log
-OUT="$(TAU_PROVIDER_AUTH=sekrit-789 "$TAU" --provider-wasm prov.wasm --model http \
-    --provider-origin http://127.0.0.1:8402 \
-    -p "http://127.0.0.1:8402/" 2>&1)" || fail "no-grant run: $OUT"
-echo "$OUT" | grep -q "no auth-delivery grant" \
-    || fail "missing the no-grant note: $OUT"
-echo "$OUT" | grep -q "STATUS 200: hello" || fail "fetch broke without auth: $OUT"
-if echo "$OUT" | grep -q "STATUS 200 \[auth\]"; then
-    fail "token flowed without a grant — the auth gate is open"
-fi
-if grep -q "sekrit-789" auth_capture.log; then
-    fail "origin saw a token it never consented to"
-fi
-echo "ok — env token refused without the grant"
-
-# A corrupt consent file reads as absent: the remembered origin is
-# gone with it and the gate closes (never an error, never lenient).
-OUT="$("$TAU" --provider-wasm prov.wasm --model http \
-    --provider-origin http://127.0.0.1:8402 --remember \
-    -p "http://127.0.0.1:8402/" 2>&1)" || fail "re-remember run: $OUT"
-echo "{ not json" > "$CONSENT_FILE"
-if "$TAU" --provider-wasm prov.wasm --model http \
-    -p "http://127.0.0.1:8402/" 2>&1 | grep -q "STATUS 200"; then
-    fail "corrupt consent file still granted the origin"
-fi
-rm -f "$CONSENT_FILE"
-echo "ok — corrupt consent file reads as absent, the gate closes"
-
-# A caller-supplied "fingerprint" must never become a path out of the
-# store: consent --revoke rejects anything not 16 lowercase hex.
-if "$TAU" consent --revoke "../escape" > revoke.out 2>&1; then
-    fail "path-shaped fingerprint accepted by consent --revoke"
-fi
-grep -q "not a signing fingerprint" revoke.out \
-    || fail "unexpected revoke rejection: $(cat revoke.out)"
-echo "ok — consent --revoke rejects non-fingerprint input"
-
-# --- step 7: OCI distribution ------------------------------------------
 step "7/11 OCI distribution (push / pull / trust onboarding)"
 # ext.wasm from step 2 is signed with the throwaway key: signature and
 # trust must apply to pulled bytes unchanged.
@@ -1367,39 +1092,23 @@ echo "$OUT" | grep -q "ambient env leaked" \
     || fail "ambient env was not visible under the default WASI policy: $OUT"
 echo "ok — ambient WASI: the guest inherits the host env by default"
 
-OUT="$(TAU_AMBIENT=hunter2 "$TAU" --allow-unsigned --deny-wasi -e "$UPPER" -e "$GUARD" \
-    --demo -p "shout wasicheck" 2>&1)" || fail "deny-wasi run: $OUT"
-echo "$OUT" | grep -q "tool ← upper: SHOUT WASICHECK" \
-    || fail "--deny-wasi did not hide the ambient env from the guest: $OUT"
-echo "ok — --deny-wasi: the guest env is empty, the sandbox holds"
+# --- step 10b: host channel (facts flow; steer lands) ------------------
+step "10b/11 host channel (notify/emit facts; steer lands)"
 
-# --- step 10b: host channel (facts flow; injection consent-gated) ------
-step "10b/11 host channel (notify/emit facts; steer consent gate)"
-
-# Without --allow-inject: notify/emit reach the renderer and the bus;
-# steer fails closed with a named refusal inside the tool result.
+# notify/emit reach the renderer and the bus; steer queues and lands on the
+# decision trail. Since 0.8.0 there is no injection consent flag to pass
+# (docs/wit-0.8-draft.md ruling 1): installing the component was the grant.
 OUT="$("$TAU" --allow-unsigned -e "$NOTIFIER" --demo -p "hello host" 2>&1)" \
     || fail "notifier run: $OUT"
 echo "$OUT" | grep -q "ext info: poke: hello host" \
     || fail "host.notify did not reach the renderer: $OUT"
 echo "$OUT" | grep -q 'ext fact: {"poke":"hello host"}' \
     || fail "host.emit did not reach the event bus: $OUT"
-echo "$OUT" | grep -q "steer refused: session injection not consented" \
-    || fail "steer without consent was not refused: $OUT"
-echo "$OUT" | grep -q "\[tau\] steer:" && fail "refused steer still landed: $OUT"
-echo "ok — facts flow; injection fails closed without consent"
-
-# With --allow-inject: the steer queues, applies at the turn checkpoint,
-# and shows on the decision trail.
-OUT="$("$TAU" --allow-unsigned --allow-inject -e "$NOTIFIER" --demo -p "hello host" 2>&1)" \
-    || fail "notifier inject run: $OUT"
-echo "$OUT" | grep -q "consent: may inject messages into the session" \
-    || fail "consent UX line missing: $OUT"
 echo "$OUT" | grep -q "steer queued" \
-    || fail "consented steer was not accepted: $OUT"
+    || fail "steer was not accepted: $OUT"
 echo "$OUT" | grep -q "\[tau\] steer: hello host" \
-    || fail "consented steer did not land at the checkpoint: $OUT"
-echo "ok — consent granted: steer queues and lands on the trail"
+    || fail "steer did not land at the checkpoint: $OUT"
+echo "ok — facts flow; steer queues and lands on the trail"
 
 # A 0.1.0-contract component is refused with the version mismatch named.
 OLD_UPPER="$ROOT/dist/tau-0.2.0-x86_64-pc-windows-gnu/examples/c_upper.wasm"
@@ -1459,16 +1168,4 @@ else
     echo "skip — pywinpty not installed; av live e2e not run"
 fi
 
-# --- step 11d: realtime-av Phase 2b (docs/realtime-av.md) ---
-# The same full-duplex loop behind the wasm boundary (world realtime,
-# examples/realtime-echo), plus the microphone consent category: the
-# grant guards the DEVICE (real-mic path refuses without it; the sine
-# path never touches a device and flows regardless).
-step "11d/11 realtime over wasm (consent gate + duplex through world realtime)"
-if python -c "import winpty" 2> /dev/null; then
-    python "$ROOT/scripts/av_wasm_live_e2e.py" "$TAU" "$REALTIME_ECHO" "$WORK/av-wasm-live-e2e" || fail "av wasm live e2e failed"
-else
-    echo "skip — pywinpty not installed; av wasm live e2e not run"
-fi
-
-step "ALL ELEVEN STEPS PASSED — the release candidate stands"
+step "ALL STEPS PASSED — the release candidate stands"

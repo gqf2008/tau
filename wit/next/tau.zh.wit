@@ -1,0 +1,689 @@
+package tau:extension@0.8.0;
+
+/// 中文本（阅读用）。权威是英文版 wit/next/tau.wit；两份文件必须逐条一致，声明行逐字节相同，
+/// 只有注释是中文。任何声明上的分歧都是 bug，不是翻译口味。
+///
+/// ---- 0.8.0：做减法（评审草案，2026-10-01）----
+///
+/// 状态：提案。现行契约仍是 wit/tau.wit（0.7.0）；本文件只在评审通过后才成为契约本体
+/// （0.7.0 从草案变成契约的先例见 docs/wit-redesign.md）。
+///
+/// 三条裁定，一个方向：契约只保留只有契约才能做的事。
+///
+///   1. 运行时能力门全部删除，--deny-wasi 一并删除。在 ambient WASI 全开（fs / env /
+///      stdio / args / 网络）的前提下，origin 白名单或 argv 批准从来不是边界：组件直接
+///      import wasi:sockets 或 wasi:filesystem 就绕开了受门保护的接口（docs/extensions.md
+///      第 7 节、wit-review F1）。不是墙的门只让每个用户多学一套词汇，换不到安全。留下
+///      的是唯一一次授权动作——安装 / 信任签名后的字节——而安装时展示的声明来自组件类型
+///      本身，不是手写的。因此 types.error 删掉 refused：运行时不再有“没人批准”这种失败，
+///      而没有生产者的分支不该留在契约里。
+///   2. 没有组件再是模型。删除 world provider、world realtime、interface models、
+///      interface session。模型是 harness 自己的大脑；厂商 wire 格式（chat completions、
+///      responses、messages、realtime socket）是宿主代码，媒体面本来也在那里。这条线划在
+///      有用的地方：模型集合是封闭的、归本仓库所有；工具协议集合保持开放，并且不进核心
+///      （走桥）。
+///   3. 音视频不跨这条 ABI。设备 I/O、时钟、抖动缓冲、播放都归宿主（docs/realtime-av.md
+///      红线 1）：guest 没有可 await 的时钟，所以实时截止时间不是它能满足的东西——这是
+///      结构性事实，不是性能测量。realtime world 消失后媒体面全程在宿主内部；订阅路径保留
+///      音频臂，但只给计数——观察者能知道助手正在出声、出了多久，永远听不到它，这条规则
+///      总线本来就有。
+///
+/// 净效果：四个 world 变成两个（extension、bridge）；stream/future 只留在桥的 I/O 接口上，
+/// 于是 component model 的 async ABI 不再是“写一个 tau 扩展”的属性，而是“跟外部世界说话”
+/// 的属性——这也正是非 Rust 语言矩阵目前卡住的地方（docs/wasm-languages.md）。
+///
+/// 删除的代价，写出来而不是等人发现：
+///   * 模型覆盖变成发布节奏——本仓库没内置的厂商没有组件路径。逃生舱是 OpenAI 兼容的
+///     --base-url 宿主配置，不是新的契约面；
+///   * 组件始终以 tau 进程的权限运行。签名回答“这是哪个组件”，从不回答“它能做什么”；
+///     如果要真边界，那是围绕 tau 进程的 OS 级问题（账户、容器、VM）。
+///
+/// ---- 0.7.0（未改，仍然有效）：async / stream / resource 重设计
+///      （docs/wit-redesign.md）----
+///
+/// 只改形状：功能集就是 0.6.0 的，减去那些只为同步 ABI 而存在的部分。
+///
+///   * u64 句柄与宿主侧代际表变成 resource。所有权取代了“未知句柄 / trap 重建后的过期
+///     句柄”整个错误族，丢弃资源就是关闭。
+///   * 有界轮询（process.read-stdout(.., max, timeout-ms)、http.read-body(.., max,
+///     timeout-ms)、ws.recv(handle, timeout-ms)、process.write-stdin(..) -> taken）变成
+///     stream<T> 与 future<result<_, error>>。背压来自流的容量，取消来自丢弃流，没有调用
+///     再停放宿主线程——于是“0 被拒绝，因为永久阻塞不是契约”不再是契约问题，而是传输层
+///     的默认。
+///   * schema 归 tau 的载荷全部类型化——探测点、探测载荷与判定、通知级别、订阅主题。
+///     JSON 只留在 tau 不拥有 schema 的叶子上：工具参数、JSON Schema、扩展自定义事实。
+///   * 宿主失败被分类（types.error），不再以未类型化字符串到达、逼 guest 做模式匹配。
+///
+/// 承载 stream/future 的 world 两侧都需要 Component Model async ABI（wasmtime 49+、
+/// wit-bindgen 0.62+）——0.8.0 之后只有桥 world 需要。它不要求 WASI 0.3：guest 仍是
+/// wasm32-wasip2，import 的是 wasi:*@0.2.x。
+///
+/// 故意不在这里的（每一条都是能力，不是形状）：
+///   * guest 里的媒体面（0.8.0 裁定 3——设备、时钟、缓冲归宿主）；
+///   * 组件当模型（0.8.0 裁定 2——模型是宿主代码）。回来条件写在这里，好让反转的代价
+///     可控：如果长尾厂商或自建网关被证明无法通过内置 provider 加 OpenAI 兼容端点触达，
+///     回来的路是一个独立的包，而不是这一份，这样语言矩阵与 1.0.0 的契约冻结都不受扰动；
+///   * 流式媒体源（media-source.stream）——blob 臂已经覆盖装不下的大载荷；
+///   * 流式请求体（http.request 的 body 作为流）；
+///   * process 的 env/cwd（组件继承宿主的环境与 cwd；argv 是桥声明它要跑什么的方式）；
+///   * host.subscribe 的流形态（见接口注释）。
+
+/// ---- 消息主干：schema 归 tau，所以是类型而不是 JSON ----
+///
+/// 内容块与消息，宿主通道共用（见 docs/host-channel.md）。约定（docs/extensions.md）：
+/// schema 归 tau 的载荷用 WIT 类型；JSON 只活在 tau 不拥有 schema 的叶子上（工具参数、
+/// JSON Schema、扩展自定义事实）。
+interface types {
+    /// 谁产生了一条消息。对应 tau_core::types::Role。
+    enum role {
+        /// 人（或代表他的 harness）。
+        user,
+        /// 模型。
+        assistant,
+        /// 一条工具结果消息。
+        tool,
+    }
+
+    /// 响应为什么结束。对应 tau_core::model::StopReason。0.7.0 起放在 types 里：探测载荷
+    /// 也要用它（after-response、before-run-end），而原来拥有它的那个接口 events 已经不存在。
+    enum stop-reason {
+        /// 模型结束了自己的回合。
+        stop,
+        /// 模型要求执行工具调用。
+        tool-use,
+        /// 撞到输出上限。
+        length,
+        /// 因失败结束（此前的 error 事件会说明）。
+        error,
+        /// 被外部取消（例如一次 steer 打断）。
+        aborted,
+    }
+
+    /// 宿主调用为什么失败。
+    ///
+    /// 0.8.0 起是两个分支：运行时同意门消失后，不再有“没人授权”这种失败，refused 失去生产
+    /// 者，随门一起离开契约。分支是 guest 用来分流的；字符串是给人读日志的细节。永远不要
+    /// 匹配字符串。
+    variant error {
+        /// 调用本身失败了：网络错误、对端消失、子进程退出、程序找不到、被 OS 拒绝权限、签名
+        /// 校验失败。细节是宿主或 OS 自己的消息。
+        failed(string),
+        /// 这个调用在这里不成立：未知主题、超出尺寸上限、状态不对、已经关闭。属于 guest 的 bug
+        /// 或契约误用。
+        invalid(string),
+    }
+
+    /// 一个媒体载荷。对应 tau_core::types::Media：媒体类型与字节所在，别的一概没有。原始
+    /// 字节跨 ABI——永远不是 base64（base64 只存在于 tau 的 JSON 边缘：会话文件、厂商 HTTP）。
+    record media {
+        /// MIME 类型，例如 "image/png"、"audio/pcm;rate=24000"。
+        media-type: string,
+        /// 字节所在。
+        source: media-source,
+    }
+
+    /// 媒体的字节在哪里。对应 tau_core::types::MediaSource。0.7.0 考虑过为装不下的载荷加一个
+    /// stream(list<u8>) 分支，最后没加：blob 分支是内容寻址的、已经在盘上，而且它不会让
+    /// content 的每个载体都变成流的所有者。
+    variant media-source {
+        /// 原始字节。
+        bytes(list<u8>),
+        /// 远端引用；当模型的 API 直接接受 URL 时，宿主把它透传过去。
+        url(string),
+        /// 内容寻址 blob 存储的引用："sha256:<hex>"。
+        blob(string),
+    }
+
+    /// 不是图像、音频或视频片段的附件。对应 tau_core::types::Content::File，文件名字段在这个
+    /// 分支上（和 Rust 里一样），不在 media 上。
+    record file {
+        /// 文件载荷。
+        media: media,
+        /// 原始文件名，已知时。
+        name: option<string>,
+    }
+
+    /// 助手请求的一次工具调用。
+    record tool-call {
+        /// provider 分配的调用 id（由 tool-result 回显）。
+        id: string,
+        /// 已注册的工具名。
+        name: string,
+        /// 唯一的 JSON 叶子：模型产出的任意 JSON 参数。
+        arguments-json: string,
+    }
+
+    /// 工具结果的一个块：content 的非递归那一半。
+    ///
+    /// 它必须是独立 variant，这是工具链事实而不是风格选择：content 经由工具结果指回自己会被
+    /// 拒绝——wasm-tools component wit 的回答是 error: type `content` depends on itself
+    /// （任意 JSON 的递归 `json` 同样失败）。因此 Rust 的 Content::ToolResult { content:
+    /// Vec<Content> } 比 ABI 宽；工具结果里不会再出现工具调用或嵌套结果，所以这个收窄是语义
+    /// 上的，不是有损的。分支与 content 的非工具分支一一对应，并且保持对应：宿主转换器穷尽
+    /// 匹配，一边加了分支、另一边漏掉是编译错误，不是静默漂移。
+    variant result-block {
+        /// 纯文本块。
+        text(string),
+        /// 一张图像（截图、照片、示意图）。
+        image(media),
+        /// 一段音频。
+        audio(media),
+        /// 一段视频。
+        video(media),
+        /// 任意文件附件（PDF、压缩包、源码包……）。
+        file(file),
+    }
+
+    /// 一次工具调用的结果，作为对话内容。0.3.0 起支持多块（docs/tool-media.md、
+    /// wit-review F4）；媒体字节跨 ABI 是原始的，永远不是 base64。
+    record tool-result {
+        /// 这个结果回答的调用。
+        call-id: string,
+        /// 结果块：文本和/或媒体。
+        content: list<result-block>,
+        /// 工具报告失败时为真。
+        is-error: bool,
+    }
+
+    /// 消息内容的一个块。与 tau_core::types::Content 逐分支对应——包括四个媒体分支：guest
+    /// 明说自己在发哪种媒介，而不是让宿主从 MIME 主类型推断。（那条推断、以及它带来的
+    /// “给图像命名即校验错误”规则都消失了：分支就是意图。）
+    variant content {
+        /// 纯文本块。
+        text(string),
+        /// 一张图像（截图、照片、示意图）。
+        image(media),
+        /// 一段音频。
+        audio(media),
+        /// 一段视频。
+        video(media),
+        /// 任意文件附件（PDF、压缩包、源码包……）。
+        file(file),
+        /// 助手请求的一次工具调用。
+        tool-call(tool-call),
+        /// 一次工具调用的结果。
+        tool-result(tool-result),
+    }
+
+    /// 对话里的一条消息：角色加有序的块。
+    record message {
+        /// 谁产生的。
+        role: role,
+        /// 有序的块：文本、媒体、工具调用/结果。
+        content: list<content>,
+    }
+}
+
+/// 扩展贡献给 agent 的工具。
+interface tools {
+    use types.{result-block};
+
+    /// 模型可以调用的工具，用 JSON Schema 参数对象描述。
+    record definition {
+        name: string,
+        description: string,
+        /// 工具参数的 JSON Schema，序列化后。用 JSON 是因为 JSON Schema 本身就是 tau 不拥有的
+        /// schema 语言。
+        parameters-json: string,
+    }
+
+    record tool-result {
+        /// 交回给模型的结果块：文本和/或一个媒体块（图像/音频/视频/文件——0.3.0 起多块，
+        /// docs/tool-media.md）。call-id 由宿主配对，guest 永远看不到。
+        content: list<result-block>,
+        is-error: bool,
+    }
+
+    /// 加载时调用一次，枚举本组件提供的工具。
+    ///
+    /// 0.7.0 起是 async，这不是装饰：工具清单在远端服务器上的桥（examples/mcp-bridge）必须
+    /// 在这里完成握手，而同步降低的导出无法等待任何东西。这是实测而非假设——在同步导出里
+    /// block_on 会以 "cannot block a synchronous task before returning" trap
+    /// （docs/wit-redesign.md §5，leg 5）。清单是字面量的扩展什么也不等，读起来和从前一样。
+    definitions: async func() -> list<definition>;
+
+    /// 执行一次工具调用。arguments-json 是模型产出的、符合定义中 schema 的 JSON 对象。
+    ///
+    /// 0.7.0 起是 async：需要跟宿主说话的工具（http、process、ws）就在原地 await 那些调用，
+    /// 而不是在同步 guest 调用里停放宿主线程。结果仍然是整块的——工具进度的流式是另一个
+    /// 特性，不会借由结果块的流偷偷塞进来。
+    execute: async func(name: string, arguments-json: string) -> tool-result;
+}
+
+/// 探测点：扩展可以观察并影响一次运行的生命周期位置。点位清单与载荷形状见
+/// docs/probes.md。（0.1.0 里叫 hooks；改名是为了对齐代码、文档与 tau probes 命令——
+/// wit-review F7。）
+///
+/// 0.7.0 起类型化。0.6.0 传 point: string + payload-json: string：点集与每个载荷形状都是
+/// tau 的、写在 docs/probes.md 里，那是 tau 自己地盘上的 JSON。要裁剪上下文的 guest 不再
+/// 需要解析消息主干。
+///
+/// 仍然刻意保持同步：harness 会暂停循环、等判定返回，所以探测点是决策点，不是做 I/O 的
+/// 机会。async 探测会让组件用一次网络调用把整次运行按住；需要 I/O 的探测应当快速返回，
+/// 把 I/O 放进工具里做。
+interface probes {
+    use types.{message, stop-reason, tool-call, tool-result, result-block};
+    use tools.{definition};
+
+    /// 探测点，命名与 docs/probes.md 一致（WIT 分支是 kebab-case，宿主里的字符串形式是
+    /// snake_case：before-tool 在总线上和 tau probes 里是 before_tool）。
+    enum point {
+        /// 1. 用户的提示词，运行开始之前。
+        before-run,
+        /// 2. 组装好的上下文（系统提示词 + 消息）。
+        transform-context,
+        /// 3. 最终请求：system、messages、tools。
+        before-request,
+        /// 4. 组装好的助手消息及其停止原因。
+        after-response,
+        /// 5. 一次工具调用，执行之前。
+        before-tool,
+        /// 6. 一次工具调用的结果。
+        after-tool,
+        /// 7. 本次运行产出的消息与停止原因。
+        before-run-end,
+        /// 8. 摘要器即将看到的消息集合。
+        before-compaction,
+        /// 9. 一次分支导航，发生之前。
+        before-navigation,
+        /// 仅观察：一个会话被创建。
+        session-start,
+        /// 仅观察：一次分支导航被应用。
+        branch,
+        /// 仅观察：会话干净结束。
+        session-end,
+    }
+
+    /// 点 2 组装好的上下文；replace 可以返回其中任一个字段被改动（system: none 表示
+    /// “别动系统提示词”）。
+    record assembled-context {
+        system: option<string>,
+        messages: list<message>,
+    }
+
+    /// 点 3 的最终请求，在上下文组装之后。
+    record final-request {
+        system: option<string>,
+        messages: list<message>,
+        tools: list<definition>,
+    }
+
+    /// 点 4：模型产出的消息，以及它为什么停下。
+    record assembled-response {
+        message: message,
+        stop: stop-reason,
+    }
+
+    /// 点 6：模型要求的调用，以及回来的东西。
+    record tool-outcome {
+        call: tool-call,
+        content: list<result-block>,
+        is-error: bool,
+    }
+
+    /// 点 7：本次运行产出了什么。
+    record run-end {
+        messages: list<message>,
+        stop: stop-reason,
+    }
+
+    /// 点 8。reason 的值是宿主给的（"manual"、"auto"），对应 tau_core 的压缩条目。
+    record compaction {
+        reason: string,
+        messages: list<message>,
+    }
+
+    /// 点 9：target 是一个条目 id，summary 是它的首行（渲染器会显示的那行）。
+    record navigation {
+        target: string,
+        summary: string,
+    }
+
+    /// 仅观察的点：session-start/session-end 形状相同，branch 则点出导航的两端。
+    record session-facts {
+        session: string,
+        cwd: string,
+        model: string,
+    }
+
+    /// 导航离开的那个条目（宿主的 from；from 是 WIT 关键字，所以字段不能叫这个名字），以及
+    /// 移动到的那个条目。
+    record branch {
+        previous: option<string>,
+        to: string,
+    }
+
+    /// 每个点一个分支，各带该点的载荷。宿主会校验配对：before-tool 的探测不能用 navigation
+    /// 载荷作答（那是 invalid）。
+    variant payload {
+        before-run(message),
+        transform-context(assembled-context),
+        before-request(final-request),
+        after-response(assembled-response),
+        before-tool(tool-call),
+        after-tool(tool-outcome),
+        before-run-end(run-end),
+        before-compaction(compaction),
+        before-navigation(navigation),
+        session-start(session-facts),
+        branch(branch),
+        session-end(session-facts),
+    }
+
+    /// 探测的作答。block 携带交回给模型或用户的原因；在三个仅观察点上，block 会在总线上记为
+    /// 已忽略、永不被采纳（docs/probes.md）。
+    variant verdict {
+        /// 没有意见；运行原样继续。
+        continue,
+        /// 改用这个载荷，而不是被探测的值——就是探测被调用时的同一个分支，改动的字段被替换。
+        replace(payload),
+        /// 否决这个动作；原因就是全部作答。
+        block(string),
+    }
+
+    /// 本组件处理的探测点，加载时一次调用。空列表 = 本组件什么都不观察。
+    points: func() -> list<point>;
+
+    /// 同步探测调用：点和载荷进去，判定出来。harness 处于暂停状态，所以热路径上的处理必须快。
+    probe: func(point: point, payload: payload) -> verdict;
+}
+/// 桥的生命周期里异步的那一半。
+///
+/// probes.probe 是同步的，并且保持同步：对扩展来说它是 agent 自身热路径上的决策点，
+/// async 探测会让组件用一次网络调用把整次运行按住。桥的处境不同，因为它的义务恰好落在
+/// 这些点上：IM 适配器在 session-start 打开长连接、在 after-response 投递平台的回复，
+/// 而 0.7.0 起这两者都是 async func（ws.connect、http.request），同步降低的导出根本
+/// 无法 await——这是实测的，而且不是靠 spawn 能修的：从同步降低的导出里 spawn 出来的
+/// 任务永远不会被轮询（docs/wit-redesign.md 第 5 节，legs 1b/1c）。
+///
+/// 所以宿主在 probe 对同一个点作答之后立刻调用 turn，带同样的载荷，处于组件可以 await 的
+/// 上下文里。某个点上没事可做的桥直接返回；I/O 在别处（mcp-bridge 全在 definitions 里）
+/// 的桥导出一个空体。同步 probe 仍然是那个决策，和从前完全一样。
+interface bridge-io {
+    use probes.{point, payload};
+
+    /// 一个探测调用点，异步版。它刻意不返回任何东西：决策是 probe 的判定，桥在这里得知的
+    /// 事情由它自己行动（steer、notify、投递）。
+    turn: async func(point: point, payload: payload);
+}
+
+/// guest→host 通道：扩展的主动回传路径。事实类（notify/emit）始终可用；决策对
+/// （steer/follow-up）写进用户的对话，那是 ambient WASI 唯一无法模仿的权力——0.8.0 起
+/// 它随安装记录一起授予，不再是每次运行一个开关。每个调用都是入队——没有一个会同步重入
+/// agent 循环；投递遵循控制通道既有的检查点规则（steer 落在当前回合在途工具结果之后，
+/// follow-up 在运行结束时）。见 docs/host-channel.md 语义红线。
+interface host {
+    use types.{message, content, error};
+
+    /// 通知的严重程度。0.7.0 起类型化（0.6.0 传字符串 "info" | "warn" | "error" 并在注释里说明）。
+    enum level {
+        info,
+        warn,
+        error,
+    }
+
+    /// 一条订阅可以承载的主题（docs/stream-subscribe.md）。0.7.0 起类型化：未知主题以前是
+    /// 字符串、宿主必须在调用时拒绝，现在不可表示。
+    ///
+    /// 两个分支都在 0.8.0 留下来，但含义不同：不再有 guest 产出音频（裁定 3），所以
+    /// audio-delta 是只观察、只计数的——扩展可以知道助手正在出声、出了多久，永远听不到它。
+    enum topic {
+        text-delta,
+        audio-delta,
+    }
+
+    /// 一段助手音频，以计数形式。0.8.0 起宿主是助手音频的唯一生产者（媒体路径上没有 guest），
+    /// 而字节仍然不走这条通道：它们作为内容落在助手消息里，观察者只看到计数与媒体类型。
+    record audio-segment {
+        /// 这一段到了多少字节。
+        bytes: u64,
+        /// 它们所属段的媒体类型。
+        media-type: string,
+    }
+
+    /// 一条由 poll 抽出的高频流事件。
+    variant stream-event {
+        /// 订阅的环溢出了：下一条事件之前有 n 条被丢弃。
+        lagged(u64),
+        /// 助手文本的一个片段。
+        text-delta(string),
+        /// 一段助手音频，计数形式——永远不是字节。
+        audio-delta(audio-segment),
+    }
+
+    /// 一条订阅。0.7.0 起是资源：句柄代际表、“未知句柄”错误族以及显式退订都收敛成所有权
+    /// ——丢弃即退订。
+    ///
+    /// 刻意不做成 stream<stream-event>（重设计在别处的方向）：总线发布者是 agent 循环，流会
+    /// 让运行的进度受制于最慢的 guest——那正是“有界环 + lagged”要避免的停顿。lagged 不是
+    /// 轮询的副产物；它是对“guest 没在读”的诚实回答，换哪种载体它都在。
+    resource subscription {
+        /// 非阻塞地抽干积压（没有积压时为空）。环容量 1024 条（与总线一致）；溢出时这一批以
+        /// lagged(n) 开头。
+        poll: func() -> list<stream-event>;
+    }
+
+    /// 用户可见的通知；渲染器画出文本块与媒体块的占位。不进入模型历史。
+    notify: func(level: level, content: list<content>) -> result<_, error>;
+
+    /// 把一个扩展自定义的事实发布到事件总线（仅观察）。这个事实的 schema 在 tau 之外，所以
+    /// 这里仍是 JSON 叶子；但它必须是合法 JSON，否则结果会说明。
+    emit: func(event-json: string) -> result<_, error>;
+
+    /// steer 当前运行：消息入队到控制通道，在下一个检查点落地。宿主校验 role==user 与尺寸
+    /// 上限并报告违规；它不会在调用时再问一次——这项权力属于安装记录（0.8.0：ambient WASI
+    /// 唯一无法模仿的能力）。
+    steer: func(message: message) -> result<_, error>;
+
+    /// 在 agent 结束后排队一条要运行的消息。校验同 steer。
+    follow-up: func(message: message) -> result<_, error>;
+
+    /// 订阅高频流事件（docs/stream-subscribe.md——F2 的高频腿）。guest 主动拉——宿主在这条
+    /// 路径上从不异步调进组件——所以抽干发生在 guest 自己的调用里，订阅的粒度就是 guest 自己
+    /// 的调用频率。在一次运行之外（例如 definitions 期间）总线没有接上，subscribe 会失败。
+    subscribe: func(topics: list<topic>) -> result<subscription, error>;
+}
+
+/// spawn-with-pipes：给桥组件用的通用宿主能力。普通扩展不链接它：只读写文件的工具没有
+/// 理由启动进程，所以 extension world 根本不 import 它（0.8.0：world 边界就是声明，它
+/// 后面不再有“逐命令授权”这道门）。
+///
+/// 0.7.0 起基于资源，而这正是重设计的大部分意义：每个 timeout-ms 参数、write-stdin 的
+/// 短写记账（“取走的，不是送达的”——一次会超时的阻塞写说不清自己送出去多少，wit-review
+/// F12）以及句柄代际表，全都因为同步调用说不出“还没有”而存在。流用等待来说这件事，而
+/// guest 自己的 await 才是截止时间该待的地方。
+interface process {
+    use types.{error};
+
+    record options {
+        /// argv[0] 是程序；宿主在 PATH 上解析它并施加自己的环境策略（env 与 cwd 不是契约字段：
+        /// 组件继承宿主的）。
+        argv: list<string>,
+    }
+
+    record exit-status {
+        /// 退出码，进程自己退出时。
+        code: option<u32>,
+        /// 结束它的信号，在有信号的平台上。
+        signal: option<string>,
+    }
+
+    resource child {
+        /// spawn 并返回子进程。程序起不来时失败（找不到、权限被拒）。
+        spawn: static func(options: options) -> result<child, error>;
+
+        /// 子进程的 stdin，作为一条 guest 写、宿主泵的流。丢弃可写端会关闭管道（子进程看到 EOF）；
+        /// future 在宿主把一切都送出去之后解析，或者管道断了——它的错误会说明是哪一种。
+        stdin: func(data: stream<u8>) -> future<result<_, error>>;
+
+        /// 子进程的 stdout，从调用那一刻起（每个子进程一次）。流在 EOF 结束——子进程死亡时也
+        /// 结束，这就是退出状态来自 wait、而不是来自流的结束的原因。
+        stdout: func() -> stream<u8>;
+
+        /// 子进程的 stderr，契约同 stdout。
+        stderr: func() -> stream<u8>;
+
+        /// 子进程退出时解析。问两次不是错误；两个 future 用同一个状态解析。
+        wait: func() -> future<exit-status>;
+
+        /// 终止子进程（整个进程树）并释放。幂等。
+        kill: func() -> result<_, error>;
+    }
+}
+
+/// HTTP 请求：桥组件用的网络能力。请求发往组件说的地方；重定向永不跟随，因为重定向到达的
+/// 端点不是组件要求的那个（这里的协议——MCP streamable HTTP、平台 API——都明确写出自己
+/// 的端点）。纯数据、基于资源，形状同 process——不依赖 wasi:http。
+interface http {
+    use types.{error};
+
+    /// 一个已开始的响应。request 一返回元数据就可用（响应头已到）；body 是流。
+    resource response {
+        /// HTTP 状态码。
+        status: func() -> u16;
+
+        /// 一个响应头的值（例如 content-type、mcp-session-id）。
+        header: func(name: string) -> option<string>;
+
+        /// 响应体，增量消费。SSE 流和任何别的 body 一样读：读已经到的部分，读完就停——丢弃流即
+        /// 放弃剩余并关闭连接，这是 SSE 消费者唯一需要的取消。对沉默的对端，宿主保持自己的空闲
+        /// 策略，并通过结束流来报告。
+        body: func() -> stream<u8>;
+    }
+
+    /// 发起一次请求，响应头到达时返回。method 原样透传——请发大写（"GET"、"POST"）；服务器
+    /// 对方法名大小写敏感。body 是值而不是流：tau 的请求承载 MCP JSON-RPC 消息与 OAuth 取
+    /// token 调用，都不大到值得再加一个方向的流。
+    request: async func(method: string, url: string, headers: list<tuple<string, string>>, body: list<u8>) -> result<response, error>;
+}
+
+/// WebSocket 连接：桥组件用的帧管道能力，服务于流式协议（IM 长连接——docs/im-channels.md）。
+/// 宿主只是管道：它从不解析载荷。
+interface ws {
+    use types.{error};
+
+    /// 一个线上帧。文本帧承载 UTF-8（IM 流协议是文本帧 JSON）；管道对线上形状是诚实的。
+    variant frame {
+        text(string),
+        binary(list<u8>),
+    }
+
+    resource connection {
+        /// 连接到一个 ws(s) URL。0.7.0 起是 async：TCP/TLS 连接与升级握手就是这个调用等待的
+        /// 东西，而等待不再是参数。
+        connect: static async func(url: string) -> result<connection, error>;
+
+        /// 发送一个帧。await 这个调用意味着帧已经被**写入**套接字，而不只是入队——已经发出的
+        /// ack 即使进程随后立刻退出也仍然是发过的（dingtalk ack 的教训），而一次 await 把这件事
+        /// 说得和从前的阻塞调用一样准。
+        send: async func(frame: frame) -> result<_, error>;
+
+        /// 对端发来的帧，到达即得。宿主每 30s ping 一次，并在 60s 内没有任何入站帧或 pong 之后
+        /// 关闭连接；那个关闭结束流，future 的错误会说明原因。重连与追平是组件自己的事。
+        receive: func() -> tuple<stream<frame>, future<result<_, error>>>;
+
+        /// 自上次调用以来到达的帧，不等待——给那些**无法** await 的 guest。
+        ///
+        /// 桥的入站泵运行在**同步**探测里（docs/im-channels.md，同步 guest 模型下的入站泵）：
+        /// 同步降低的导出根本无法 await 一次流读取，也无法指派一个任务去做——从同步降低的导出
+        /// 里 spawn 出来的任务永远不会被轮询（实测两次：docs/wit-redesign.md 第 5 节 legs 1b/1c，
+        /// 以及为这个决定再做的一次，带一个来自 async 导出、确实跑起来了的正对照）。所以队列
+        /// 只能用这样的 guest 唯一拥有的形状抽干：一次调用。
+        ///
+        /// host.subscribe 得到的是同一个答案，理由相同：流会把节奏交给另一端，而这个 guest 根本
+        /// 无法等待。
+        ///
+        /// 每条连接一个消费者：receive 与 poll 不瓜分任何东西——谁第二个被调用谁得到 invalid。
+        /// 空列表表示“还没有”；actor 已经消失的连接在这里失败，但已经到达的帧会先被投递（它们
+        /// 不会为了报告结束而被丢掉）。
+        poll: func() -> result<list<frame>, error>;
+    }
+}
+
+/// Webhook 入站：桥组件的 LISTEN 能力（IM webhook 平台——WhatsApp Business Cloud、企业
+/// 微信 callback；docs/im-channels.md）。WASI p2 没有 listen，所以宿主跑 HTTP 服务器，把
+/// 每个请求推进组件的 ingress-handler 导出；导出的返回值**就是** HTTP 响应（平台的 ack /
+/// 同步回复）。宿主是管道：method/path/headers/body 原样通过，对平台密钥的签名验证是组件
+/// 自己的事（密钥在它手里，宿主从不持有）。监听地址是宿主配置（CLI --ingress），不是
+/// 逐组件的授权。
+interface ingress {
+    use types.{error};
+
+    /// 一条已注册的路由。0.7.0 起是资源：丢弃它即停止服务该路由，于是“关闭一条从未注册的
+    /// 路由”（0.6.0 不得不定义的错误）不可表示。
+    resource registration;
+
+    /// 在宿主的监听地址上注册 route（绝对路径，例如 "/im/whatsapp"，CLI --ingress）。每条
+    /// 路由一个注册；重复注册报错而不是遮蔽。
+    listen: func(route: string) -> result<registration, error>;
+}
+
+/// Webhook 入站的推送那一半：宿主对已注册路由上的每个入站 HTTP 请求调用一次
+/// handle-request，在实例锁下进行（正在工具调用中的组件会让 webhook 排队——平台会重试，
+/// 那是平台的事实，不是损失）。宿主仍按实例串行；0.7.0 起 async 意味着需要向外调用
+/// （http、process）的处理程序就地 await，而不是在平台的超时时长里停放宿主线程。返回的
+/// 响应原样写回。没有 webhook 腿的桥仍然要导出它（0.3.0 的 world 让它成为必需），用一个
+/// 返回 501 的桩——除非组件监听了，否则没人调用它。
+interface ingress-handler {
+    /// 一个入站 HTTP 请求。
+    record request {
+        /// 命中的路由（listen() 的参数）。
+        route: string,
+        /// 大写的请求方法，原样透传。
+        method: string,
+        /// 请求路径（今天 == route；路由目前是精确路径——前缀匹配是未来的契约项，不在这里猜）。
+        path: string,
+        /// 原始查询字符串，完全按收到的那样（没有前导 ?，缺省时为空）——**不解析**：百分号解码、
+        /// 重复键与键值顺序是组件的语义（企业微信的 msg_signature 这类签名方案就在 query 里，
+        /// 宿主是管道）。
+        query: string,
+        /// 按收到时的响应头（名字由 HTTP 层小写化）。
+        headers: list<tuple<string, string>>,
+        /// 原始 body 字节。
+        body: list<u8>,
+    }
+
+    /// 要写回的 HTTP 响应。
+    record response {
+        status: u16,
+        headers: list<tuple<string, string>>,
+        body: list<u8>,
+    }
+
+    handle-request: async func(request: request) -> response;
+}
+
+
+/// 通用扩展：工具和/或探测，加上宿主通道。
+///
+/// ambient WASI（fs/env/stdio/args/网络）始终授予，而 0.8.0 起没有 --deny-wasi、也没有
+/// 任何逐能力门：组件以 tau 进程的权限运行。安装/信任它签名后的字节就是授权动作；安装时
+/// 展示的声明是它的 import 与 export，从组件类型读出。签名说的是“这是哪个组件”，不是
+/// “它能做什么”——如果要边界，那是围绕 tau 进程的 OS 级边界。
+world extension {
+    import host;
+    export tools;
+    export probes;
+}
+
+/// 桥组件把外部工具协议（今天是 MCP）翻译成 tau 工具。宿主对那个协议一无所知；它只提供
+/// 桥声明的能力（process spawn、http、ws、ingress），而这些在 0.8.0 之后不在调用时设门
+/// ——它被安装成哪个 world，那就是声明。
+///
+/// 桥组件是长命的协议翻译器（MCP、IM 平台）。0.3.0 起（docs/im-channels.md 契约修订）
+/// 这个 world 承载完整的 IM 三腿集合：网络（process/http/ws）+ 宿主通道
+/// （steer/follow-up 入站注入）+ 探测（after_response 出站观察；没什么可观察的桥返回空
+/// points() 列表）。同一趟 0.3.0 稍后（docs/im-channels.md 的 ingress 一节）：webhook 平台
+/// 得到 import ingress + export ingress-handler（宿主把每个入站请求推进来；返回值就是
+/// HTTP 响应；没有 webhook 腿的桥导出一个 501 桩）。
+world bridge {
+    import process;
+    import http;
+    import ws;
+    import host;
+    import ingress;
+    export tools;
+    export probes;
+    export bridge-io;
+    export ingress-handler;
+}

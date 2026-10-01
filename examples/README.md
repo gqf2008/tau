@@ -8,8 +8,6 @@ policy, load them with `--allow-unsigned` (or sign them with your own key:
 | file | kind | try it |
 |------|------|--------|
 | `upper.wasm` | extension (tool) | `tau --allow-unsigned -e examples/upper.wasm --demo -p "shout hello using the upper tool"` |
-| `echo_provider.wasm` | provider | `tau --allow-unsigned --provider-wasm examples/echo_provider.wasm --model echo -p "hello"` |
-| `http_provider.wasm` | provider (http capability) | `tau --allow-unsigned --provider-wasm examples/http_provider.wasm --model http --provider-origin http://example.com -p "http://example.com/"` (add `--provider-auth <token>` to hand it a bearer credential) |
 | `mcp_bridge.wasm` | bridge (MCP) | `tau --allow-unsigned --mcp-bridge examples/mcp_bridge.wasm --mcp-command '["python","server.py"]' -p "hi"` |
 | `guard.wasm` | extension (probe) | `tau --allow-unsigned -e examples/upper.wasm -e examples/guard.wasm --demo -p "shout forbidden"` → the `before_tool` probe blocks the call and the model sees the reason |
 | `notifier.wasm` | extension (host channel) | `tau --allow-unsigned -e examples/notifier.wasm --demo -p "hello"` → notify/emit reach the renderer, steer is refused; add `--allow-inject` and the steer lands |
@@ -20,7 +18,6 @@ policy, load them with `--allow-unsigned` (or sign them with your own key:
 | `whatsapp_bridge.wasm` | bridge (IM adapter: webhook ingress + reply POST) | `tau --allow-unsigned --mcp-bridge examples/whatsapp_bridge.wasm --mcp-url http://<platform-send-api> --ingress 127.0.0.1:9001 --allow-inject --demo` → the host binds the consented ingress address, the platform's webhook POST steers the session, the answer is posted back (loopback: `scripts/wa_mock.py`, full pty loop: `scripts/wa_ingress_e2e.py`) |
 | `wecom_bridge.wasm` | bridge (IM adapter: webhook ingress with component-side AES/msg_signature) | same shape as whatsapp plus the crypto gate: tampered signatures get 403 before anything is decrypted (loopback: `scripts/wecom_mock.py`, full pty loop: `scripts/wecom_ingress_e2e.py`) |
 | `dingtalk_bridge.wasm` | bridge (IM adapter: stream mode, CALLBACK double-decode + in-band ack) | `tau --allow-unsigned --mcp-bridge examples/dingtalk_bridge.wasm --mcp-url ws://<host>/dt --allow-inject --demo -p "hi"` → ack frame and reply POST both reach the platform (loopback: `scripts/dt_mock.py`) |
-| `realtime_echo.wasm` | provider (realtime, world `realtime`) | `tau --allow-unsigned --provider-wasm examples/realtime_echo.wasm --model echo-realtime` then `/live 2 sine` in the REPL → synthesized mic uplink crosses the boundary, the guest VADs and echoes every chunk back to the live playback sink (`--microphone` only for a real mic) |
 
 Three more components are built outside cargo — they need their own
 toolchains — and are shipped prebuilt so you can load-test without

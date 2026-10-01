@@ -94,24 +94,12 @@ struct Cli {
     #[arg(long, value_parser = ["openai", "responses", "anthropic"])]
     provider: Option<String>,
 
-    /// Wasm provider component; sets --model to select one of its models.
-    #[arg(long)]
-    provider_wasm: Option<PathBuf>,
-
-    /// Consent: this wasm realtime provider may drive HOST-side
-    /// microphone capture (docs/realtime-av.md — the category guards
-    /// the device; `/live N sine` synthesizes and needs no grant).
-    /// Remembered per signing fingerprint with --remember.
-    #[arg(long, requires = "provider_wasm")]
-    microphone: bool,
-
     /// Run against the scripted faux model; no API key needed.
     #[arg(long)]
     demo: bool,
 
     /// MCP bridge component; requires --mcp-command and/or --mcp-url.
-    /// Granting them IS the consent: the bridge may spawn exactly this
-    /// argv and/or reach exactly this origin.
+    /// The argv is what the bridge runs, the URL where it connects.
     #[arg(long)]
     mcp_bridge: Option<PathBuf>,
 
@@ -120,67 +108,24 @@ struct Cli {
     #[arg(long)]
     mcp_command: Option<String>,
 
-    /// Remote MCP server URL (streamable HTTP). Its origin becomes the
-    /// bridge's HTTP consent allowlist — the bridge can reach exactly this
-    /// origin and nothing else.
+    /// Remote MCP server URL (streamable HTTP), delivered to the bridge as
+    /// TAU_MCP_URL.
     #[arg(long)]
     mcp_url: Option<String>,
-
-    /// Bearer token handed to the wasm provider inside every request
-    /// payload ({"auth": {"bearer": ...}}). Giving it IS the consent to
-    /// place the token in guest memory. The token is never persisted;
-    /// the delivery grant can be, per signing fingerprint, with
-    /// --remember — a remembered grant lets TAU_PROVIDER_AUTH flow
-    /// without the flag. Without flag or remembered grant the env var
-    /// alone does NOT reach the component.
-    #[arg(long, requires = "provider_wasm")]
-    provider_auth: Option<String>,
-
-    /// HTTP origin a wasm provider may reach (repeatable), e.g.
-    /// --provider-origin https://api.openai.com — remembered per signing
-    /// fingerprint with --remember.
-    #[arg(long = "provider-origin")]
-    provider_origin: Vec<String>,
-
-    /// Deny ambient WASI capabilities (fs/env/stdio/args/network) to all
-    /// components — the pre-allow-all sandbox. Consent-gated custom
-    /// capabilities (bridge process/http, provider origins) are
-    /// unaffected. With --remember the deny is persisted per signing
-    /// fingerprint and applies to that component on later runs without
-    /// the flag (sticky — lift it with `tau consent --revoke`).
-    #[arg(long)]
-    deny_wasi: bool,
 
     /// Load unsigned components. By default every extension, provider, and
     /// bridge must carry a valid signature from a key in ~/.tau/trust.
     #[arg(long)]
     allow_unsigned: bool,
 
-    /// Consent to session injection for every extension and bridge loaded
-    /// this run: the component may push user messages into the session
-    /// from inside tool/probe calls (host.steer / host.follow-up) — the
-    /// IM inbound leg (docs/im-channels.md). With --remember the grant
-    /// persists per signing fingerprint (lift it with
-    /// `tau consent --revoke`). Notifications (host.notify/emit) are facts
-    /// and never need this grant.
-    #[arg(long)]
-    allow_inject: bool,
-
-    /// Consent to webhook ingress for the bridge (docs/im-channels.md):
-    /// it may listen on the given addr:port (repeatable) and receive
-    /// inbound HTTP requests pushed into its ingress-handler export —
-    /// the WhatsApp/企微-class webhook leg. The consent names the
-    /// ADDRESS (orthogonal to the origin allowlist); TLS is terminated
-    /// by the tunnel in front, this listener speaks plain HTTP.
+    /// Webhook ingress for the bridge (docs/im-channels.md): the addr:port
+    /// the host's ingress server serves (repeatable), receiving inbound HTTP
+    /// requests into the bridge's ingress-handler export — the
+    /// WhatsApp/企微-class webhook leg. Host configuration, not a grant
+    /// (0.8.0); TLS is terminated by the tunnel in front, this listener
+    /// speaks plain HTTP.
     #[arg(long)]
     ingress: Vec<String>,
-
-    /// Persist this run's capability grants — bridge command/url/origins,
-    /// provider credential delivery, WASI deny — under each loaded
-    /// component's signing fingerprint; later runs recall them without
-    /// the flags. Secrets are never persisted, only grants.
-    #[arg(long)]
-    remember: bool,
 }
 
 impl Cli {
@@ -218,15 +163,6 @@ enum Sub {
         /// Machine-readable output.
         #[arg(long)]
         json: bool,
-    },
-    /// Manage remembered capability consent (per signing fingerprint).
-    Consent {
-        /// List fingerprints with remembered grants.
-        #[arg(long)]
-        list: bool,
-        /// Revoke remembered grants for a fingerprint.
-        #[arg(long)]
-        revoke: Option<String>,
     },
     /// Garbage-collect the blob store: keep blobs referenced by the
     /// given sessions, report (or with --yes, delete) the rest.
@@ -272,44 +208,6 @@ enum Sub {
 
 async fn run_sub(sub: Sub) -> Result<()> {
     match sub {
-        Sub::Consent { list, revoke } => {
-            let store = tau_ext::consent::ConsentStore::default();
-            if let Some(fp) = revoke {
-                anyhow::ensure!(store.revoke(&fp)?, "no remembered consent for {fp}");
-                println!("revoked: {fp}");
-                return Ok(());
-            }
-            if list {
-                for fp in store.list() {
-                    println!("{fp}");
-                    if let Some(consent) = store.load(&fp) {
-                        if let Some(command) = &consent.command {
-                            println!("  command: {}", serde_json::to_string(command)?);
-                        }
-                        if let Some(url) = &consent.mcp_url {
-                            println!("  mcp_url: {url}");
-                        }
-                        for origin in &consent.origins {
-                            println!("  origin: {origin}");
-                        }
-                        if consent.auth_delivery {
-                            println!("  auth_delivery: true");
-                        }
-                        for addr in &consent.ingress {
-                            println!("  ingress: listen on {addr}");
-                        }
-                        if consent.inject {
-                            println!("  inject: session injection (steer/follow-up)");
-                        }
-                        if consent.wasi_deny {
-                            println!("  wasi_deny: true");
-                        }
-                    }
-                }
-                return Ok(());
-            }
-            anyhow::bail!("usage: tau consent --list | tau consent --revoke <fingerprint>");
-        }
         Sub::Probes { json } => {
             if json {
                 let entries: Vec<serde_json::Value> = tau_core::probe::CATALOG
@@ -478,7 +376,6 @@ async fn run_sub(sub: Sub) -> Result<()> {
     Ok(())
 }
 
-
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -514,7 +411,6 @@ async fn main() -> Result<()> {
         probes,
         model,
         model_label,
-        mic_consent,
         system,
     } = setup::build(&cli).await?;
 
@@ -609,7 +505,10 @@ async fn main() -> Result<()> {
         }
         if cli.print.is_none() && !interactive {
             agent
-                .observe(ProbePoint::SessionEnd, ProbePayload::SessionEnd(session_facts))
+                .observe(
+                    ProbePoint::SessionEnd,
+                    ProbePayload::SessionEnd(session_facts),
+                )
                 .await;
             return Ok(());
         }
@@ -632,7 +531,10 @@ async fn main() -> Result<()> {
         agent
             .observe(
                 ProbePoint::Branch,
-                ProbePayload::Branch(Branch { previous: from, to: id }),
+                ProbePayload::Branch(Branch {
+                    previous: from,
+                    to: id,
+                }),
             )
             .await;
     }
@@ -650,12 +552,9 @@ async fn main() -> Result<()> {
                 let inject_tx = inject_tx.clone();
                 Box::pin(async move {
                     let rebuilt = setup::build(&flags).await?;
-                    let mut agent =
-                        Agent::new(Box::new(SharedModel(rebuilt.model)), rebuilt.tools)
-                            .probes(rebuilt.probes)
-                            .blobs(tau_core::BlobStore::new(
-                                tau_core::BlobStore::default_dir(),
-                            ));
+                    let mut agent = Agent::new(Box::new(SharedModel(rebuilt.model)), rebuilt.tools)
+                        .probes(rebuilt.probes)
+                        .blobs(tau_core::BlobStore::new(tau_core::BlobStore::default_dir()));
                     rebuilt.host.wire_host_channel(agent.bus(), inject_tx);
                     if let Some(system) = rebuilt.system {
                         agent = agent.system(system);
@@ -675,7 +574,6 @@ async fn main() -> Result<()> {
             base,
             session_facts,
             inject_rx,
-            mic_consent,
             reload,
         )
         .await;
@@ -767,7 +665,10 @@ async fn main() -> Result<()> {
                     eprintln!("[tau] ext {level}: {line}");
                 }
                 Ok(AgentEvent::ExtensionFact(fact)) => {
-                    eprintln!("[tau] ext fact: {}", repl::compact_preview(&fact.to_string()))
+                    eprintln!(
+                        "[tau] ext fact: {}",
+                        repl::compact_preview(&fact.to_string())
+                    )
                 }
                 Ok(AgentEvent::FollowUp(message)) => {
                     eprintln!("[tau] follow-up: {}", message.text())
@@ -821,7 +722,10 @@ async fn main() -> Result<()> {
     frames.retire();
     eprintln!("[tau] session: {}", session_path.display());
     agent
-        .observe(ProbePoint::SessionEnd, ProbePayload::SessionEnd(session_facts))
+        .observe(
+            ProbePoint::SessionEnd,
+            ProbePayload::SessionEnd(session_facts),
+        )
         .await;
     Ok(())
 }
@@ -882,5 +786,4 @@ mod tests {
         let entries = vec![entry("a", None), entry("b", Some("a")), entry("z", None)];
         assert_eq!(entry_depths(&entries), vec![0, 1, 0]);
     }
-
 }

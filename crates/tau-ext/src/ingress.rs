@@ -31,9 +31,8 @@ const TICK: Duration = Duration::from_millis(250);
 /// for the human reading the log. Same shape as `http::HttpError`.
 #[derive(Debug)]
 pub(crate) enum IngressError {
-    /// No listen address is consented: the host CLI was never given one.
-    Refused(String),
-    /// The address is consented and the bind failed (taken, no permission).
+    /// The bind failed (taken, no permission), or the host serves no
+    /// listen address at all.
     Failed(String),
     /// The call is not valid here: a route that is not an absolute path, or
     /// one that is already registered.
@@ -43,7 +42,6 @@ pub(crate) enum IngressError {
 impl std::fmt::Display for IngressError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Refused(detail) => write!(f, "refused: {detail}"),
             Self::Failed(detail) => write!(f, "failed: {detail}"),
             Self::Invalid(detail) => write!(f, "invalid: {detail}"),
         }
@@ -115,9 +113,10 @@ impl IngressRegistry {
     /// registered" error, are both unrepresentable now).
     pub(crate) fn listen(self: &Arc<Self>, route: &str) -> Result<HostRegistration, IngressError> {
         if self.addrs.is_empty() {
-            return Err(IngressError::Refused(
-                "ingress not consented: pass --ingress <addr:port> to let this bridge listen"
-                    .into(),
+            // Not a gate (0.8.0): the listen address is host configuration, and
+            // a host with none configured has no server to register a route on.
+            return Err(IngressError::Failed(
+                "ingress: the host serves no listen address (configure one with --ingress)".into(),
             ));
         }
         if !route.starts_with('/') || route.contains(['?', '#']) {
@@ -161,8 +160,8 @@ impl IngressRegistry {
         if servers.contains_key(addr) {
             return Ok(());
         }
-        let server = tiny_http::Server::http(addr)
-            .map_err(|e| format!("cannot listen on {addr}: {e}"))?;
+        let server =
+            tiny_http::Server::http(addr).map_err(|e| format!("cannot listen on {addr}: {e}"))?;
         let registry = Arc::clone(self);
         let handle = std::thread::Builder::new()
             .name(format!("ingress-{addr}"))
@@ -229,9 +228,7 @@ fn dispatch(registry: &Arc<IngressRegistry>, mut request: tiny_http::Request) {
         for (name, value) in headers {
             // Header::from_bytes rejects invalid bytes — a component
             // cannot smuggle CRLF into the response this way.
-            if let Ok(header) =
-                tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes())
-            {
+            if let Ok(header) = tiny_http::Header::from_bytes(name.as_bytes(), value.as_bytes()) {
                 response.add_header(header);
             }
         }
@@ -260,7 +257,12 @@ fn dispatch(registry: &Arc<IngressRegistry>, mut request: tiny_http::Request) {
         .unwrap_or_else(|e| e.into_inner())
         .upgrade();
     let Some(target) = target else {
-        return respond(request, 503, Vec::new(), b"component not bound yet".to_vec());
+        return respond(
+            request,
+            503,
+            Vec::new(),
+            b"component not bound yet".to_vec(),
+        );
     };
     let wit_request = wit_ingress::Request {
         route: path.clone(),
@@ -271,12 +273,7 @@ fn dispatch(registry: &Arc<IngressRegistry>, mut request: tiny_http::Request) {
         body,
     };
     match ingress_dispatch(&target, wit_request) {
-        Ok(response) => respond(
-            request,
-            response.status,
-            response.headers,
-            response.body,
-        ),
+        Ok(response) => respond(request, response.status, response.headers, response.body),
         Err(trap_note) => respond(request, 502, Vec::new(), trap_note.into_bytes()),
     }
 }

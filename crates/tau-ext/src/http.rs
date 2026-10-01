@@ -1,9 +1,9 @@
-//! Origin-allowlisted HTTP capability shared by the provider, realtime and
-//! bridge worlds. The registry is granted a set of "scheme://host[:port]"
-//! origins by explicit user consent; every request's origin is checked
-//! before sending, and redirects are never followed (a redirect would
-//! escape consent). Granted empty, every call fails permission-denied at
-//! call time, not instantiation time.
+//! HTTP requests for bridge components: the host's own client, streaming
+//! responses, no redirects. Since 0.8.0 there is no origin allowlist
+//! (docs/wit-0.8-draft.md ruling 1 — the runtime capability gates are gone):
+//! requests go where the component says, because the network is ambient.
+//! Redirects are still never followed — a redirect is a different endpoint
+//! than the one the component asked for.
 //!
 //! Since 0.7.0 a started response is a resource the guest owns
 //! (`http.response`) and its body is a stream: dropping the stream stops
@@ -21,7 +21,6 @@
 //! request no longer needs a helper thread or the blocking pool, and the
 //! bounded body queue back-pressures a fast peer instead of buffering it.
 
-use std::collections::HashSet;
 use std::pin::Pin;
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -69,10 +68,8 @@ const DIRECT_CAPACITY: usize = 8192;
 /// detail is for the human reading the log.
 #[derive(Debug)]
 pub(crate) enum HttpError {
-    /// No consent covers this origin: the URL is not in the allowlist.
-    Refused(String),
-    /// Consent covered it and the call failed: the peer is gone, or it
-    /// took longer than the host's budget to answer.
+    /// The call failed: the peer is gone, or it took longer than the
+    /// host's budget to answer.
     Failed(String),
     /// The call is not valid here: a URL the host cannot dial, a method
     /// token reqwest rejects, or a full resource table.
@@ -82,7 +79,6 @@ pub(crate) enum HttpError {
 impl std::fmt::Display for HttpError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Refused(detail) => write!(f, "refused: {detail}"),
             Self::Failed(detail) => write!(f, "failed: {detail}"),
             Self::Invalid(detail) => write!(f, "invalid: {detail}"),
         }
@@ -206,7 +202,10 @@ impl<D> StreamProducer<D> for BodyStream {
 /// Hand the response's body to the guest. A resource that is not in the
 /// table (or whose body was already taken) yields an empty stream -- the
 /// contract's `body` has no error to report with.
-pub(crate) fn take_body(table: &mut ResourceTable, response: &Resource<HostResponse>) -> BodyStream {
+pub(crate) fn take_body(
+    table: &mut ResourceTable,
+    response: &Resource<HostResponse>,
+) -> BodyStream {
     match table.get_mut(response) {
         Ok(response) => response.take_body(),
         Err(_) => {
@@ -293,24 +292,24 @@ pub(crate) async fn send(
     Ok(HostResponse {
         status,
         headers: response_headers,
-        body: Some(BodyStream { rx, pending: Vec::new() }),
+        body: Some(BodyStream {
+            rx,
+            pending: Vec::new(),
+        }),
     })
 }
 
 /// The consent allowlist plus the shared HTTP client. Every request goes
 /// through [`HttpRegistry::start`] before a byte leaves the process.
 pub(crate) struct HttpRegistry {
-    /// Consented origins: "scheme://host[:port]". Empty = deny all.
-    origins: HashSet<String>,
     /// Redirects are never followed: a redirect would silently move the
     /// request to an origin the user did not consent to.
     client: reqwest::Client,
 }
 
 impl HttpRegistry {
-    pub(crate) fn new(origins: HashSet<String>) -> Self {
+    pub(crate) fn new() -> Self {
         Self {
-            origins,
             client: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
                 .build()
@@ -348,15 +347,14 @@ impl HttpRegistry {
     /// is ever held across an await (a std guard across an await makes the
     /// host's future `!Send`).
     pub(crate) fn start(&self, url: &str) -> Result<reqwest::Client, HttpError> {
-        let origin =
-            Self::origin_of(url).ok_or_else(|| HttpError::Invalid(format!("bad url: {url}")))?;
-        if !self.origins.contains(&origin) {
-            return Err(HttpError::Refused(format!(
-                "http: origin {origin} not in consent allowlist ({} granted)",
-                self.origins.len()
-            )));
-        }
+        Self::origin_of(url).ok_or_else(|| HttpError::Invalid(format!("bad url: {url}")))?;
         Ok(self.client.clone())
+    }
+}
+
+impl Default for HttpRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -401,8 +399,8 @@ mod tests {
         out
     }
 
-    fn registry_for(url: &str) -> HttpRegistry {
-        HttpRegistry::new([origin(url).expect("origin")].into_iter().collect())
+    fn registry_for(_url: &str) -> HttpRegistry {
+        HttpRegistry::new()
     }
 
     #[test]
@@ -435,156 +433,6 @@ mod tests {
         assert_eq!(origin("http://"), None);
         assert_eq!(origin("http:///path"), None);
         assert_eq!(origin("not a url"), None);
-    }
-
-    #[test]
-    fn origin_matching_is_exact_and_fail_closed_on_normalized_forms() {
-        // WHATWG/IDNA normalizations the client applies but the gate
-        // does NOT: each of these computes an origin that differs from
-        // the plain form, so consent for one never covers the other.
-        // That is a usability wart in the SAFE direction — a mismatch
-        // refuses. If normalization is ever added it must happen on
-        // BOTH sides of the comparison, or the differential reopens.
-        let cases = [
-            // Trailing dot: same DNS answer, different origin.
-            ("http://example.com./", "http://example.com."),
-            // Explicit default port vs the implicit form.
-            ("http://example.com:80/", "http://example.com:80"),
-            // Empty port (the client drops it).
-            ("http://example.com:/", "http://example.com:"),
-            // IDN: raw unicode, no punycode mapping on our side.
-            ("http://exämple.com/", "http://exämple.com"),
-            // UTS-46 ideographic full stop: the client maps it to ".";
-            // we do not, so consent for example.com does not leak.
-            ("http://example。com/", "http://example。com"),
-        ];
-        for (url, want) in cases {
-            assert_eq!(origin(url), Some(want.to_string()), "url: {url}");
-        }
-        // Tabs/CR/LF (which the URL spec strips entirely) stay raw on
-        // our side: they simply never match a consented origin.
-        assert_eq!(
-            origin("http://example\t.com/"),
-            Some("http://example\t.com".into())
-        );
-        // None of the normalized twins pass a gate consented to the
-        // plain form.
-        let registry = HttpRegistry::new(["http://example.com".to_string()].into_iter().collect());
-        for url in [
-            "http://example.com./",
-            "http://example.com:80/",
-            "http://example.com:/",
-            "http://example\t.com/",
-        ] {
-            let err = registry.start(url).unwrap_err();
-            assert!(
-                matches!(err, HttpError::Refused(_)),
-                "normalized twin slipped the gate: {url} -> {err}"
-            );
-        }
-    }
-
-    #[test]
-    fn gate_and_client_agree_on_every_accepted_url() {
-        // The dangerous direction of a parser differential: the gate
-        // accepts (origin IS the consented one) but the HTTP client
-        // dials a different host. For every URL our extractor maps to
-        // the consented origin, reqwest's own parser must name the
-        // same scheme, host, and port.
-        let consented = "http://127.0.0.1:8402";
-        let urls = [
-            "http://127.0.0.1:8402/",
-            "http://127.0.0.1:8402",
-            "http://user:pw@127.0.0.1:8402/x?q=1#f",
-            "http://@127.0.0.1:8402/",
-            "http://127.0.0.1:8402/path",
-            // Backslash after the authority: path material, same host.
-            "http://127.0.0.1:8402\\@evil.invalid/",
-            // The bypass shapes must NOT reach this test's assert —
-            // the gate computes a different origin for them (covered
-            // above), so they are skipped here by construction.
-            "http://evil.invalid?@127.0.0.1:8402/",
-            "http://evil.invalid#@127.0.0.1:8402/",
-            "http://evil.invalid\\@127.0.0.1:8402/",
-            "http://127.0.0.1:8402.evil.invalid/",
-        ];
-        for url in urls {
-            let Some(computed) = origin(url) else {
-                continue;
-            };
-            if computed != consented {
-                continue; // the gate refuses these — asserted elsewhere
-            }
-            let parsed = reqwest::Url::parse(url)
-                .unwrap_or_else(|_| panic!("gate accepted but the client cannot parse: {url}"));
-            let client_origin = match parsed.port() {
-                Some(port) => format!(
-                    "{}://{}:{port}",
-                    parsed.scheme(),
-                    parsed.host_str().expect("host")
-                ),
-                None => format!("{}://{}", parsed.scheme(), parsed.host_str().expect("host")),
-            };
-            assert_eq!(
-                client_origin, consented,
-                "gate/client disagree on {url}: gate saw {computed}, client dials {client_origin}"
-            );
-        }
-    }
-
-    #[test]
-    fn consent_bypasses_via_delimiters_are_closed() {
-        // Every one of these asks: does the check see the same host the
-        // WHATWG parser in reqwest will dial? The authority ends at the
-        // first of / ? # \ — anything after is not userinfo.
-        let cases = [
-            // `@` inside the query: host is evil, not 127.0.0.1.
-            ("http://evil.test?@127.0.0.1:8402/", "http://evil.test"),
-            // `@` inside the fragment.
-            ("http://evil.test#@127.0.0.1:8402/", "http://evil.test"),
-            // Backslash is a path delimiter for special schemes (WHATWG):
-            // reqwest dials evil.test, so the origin must be evil.test.
-            ("http://evil.test\\@127.0.0.1:8402/", "http://evil.test"),
-            // Suffix lookalikes were never the consented host.
-            (
-                "http://127.0.0.1:8402.evil.test/",
-                "http://127.0.0.1:8402.evil.test",
-            ),
-        ];
-        for (url, want) in cases {
-            assert_eq!(origin(url), Some(want.to_string()), "url: {url}");
-        }
-    }
-
-    #[tokio::test]
-    async fn request_gate_applies_the_computed_origin() {
-        let registry = registry_for("http://127.0.0.1:8402");
-        // The consented origin passes the gate (the send itself then
-        // fails — nothing listens — but the error must not be the
-        // allowlist).
-        let client = registry
-            .start("http://127.0.0.1:8402/")
-            .expect("consented origin passes the gate");
-        let err = send(&client, "GET", "http://127.0.0.1:8402/", &[], &[], BUDGET, BUDGET)
-            .await
-            .unwrap_err();
-        assert!(
-            !matches!(err, HttpError::Refused(_)),
-            "consented origin refused: {err}"
-        );
-        // The delimiter tricks must never pass the gate.
-        for url in [
-            "http://evil.test?@127.0.0.1:8402/",
-            "http://evil.test#@127.0.0.1:8402/",
-            "http://evil.test\\@127.0.0.1:8402/",
-            "http://127.0.0.1:8402.evil.test/",
-        ] {
-            let err = registry.start(url).unwrap_err();
-            assert!(
-                matches!(err, HttpError::Refused(_)),
-                "bypass slipped the gate: {url} -> {err}"
-            );
-        }
     }
 
     #[tokio::test]

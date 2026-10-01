@@ -11,10 +11,9 @@
 //! make a dead connection indistinguishable from a quiet one.
 //! Reconnect and catch-up are the component's job.
 
-use std::collections::HashSet;
 use std::io;
 use std::net::TcpStream;
-use std::sync::{mpsc, Arc};
+use std::sync::{Arc, mpsc};
 use std::time::{Duration, Instant};
 
 use tungstenite::stream::MaybeTlsStream;
@@ -58,10 +57,8 @@ pub(crate) enum WsCommand {
 /// variant is what a guest branches on, the detail is for the log.
 #[derive(Debug)]
 pub(crate) enum WsError {
-    /// No consent covers this origin: the URL is not in the allowlist.
-    Refused(String),
-    /// Consent covered it and the call failed: no handshake within the
-    /// host's budget, the peer is gone, the actor stopped.
+    /// The call failed: no handshake within the host's budget, the peer is
+    /// gone, the actor stopped.
     Failed(String),
     /// The call is not valid here: not a ws(s) URL, or a connection whose
     /// actor is already gone.
@@ -71,7 +68,6 @@ pub(crate) enum WsError {
 impl std::fmt::Display for WsError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Self::Refused(detail) => write!(f, "refused: {detail}"),
             Self::Failed(detail) => write!(f, "failed: {detail}"),
             Self::Invalid(detail) => write!(f, "invalid: {detail}"),
         }
@@ -257,17 +253,15 @@ pub fn origin_of(url: &str) -> Option<String> {
 }
 
 /// The consent allowlist. Since 0.7.0 the connections themselves live in
-/// the guest's resource table, not here: what is left is the one thing the
-/// registry could never delegate -- who is allowed to connect at all.
-pub(crate) struct WsRegistry {
-    /// Consented origins in http(s) form (ws:->http:, wss:->https:).
-    /// Empty = deny all.
-    origins: HashSet<String>,
-}
+/// WebSocket registry. Since 0.7.0 the connections themselves live in the
+/// guest's resource table, not here; since 0.8.0 there is no allowlist
+/// either (docs/wit-0.8-draft.md ruling 1), so what is left is the connect
+/// budget and the frame-pipe plumbing.
+pub(crate) struct WsRegistry;
 
 impl WsRegistry {
-    pub(crate) fn new(origins: HashSet<String>) -> Self {
-        Self { origins }
+    pub(crate) fn new() -> Self {
+        Self
     }
 
     /// Consent origin of a ws(s) URL, in the http(s) form the allowlist
@@ -297,15 +291,8 @@ impl WsRegistry {
         url: &str,
         timeout_ms: u32,
     ) -> Result<HostConnection, WsError> {
-        let origin =
-            Self::origin_of(url)
-                .ok_or_else(|| WsError::Invalid(format!("ws.connect: not a ws(s) URL: {url:?}")))?;
-        if !self.origins.contains(&origin) {
-            return Err(WsError::Refused(format!(
-                "ws.connect: origin {origin} not consented (bridge endpoints are consented \
-                 like http origins — the host CLI passes them, e.g. --mcp-url)"
-            )));
-        }
+        Self::origin_of(url)
+            .ok_or_else(|| WsError::Invalid(format!("ws.connect: not a ws(s) URL: {url:?}")))?;
         // tungstenite::connect does TCP + TLS + the upgrade handshake in one
         // blocking call with no bound of its own: a peer that accepts and then
         // stalls would park the host thread forever (wit-review F11). Run it
@@ -321,7 +308,7 @@ impl WsRegistry {
             match rx.recv_timeout(Duration::from_millis(u64::from(timeout_ms))) {
                 Ok(Ok(pair)) => pair,
                 Ok(Err(e)) => {
-                    return Err(WsError::Failed(format!("ws.connect {origin}: {e}")));
+                    return Err(WsError::Failed(format!("ws.connect {url}: {e}")));
                 }
                 Err(mpsc::RecvTimeoutError::Timeout) => {
                     return Err(WsError::Failed(format!(
@@ -330,7 +317,7 @@ impl WsRegistry {
                 }
                 Err(mpsc::RecvTimeoutError::Disconnected) => {
                     return Err(WsError::Failed(format!(
-                        "ws.connect {origin}: the connect thread died"
+                        "ws.connect {url}: the connect thread died"
                     )));
                 }
             };
@@ -348,6 +335,12 @@ impl WsRegistry {
             inbound: Inbound::Free,
             ended: None,
         })
+    }
+}
+
+impl Default for WsRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
@@ -384,9 +377,7 @@ fn actor(
                         WsFrame::Text(t) => Message::Text(t.into()),
                         WsFrame::Binary(b) => Message::Binary(b.into()),
                     };
-                    let result = socket
-                        .send(message)
-                        .map_err(|e| format!("ws.send: {e}"));
+                    let result = socket.send(message).map_err(|e| format!("ws.send: {e}"));
                     let failed = result.is_err();
                     // The caller waits on this even when the write
                     // failed — answer first, then die.
@@ -442,8 +433,8 @@ fn actor(
             }
             Ok(Message::Frame(_)) => {} // raw frames never surface from read()
             Err(tungstenite::Error::Io(e))
-                if e.kind() == io::ErrorKind::WouldBlock
-                    || e.kind() == io::ErrorKind::TimedOut => {}
+                if e.kind() == io::ErrorKind::WouldBlock || e.kind() == io::ErrorKind::TimedOut => {
+            }
             Err(e) => {
                 let _ = frames.send(Err(format!("ws: {e}")));
                 return;
@@ -484,7 +475,10 @@ mod tests {
         // queue, so the stream's take is refused instead of ending as if
         // the connection were over (the receipt carries the reason).
         let (mut poll_first, _frames) = HostConnection::scripted();
-        assert!(poll_first.poll_inbound().unwrap().is_empty(), "nothing yet is not an end");
+        assert!(
+            poll_first.poll_inbound().unwrap().is_empty(),
+            "nothing yet is not an end"
+        );
         assert_eq!(
             poll_first.take_inbound().unwrap_err(),
             InboundError::AlreadyOwned,
@@ -500,9 +494,14 @@ mod tests {
             poller.poll_inbound().unwrap(),
             vec![WsFrame::Text("one".into()), WsFrame::Binary(vec![2])]
         );
-        assert!(poller.poll_inbound().unwrap().is_empty(), "an empty inbox is not an end");
+        assert!(
+            poller.poll_inbound().unwrap().is_empty(),
+            "an empty inbox is not an end"
+        );
         frames.send(Ok(WsFrame::Text("three".into()))).unwrap();
-        frames.send(Err("ws: peer closed the connection".into())).unwrap();
+        frames
+            .send(Err("ws: peer closed the connection".into()))
+            .unwrap();
         assert_eq!(
             poller.poll_inbound().unwrap(),
             vec![WsFrame::Text("three".into())],
@@ -534,16 +533,20 @@ mod tests {
     }
 
     #[test]
-    fn unconsented_origin_and_bad_url_fail_loud() {
-        let registry = WsRegistry::new(HashSet::new());
-        let err = registry
-            .connect_with_timeout("ws://127.0.0.1:9/", 1_000)
-            .unwrap_err();
-        assert!(err.to_string().contains("not consented"), "{err}");
+    fn a_bad_url_and_a_dead_peer_fail_loud() {
+        let registry = WsRegistry::new();
+        // Not a ws(s) URL: rejected before any socket is touched.
         let err = registry
             .connect_with_timeout("ftp://x.test/", 1_000)
             .unwrap_err();
         assert!(err.to_string().contains("not a ws(s) URL"), "{err}");
+        // Dialable but nothing listening: a `failed`, naming the peer. Since
+        // 0.8.0 there is no allowlist to refuse it first (docs/wit-0.8-draft.md
+        // ruling 1), so the connect is attempted and fails on its own terms.
+        let err = registry
+            .connect_with_timeout("ws://127.0.0.1:9/", 1_000)
+            .unwrap_err();
+        assert!(err.to_string().starts_with("failed: ws.connect"), "{err}");
     }
 
     #[test]
@@ -560,13 +563,15 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(1500));
             drop(stream);
         });
-        let origin = format!("http://127.0.0.1:{port}");
-        let registry = WsRegistry::new([origin].into_iter().collect());
+        let registry = WsRegistry::new();
         let started = std::time::Instant::now();
         let err = registry
             .connect_with_timeout(&format!("ws://127.0.0.1:{port}/x"), 300)
             .unwrap_err();
-        assert!(err.to_string().contains("no handshake within 300ms"), "{err}");
+        assert!(
+            err.to_string().contains("no handshake within 300ms"),
+            "{err}"
+        );
         assert!(
             started.elapsed() < std::time::Duration::from_millis(1200),
             "connect outlived its budget: {:?}",
@@ -583,5 +588,4 @@ mod tests {
         const { assert!(CONNECT_TIMEOUT_MS > 0) };
         const { assert!(CONNECT_TIMEOUT_MS <= 60_000) };
     }
-
 }

@@ -68,32 +68,101 @@ struct SlashCommand {
 }
 
 const COMMANDS: &[SlashCommand] = &[
-    SlashCommand { usage: "/new", desc: "start a fresh session file", group: Group::Session },
-    SlashCommand { usage: "/resume [#n|name]", desc: "list the sessions here; switch to one", group: Group::Session },
-    SlashCommand { usage: "/name <name>", desc: "display name for the session (carried by the file name)", group: Group::Session },
-    SlashCommand { usage: "/session", desc: "session file, entries, head, model", group: Group::Session },
-    SlashCommand { usage: "/tree", desc: "print the session tree, head marked", group: Group::Session },
-    SlashCommand { usage: "/fork [#index|id-prefix]", desc: "fork history at an older entry", group: Group::Session },
-    SlashCommand { usage: "/clone", desc: "duplicate the session file, continue in the copy", group: Group::Session },
-    SlashCommand { usage: "/compact [instructions]", desc: "compact context; instructions steer the summary", group: Group::Session },
-    SlashCommand { usage: "/import <path>", desc: "open another session JSONL and continue it here", group: Group::Session },
-    SlashCommand { usage: "/export [path]", desc: "write the session out (JSONL; a .html path renders HTML)", group: Group::Export },
-    SlashCommand { usage: "/copy", desc: "copy the last assistant message to the clipboard", group: Group::Export },
-    SlashCommand { usage: "/hotkeys", desc: "key bindings", group: Group::Runtime },
-    SlashCommand { usage: "/changelog", desc: "recent changelog entries (nearest CHANGELOG.md)", group: Group::Runtime },
-    SlashCommand { usage: "/reload", desc: "rebuild tools/probes/model from the startup flags", group: Group::Runtime },
-    SlashCommand { usage: "/help", desc: "this list", group: Group::Runtime },
-    SlashCommand { usage: "/quit", desc: "exit (alias: /exit)", group: Group::Runtime },
-    SlashCommand { usage: "/mic <sec> [sine]", desc: "record a voice message (sine synthesizes)", group: Group::Tau },
-    SlashCommand { usage: "/live <sec> [sine]", desc: "full-duplex live session", group: Group::Tau },
+    SlashCommand {
+        usage: "/new",
+        desc: "start a fresh session file",
+        group: Group::Session,
+    },
+    SlashCommand {
+        usage: "/resume [#n|name]",
+        desc: "list the sessions here; switch to one",
+        group: Group::Session,
+    },
+    SlashCommand {
+        usage: "/name <name>",
+        desc: "display name for the session (carried by the file name)",
+        group: Group::Session,
+    },
+    SlashCommand {
+        usage: "/session",
+        desc: "session file, entries, head, model",
+        group: Group::Session,
+    },
+    SlashCommand {
+        usage: "/tree",
+        desc: "print the session tree, head marked",
+        group: Group::Session,
+    },
+    SlashCommand {
+        usage: "/fork [#index|id-prefix]",
+        desc: "fork history at an older entry",
+        group: Group::Session,
+    },
+    SlashCommand {
+        usage: "/clone",
+        desc: "duplicate the session file, continue in the copy",
+        group: Group::Session,
+    },
+    SlashCommand {
+        usage: "/compact [instructions]",
+        desc: "compact context; instructions steer the summary",
+        group: Group::Session,
+    },
+    SlashCommand {
+        usage: "/import <path>",
+        desc: "open another session JSONL and continue it here",
+        group: Group::Session,
+    },
+    SlashCommand {
+        usage: "/export [path]",
+        desc: "write the session out (JSONL; a .html path renders HTML)",
+        group: Group::Export,
+    },
+    SlashCommand {
+        usage: "/copy",
+        desc: "copy the last assistant message to the clipboard",
+        group: Group::Export,
+    },
+    SlashCommand {
+        usage: "/hotkeys",
+        desc: "key bindings",
+        group: Group::Runtime,
+    },
+    SlashCommand {
+        usage: "/changelog",
+        desc: "recent changelog entries (nearest CHANGELOG.md)",
+        group: Group::Runtime,
+    },
+    SlashCommand {
+        usage: "/reload",
+        desc: "rebuild tools/probes/model from the startup flags",
+        group: Group::Runtime,
+    },
+    SlashCommand {
+        usage: "/help",
+        desc: "this list",
+        group: Group::Runtime,
+    },
+    SlashCommand {
+        usage: "/quit",
+        desc: "exit (alias: /exit)",
+        group: Group::Runtime,
+    },
+    SlashCommand {
+        usage: "/mic <sec> [sine]",
+        desc: "record a voice message (sine synthesizes)",
+        group: Group::Tau,
+    },
+    SlashCommand {
+        usage: "/live <sec> [sine]",
+        desc: "full-duplex live session",
+        group: Group::Tau,
+    },
 ];
 
 /// The command word of a usage string ("/fork [#index|id-prefix]" → "/fork").
 fn command_word(usage: &str) -> &str {
-    usage
-        .split([' ', '['].as_ref())
-        .next()
-        .unwrap_or(usage)
+    usage.split([' ', '['].as_ref()).next().unwrap_or(usage)
 }
 
 /// Tab-completion candidates for a `/`-prefixed line start.
@@ -165,7 +234,9 @@ fn print_changelog(print: &impl Fn(&str)) {
             return;
         }
     }
-    print("changelog: no CHANGELOG.md found here — see https://github.com/gqf2008/tau/blob/main/CHANGELOG.md");
+    print(
+        "changelog: no CHANGELOG.md found here — see https://github.com/gqf2008/tau/blob/main/CHANGELOG.md",
+    );
 }
 
 // ---- T2 helpers (thread repl-pi-alignment-t2) -----------------------------
@@ -273,8 +344,8 @@ fn sanitize_session_name(name: &str) -> String {
     let capped: String = out.trim_matches(['-', '.']).chars().take(40).collect();
     let capped = capped.trim_end_matches(['-', '.']);
     const RESERVED: [&str; 22] = [
-        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7",
-        "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7", "com8",
+        "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
     ];
     if RESERVED.contains(&capped.to_ascii_lowercase().as_str()) {
         format!("session-{capped}")
@@ -356,8 +427,12 @@ fn render_session_html(store: &JsonlStore) -> String {
         .file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let mut html = String::from("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
-    html.push_str(&format!("<title>tau session — {}</title>\n", html_escape(&title)));
+    let mut html =
+        String::from("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
+    html.push_str(&format!(
+        "<title>tau session — {}</title>\n",
+        html_escape(&title)
+    ));
     html.push_str("<style>body{font:15px/1.55 system-ui,sans-serif;max-width:52rem;margin:2rem auto;padding:0 1rem;background:#141414;color:#ddd}h1{font-size:1.05rem;color:#aaa}section{margin:.9rem 0;padding:.6rem .9rem;border-radius:.5rem;background:#1d1d1d}h2{margin:0 0 .4rem;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;color:#888}p{margin:.35rem 0;white-space:pre-wrap}pre{margin:.35rem 0;padding:.5rem;background:#111;border-radius:.35rem;overflow:auto;font-size:.85rem}.user h2{color:#7ab8ff}.assistant h2{color:#8fd18f}.tool h2{color:#c9a227}</style>\n</head>\n<body>\n");
     html.push_str(&format!("<h1>tau session — {}</h1>\n", html_escape(&title)));
     for message in &branch {
@@ -391,13 +466,22 @@ fn render_session_html(store: &JsonlStore) -> String {
                     ));
                 }
                 Content::Image { media } => {
-                    html.push_str(&format!("<p>[image: {}]</p>\n", html_escape(&media.media_type)));
+                    html.push_str(&format!(
+                        "<p>[image: {}]</p>\n",
+                        html_escape(&media.media_type)
+                    ));
                 }
                 Content::Audio { media } => {
-                    html.push_str(&format!("<p>[audio: {}]</p>\n", html_escape(&media.media_type)));
+                    html.push_str(&format!(
+                        "<p>[audio: {}]</p>\n",
+                        html_escape(&media.media_type)
+                    ));
                 }
                 Content::Video { media } => {
-                    html.push_str(&format!("<p>[video: {}]</p>\n", html_escape(&media.media_type)));
+                    html.push_str(&format!(
+                        "<p>[video: {}]</p>\n",
+                        html_escape(&media.media_type)
+                    ));
                 }
                 Content::File { media, name } => {
                     html.push_str(&format!(
@@ -454,7 +538,6 @@ pub(crate) async fn interactive(
     base: Option<String>,
     session_facts: SessionFacts,
     inject: UnboundedReceiver<Control>,
-    mic_consent: bool,
     reload: Option<ReloadFactory>,
 ) -> Result<()> {
     let agent = Arc::new(agent);
@@ -463,8 +546,7 @@ pub(crate) async fn interactive(
 
     // rustyline owns stdin on a dedicated thread; readline blocks.
     std::thread::spawn(move || {
-        let mut editor =
-            rustyline::Editor::<SlashHelper, _>::new().expect("line editor");
+        let mut editor = rustyline::Editor::<SlashHelper, _>::new().expect("line editor");
         editor.set_helper(Some(SlashHelper));
         let history_path = tau_core::BlobStore::default_dir()
             .parent()
@@ -537,7 +619,6 @@ pub(crate) async fn interactive(
         print.as_ref(),
         Some(session_facts.clone()),
         inject,
-        mic_consent,
         reload,
     )
     .await;
@@ -545,7 +626,10 @@ pub(crate) async fn interactive(
         // Best-effort clean-exit observation (observe-only; verdicts
         // ignored). Error exits skip it — a crash is not a session end.
         agent
-            .observe(ProbePoint::SessionEnd, ProbePayload::SessionEnd(session_facts))
+            .observe(
+                ProbePoint::SessionEnd,
+                ProbePayload::SessionEnd(session_facts),
+            )
             .await;
     }
     result
@@ -710,10 +794,6 @@ pub(crate) async fn drive(
     print: impl Fn(&str) + Send + Sync,
     session_start: Option<SessionFacts>,
     mut inject: UnboundedReceiver<Control>,
-    // May the host capture the real microphone for THIS model?
-    // (Consent category per fingerprint for wasm providers; host
-    // doctrine grants it to native/demo — docs/realtime-av.md.)
-    mic_consent: bool,
     mut reload: Option<ReloadFactory>,
 ) -> Result<()> {
     let (mut render_rx, mut sink_streamed, mut renderer) = spawn_renderer(&agent);
@@ -739,8 +819,7 @@ pub(crate) async fn drive(
     let mut running = false;
     // A live (full-duplex) session: command sender while active,
     // outcome receiver for its terminal recording (Phase 2a).
-    let (live_done_tx, mut live_done_rx) =
-        unbounded_channel::<crate::live::LiveOutcome>();
+    let (live_done_tx, mut live_done_rx) = unbounded_channel::<crate::live::LiveOutcome>();
     let mut live: Option<UnboundedSender<crate::live::LiveCmd>> = None;
     let mut parent = base.or_else(|| store.head().map(|h| h.id.clone()));
     // Durable run progress (frames.rs): attached here rather than at
@@ -940,17 +1019,6 @@ pub(crate) async fn drive(
                                 .unwrap_or(10)
                                 .clamp(1, 120);
                             let sine = parts.next() == Some("sine");
-                            if !sine && !mic_consent {
-                                // The category guards the DEVICE, not
-                                // the session: synthetic uplink never
-                                // touches the mic and needs no grant.
-                                print(
-                                    "[tau] microphone capture for this provider needs consent — \
-                                     rerun with --microphone (remember with --remember); \
-                                     `/live N sine` synthesizes and needs no grant",
-                                );
-                                continue;
-                            }
                             let config = tau_core::RealtimeConfig {
                                 input_media_type: "audio/pcm;rate=16000".into(),
                                 ..Default::default()
@@ -1582,7 +1650,9 @@ fn record_live(
                         source: MediaSource::Bytes(outcome.uplink.clone()),
                     },
                 },
-                Content::Text { text: "(live voice — uplink stream)".into() },
+                Content::Text {
+                    text: "(live voice — uplink stream)".into(),
+                },
             ],
         });
     }
@@ -1709,7 +1779,17 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, None));
+        let task = tokio::spawn(drive(
+            agent,
+            store,
+            Vec::new(),
+            None,
+            rx,
+            capture.printer(),
+            None,
+            unbounded_channel().1,
+            None,
+        ));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("two".into())).unwrap();
@@ -1752,7 +1832,6 @@ mod tests {
             capture.printer(),
             None,
             inject_rx,
-            true,
             None,
         ));
         // No typed line at all: the injection alone must run the turn.
@@ -1805,9 +1884,7 @@ mod tests {
         let mut probes = tau_core::ProbeRegistry::new();
         probes.register(Box::new(Recorder { seen: seen.clone() }));
         let (_dir, store) = store();
-        let agent = Arc::new(
-            Agent::new(Box::new(StaticModel), ToolRegistry::new()).probes(probes),
-        );
+        let agent = Arc::new(Agent::new(Box::new(StaticModel), ToolRegistry::new()).probes(probes));
         let capture = Arc::new(Capture {
             lines: Mutex::new(Vec::new()),
             ready: Notify::new(),
@@ -1826,7 +1903,6 @@ mod tests {
                 model: "demo".into(),
             }),
             unbounded_channel().1,
-            true,
             None,
         ));
         tx.send(LineEvent::Line("/quit".into())).unwrap();
@@ -1855,7 +1931,17 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, None));
+        let task = tokio::spawn(drive(
+            agent,
+            store,
+            Vec::new(),
+            None,
+            rx,
+            capture.printer(),
+            None,
+            unbounded_channel().1,
+            None,
+        ));
 
         tx.send(LineEvent::Line("start".into())).unwrap();
         started.notified().await; // model is mid-stream now
@@ -1892,7 +1978,17 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, None));
+        let task = tokio::spawn(drive(
+            agent,
+            store,
+            Vec::new(),
+            None,
+            rx,
+            capture.printer(),
+            None,
+            unbounded_channel().1,
+            None,
+        ));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("two".into())).unwrap();
@@ -1940,7 +2036,17 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, None));
+        let task = tokio::spawn(drive(
+            agent,
+            store,
+            Vec::new(),
+            None,
+            rx,
+            capture.printer(),
+            None,
+            unbounded_channel().1,
+            None,
+        ));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("/compact".into())).unwrap();
@@ -1990,7 +2096,17 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, None));
+        let task = tokio::spawn(drive(
+            agent,
+            store,
+            Vec::new(),
+            None,
+            rx,
+            capture.printer(),
+            None,
+            unbounded_channel().1,
+            None,
+        ));
         tx.send(LineEvent::Line("/help".into())).unwrap();
         tx.send(LineEvent::Line("/bogus".into())).unwrap();
         tx.send(LineEvent::Line("/quit".into())).unwrap();
@@ -2042,7 +2158,6 @@ mod tests {
             printer,
             None,
             unbounded_channel().1,
-            true,
             None,
         ));
         (dir, tx, capture, task)
@@ -2080,9 +2195,24 @@ mod tests {
             assert!(text.contains(header), "help lacks {header}: {text}");
         }
         for command in [
-            "/new", "/resume", "/name", "/session", "/tree", "/fork", "/clone", "/compact",
-            "/import", "/export", "/copy", "/hotkeys", "/changelog", "/reload", "/help",
-            "/quit", "/mic", "/live",
+            "/new",
+            "/resume",
+            "/name",
+            "/session",
+            "/tree",
+            "/fork",
+            "/clone",
+            "/compact",
+            "/import",
+            "/export",
+            "/copy",
+            "/hotkeys",
+            "/changelog",
+            "/reload",
+            "/help",
+            "/quit",
+            "/mic",
+            "/live",
         ] {
             assert!(text.contains(command), "help lacks {command}: {text}");
         }
@@ -2138,7 +2268,12 @@ mod tests {
         let fresh = extra_session_files(dir.path());
         assert_eq!(fresh.len(), 1, "expected one new session file: {fresh:?}");
         let fresh = JsonlStore::open(&fresh[0]).unwrap();
-        assert_eq!(fresh.entries().len(), 2, "fresh file: {:?}", fresh.entries());
+        assert_eq!(
+            fresh.entries().len(),
+            2,
+            "fresh file: {:?}",
+            fresh.entries()
+        );
         let head = fresh.head().unwrap().id.clone();
         let branch: Vec<String> = fresh
             .active_branch(&head)
@@ -2187,8 +2322,11 @@ mod tests {
             .unwrap();
         drop(foreign);
 
-        tx.send(LineEvent::Line(format!("/import {}", foreign_path.display())))
-            .unwrap();
+        tx.send(LineEvent::Line(format!(
+            "/import {}",
+            foreign_path.display()
+        )))
+        .unwrap();
         wait_for(&capture, "[tau] imported").await;
         tx.send(LineEvent::Line("/quit".into())).unwrap();
         task.await.unwrap().unwrap();
@@ -2216,7 +2354,12 @@ mod tests {
         task.await.unwrap().unwrap();
 
         let exported = JsonlStore::open(&target).unwrap();
-        assert_eq!(exported.entries().len(), 2, "export: {:?}", exported.entries());
+        assert_eq!(
+            exported.entries().len(),
+            2,
+            "export: {:?}",
+            exported.entries()
+        );
     }
 
     #[tokio::test]
@@ -2264,7 +2407,10 @@ mod tests {
         assert!(text.contains("sessions here"), "output: {text}");
         assert!(text.contains("session.jsonl"), "old file listed: {text}");
         assert!(text.contains("(current)"), "current marked: {text}");
-        assert!(text.contains("1 entries") || text.contains("2 entries"), "counts: {text}");
+        assert!(
+            text.contains("1 entries") || text.contains("2 entries"),
+            "counts: {text}"
+        );
     }
 
     #[tokio::test]
@@ -2294,7 +2440,8 @@ mod tests {
         let (dir, tx, capture, task) = rig();
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
-        tx.send(LineEvent::Line("/name research log".into())).unwrap();
+        tx.send(LineEvent::Line("/name research log".into()))
+            .unwrap();
         wait_for(&capture, "named \"research log\"").await;
         tx.send(LineEvent::Line("two".into())).unwrap();
         capture.ready.notified().await;
@@ -2302,7 +2449,11 @@ mod tests {
         task.await.unwrap().unwrap();
 
         let renamed = dir.path().join("research-log.jsonl");
-        assert!(renamed.exists(), "files: {:?}", extra_session_files(dir.path()));
+        assert!(
+            renamed.exists(),
+            "files: {:?}",
+            extra_session_files(dir.path())
+        );
         assert!(
             !dir.path().join("session.jsonl").exists(),
             "old name gone: {:?}",
@@ -2374,7 +2525,10 @@ mod tests {
             "user text escaped: {html}"
         );
         assert!(!html.contains("<b>bold</b>"), "no raw markup: {html}");
-        assert!(html.contains("<section class=\"user\">"), "sections: {html}");
+        assert!(
+            html.contains("<section class=\"user\">"),
+            "sections: {html}"
+        );
         assert!(html.contains("tau is alive."), "assistant text: {html}");
     }
 
@@ -2410,7 +2564,6 @@ mod tests {
             printer,
             None,
             unbounded_channel().1,
-            true,
             Some(factory),
         ));
         tx.send(LineEvent::Line("/reload".into())).unwrap();
@@ -2474,12 +2627,12 @@ mod tests {
             printer,
             None,
             unbounded_channel().1,
-            true,
             None,
         ));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
-        tx.send(LineEvent::Line("/compact keep the cats".into())).unwrap();
+        tx.send(LineEvent::Line("/compact keep the cats".into()))
+            .unwrap();
         wait_for(&capture, "compacted").await;
         tx.send(LineEvent::Line("/quit".into())).unwrap();
         task.await.unwrap().unwrap();
@@ -2495,7 +2648,11 @@ mod tests {
     fn slash_candidates_complete_on_slash_prefix() {
         assert_eq!(slash_candidates("/f"), vec!["/fork".to_string()]);
         let all = slash_candidates("/");
-        assert_eq!(all.len(), COMMANDS.len(), "every command completes: {all:?}");
+        assert_eq!(
+            all.len(),
+            COMMANDS.len(),
+            "every command completes: {all:?}"
+        );
         assert!(all.contains(&"/quit".to_string()));
         assert_eq!(slash_candidates("/q"), vec!["/quit".to_string()]);
         assert!(slash_candidates("/zzz").is_empty());
@@ -2529,7 +2686,17 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, None));
+        let task = tokio::spawn(drive(
+            agent,
+            store,
+            Vec::new(),
+            None,
+            rx,
+            capture.printer(),
+            None,
+            unbounded_channel().1,
+            None,
+        ));
         tx.send(LineEvent::Line("hi".into())).unwrap();
         wait_for(&capture, "run failed: model error: boom").await;
         // The loop survived: the next prompt runs and completes.
@@ -2583,7 +2750,17 @@ mod tests {
                 })
             })
         });
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, Some(factory)));
+        let task = tokio::spawn(drive(
+            agent,
+            store,
+            Vec::new(),
+            None,
+            rx,
+            capture.printer(),
+            None,
+            unbounded_channel().1,
+            Some(factory),
+        ));
         tx.send(LineEvent::Line("/reload".into())).unwrap();
         wait_for(&capture, "reloaded from the startup flags").await;
         tx.send(LineEvent::Line("hi".into())).unwrap();
@@ -2594,7 +2771,9 @@ mod tests {
         let store = JsonlStore::open(_dir.path().join("session.jsonl")).unwrap();
         let branch = store.active_branch(&store.head().unwrap().id).unwrap();
         assert!(
-            branch.iter().any(|m| m.text().contains("partial after reload")),
+            branch
+                .iter()
+                .any(|m| m.text().contains("partial after reload")),
             "frames stopped at the swap — nothing to salvage: {branch:?}"
         );
     }
@@ -2608,7 +2787,17 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, None));
+        let task = tokio::spawn(drive(
+            agent,
+            store,
+            Vec::new(),
+            None,
+            rx,
+            capture.printer(),
+            None,
+            unbounded_channel().1,
+            None,
+        ));
         tx.send(LineEvent::Line("one".into())).unwrap();
         wait_for(&capture, "[tau] ready").await;
         // Clean run: the frames became entries, the sidecar is retired.
@@ -2651,7 +2840,17 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, None));
+        let task = tokio::spawn(drive(
+            agent,
+            store,
+            Vec::new(),
+            None,
+            rx,
+            capture.printer(),
+            None,
+            unbounded_channel().1,
+            None,
+        ));
         tx.send(LineEvent::Line("hi".into())).unwrap();
         wait_for(&capture, "recovered the interrupted run").await;
         tx.send(LineEvent::Line("again".into())).unwrap();
@@ -2680,7 +2879,9 @@ mod tests {
             branch[0].text()
         );
         assert!(
-            branch[0].text().contains(tau_core::frames::INTERRUPTED_NOTICE),
+            branch[0]
+                .text()
+                .contains(tau_core::frames::INTERRUPTED_NOTICE),
             "interrupted notice missing: {:?}",
             branch[0].text()
         );
@@ -2697,7 +2898,17 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, None));
+        let task = tokio::spawn(drive(
+            agent,
+            store,
+            Vec::new(),
+            None,
+            rx,
+            capture.printer(),
+            None,
+            unbounded_channel().1,
+            None,
+        ));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("two".into())).unwrap();

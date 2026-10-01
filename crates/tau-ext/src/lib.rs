@@ -31,15 +31,13 @@ use std::path::Path;
 use std::sync::{Arc, Mutex};
 
 use async_trait::async_trait;
-use futures::StreamExt;
+
 use tau_core::probe::{ProbeHandler, ProbePoint, Verdict};
 use tau_core::probe_payload::ProbePayload;
 use tau_core::tool::{Tool, ToolDef, ToolOutput};
 use thiserror::Error;
-use wasmtime::component::{
-    Access, Accessor, Component, HasSelf, Linker, Resource, ResourceTable, StreamReader,
-};
-use wasmtime::{AsContextMut, Config, Engine, Store};
+use wasmtime::component::{Component, HasSelf, Linker, Resource, ResourceTable};
+use wasmtime::{Config, Engine, Store};
 use wasmtime_wasi::{WasiCtx, WasiCtxBuilder, WasiCtxView, WasiView};
 
 pub mod ws;
@@ -63,33 +61,6 @@ mod bindings {
         with: {
             "tau:extension/host.subscription": crate::StreamSubscription,
         },
-    });
-}
-
-mod provider_bindings {
-    wasmtime::component::bindgen!({
-        // Vendored copy so the packaged crate builds outside the
-        // workspace; drift-checked against the canonical wit/tau.wit
-        // by the wit_vendored test below.
-        path: "wit/tau.wit",
-        world: "provider",
-        // Exports awaited (see the `extension` world above) and imports
-        // async too: a provider's `run` spends its life in `http.*`, and a
-        // host import that blocks would park the very worker thread the
-        // run is now awaited on.
-        imports: {
-            default: async,
-            // `response.body` returns a stream, and a stream handle lives
-            // in the store: the `store` flag is wasmtime's answer
-            // (docs/wit-redesign.md, leg 4's binding recipe).
-            "tau:extension/http.[method]response.body": store,
-        },
-        // Without this the generated resource type is an empty enum and
-        // there is nothing the host could store behind `http.response`.
-        with: {
-            "tau:extension/http.response": crate::http::HostResponse,
-        },
-        exports: { default: async },
     });
 }
 
@@ -132,12 +103,9 @@ mod bridge_bindings {
 }
 
 pub mod bridge;
-pub mod consent;
-mod realtime;
-pub use realtime::WasmRealtimeModel;
-mod ingress;
 pub mod convert;
 mod http;
+mod ingress;
 pub mod oci;
 pub mod sign;
 
@@ -233,16 +201,13 @@ impl HostChannel {
 }
 
 /// Host state handed to every extension component. The WasiCtx follows
-/// the host's [`WasiPolicy`]: allow-all inherits the process's
-/// capabilities; deny-all links the WASI interfaces but fails every
-/// capability call permission-denied. `inject` is this component's
-/// session-injection consent (steer/follow-up); notify/emit are facts
-/// and never gated.
+/// the host's [`WasiPolicy`]. There is no session-injection flag since
+/// 0.8.0: steer/follow-up are part of what installing the component meant
+/// (docs/wit-0.8-draft.md ruling 1), while notify/emit are facts.
 struct ComponentState {
     ctx: WasiCtx,
     table: ResourceTable,
     channel: Arc<HostChannel>,
-    inject: bool,
 }
 
 /// One open host.subscribe handle: the topic filter plus the bus
@@ -315,35 +280,31 @@ pub(crate) fn level_name(level: wit_host::Level) -> &'static str {
 }
 
 /// Classify the host's own failures for the contract's `types.error`
-/// (three-way since 0.7.0; docs/wit-redesign.md, the error decision):
-/// `refused` = policy or consent, `failed` = allowed but broken,
-/// `invalid` = never a valid call here. Call sites name the variant;
-/// this is the mechanical lift into the generated type.
+/// (two-way since 0.8.0: the runtime consent gates are gone, so nothing
+/// reaches a guest as "nobody granted this" -- docs/wit-0.8-draft.md ruling 1).
+/// The host's own `Refused` still exists for the trust/signing chain, which is
+/// an install-time matter and never a guest's call: it lifts to `failed` here,
+/// because from a guest's side the call simply did not work.
 impl From<HostError> for wit::Error {
     fn from(error: HostError) -> Self {
         match error {
-            HostError::Refused(detail) => wit::Error::Refused(detail),
-            HostError::Failed(detail) => wit::Error::Failed(detail),
+            HostError::Refused(detail) | HostError::Failed(detail) => wit::Error::Failed(detail),
             HostError::Invalid(detail) => wit::Error::Invalid(detail),
         }
     }
 }
 
-/// steer/follow-up shared path (extensions and bridges alike): consent
-/// gate, role validation, conversion (size cap included), then enqueue
-/// into the control channel. Enqueue-only: the agent loop applies the
-/// message at its own checkpoints (docs/host-channel.md, red line 1).
+/// steer/follow-up shared path (extensions and bridges alike): role
+/// validation, conversion (size cap included), then enqueue into the
+/// control channel. Enqueue-only: the agent loop applies the message at
+/// its own checkpoints (docs/host-channel.md, red line 1). Since 0.8.0
+/// there is no runtime consent flag here: injection is part of what
+/// installing the component meant (docs/wit-0.8-draft.md ruling 1).
 pub(crate) fn inject_message(
     channel: &HostChannel,
-    inject: bool,
     message: wit::Message,
     steer: bool,
 ) -> Result<(), HostError> {
-    if !inject {
-        return Err(HostError::refused(
-            "session injection not consented for this component (host CLI: --allow-inject)",
-        ));
-    }
     if !matches!(message.role, wit::Role::User) {
         return Err(HostError::invalid(
             "host.steer/follow-up: message role must be user",
@@ -467,11 +428,11 @@ impl bindings::tau::extension::host::Host for ComponentState {
     }
 
     fn steer(&mut self, message: wit::Message) -> Result<(), wit::Error> {
-        inject_message(&self.channel, self.inject, message, true).map_err(Into::into)
+        inject_message(&self.channel, message, true).map_err(Into::into)
     }
 
     fn follow_up(&mut self, message: wit::Message) -> Result<(), wit::Error> {
-        inject_message(&self.channel, self.inject, message, false).map_err(Into::into)
+        inject_message(&self.channel, message, false).map_err(Into::into)
     }
 
     fn subscribe(
@@ -524,7 +485,6 @@ impl bindings::tau::extension::host::HostSubscription for ComponentState {
     }
 }
 
-
 struct ComponentInstance {
     store: Store<ComponentState>,
     bindings: bindings::Extension,
@@ -538,18 +498,15 @@ struct InstanceFactory {
     engine: Engine,
     component: Component,
     linker: Linker<ComponentState>,
-    wasi: WasiPolicy,
     channel: Arc<HostChannel>,
-    inject: bool,
 }
 
 impl InstanceFactory {
     async fn instantiate(&self) -> Result<ComponentInstance, wasmtime::Error> {
         let state = ComponentState {
-            ctx: self.wasi.ctx_builder().build(),
+            ctx: ambient_wasi_ctx().build(),
             table: ResourceTable::new(),
             channel: self.channel.clone(),
-            inject: self.inject,
         };
         let mut store = Store::new(&self.engine, state);
         let bindings =
@@ -613,39 +570,23 @@ impl LoadedExtension {
     }
 }
 
-/// Ambient WASI capabilities granted to loaded components (fs, env,
-/// stdio, args, network). Independent of the consent-gated custom
-/// capabilities (bridge process/http, provider origins), which stay
-/// explicit. Default: [`WasiPolicy::AllowAll`] — pass
-/// [`WasiPolicy::DenyAll`] (CLI `--deny-wasi`) to restore the old
-/// deny-all sandbox.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum WasiPolicy {
-    /// Inherit stdio/env/args, preopen the host filesystem (each drive
-    /// on Windows, `/` elsewhere), inherit network + DNS.
-    #[default]
-    AllowAll,
-    /// The old default: WASI interfaces still link, but no capabilities
-    /// are granted — fs and network calls fail permission-denied, env
-    /// and args come back empty, stdio goes nowhere.
-    DenyAll,
-}
-
-impl WasiPolicy {
-    /// Base context for the policy; callers may add env vars before
-    /// build (the bridge's TAU_MCP_* consent handoff).
-    pub(crate) fn ctx_builder(self) -> WasiCtxBuilder {
-        let mut ctx = WasiCtxBuilder::new();
-        if self == WasiPolicy::AllowAll {
-            ctx.inherit_stdio()
-                .inherit_env()
-                .inherit_args()
-                .inherit_network()
-                .allow_ip_name_lookup(true);
-            preopen_host_fs(&mut ctx);
-        }
-        ctx
-    }
+/// The ambient WASI context every component gets: stdio, the host's
+/// environment and argv, the host filesystem preopened read-write (each
+/// drive on Windows, `/` elsewhere), network and DNS.
+///
+/// This is the whole posture since 0.8.0 (docs/wit-0.8-draft.md ruling 1):
+/// the runtime gates are gone and `--deny-wasi` with them, so a component
+/// runs with the permissions of the tau process. Callers may add env vars
+/// before build (the bridge's TAU_MCP_* handoff).
+pub(crate) fn ambient_wasi_ctx() -> WasiCtxBuilder {
+    let mut ctx = WasiCtxBuilder::new();
+    ctx.inherit_stdio()
+        .inherit_env()
+        .inherit_args()
+        .inherit_network()
+        .allow_ip_name_lookup(true);
+    preopen_host_fs(&mut ctx);
+    ctx
 }
 
 /// The WIT contract version this host implements (`wit/tau.wit`). Single
@@ -653,7 +594,7 @@ impl WasiPolicy {
 /// places is how a version hint silently goes wrong, so
 /// `contract_version_matches_wit` fails the build if it drifts from the
 /// vendored WIT.
-pub(crate) const CONTRACT_VERSION: &str = "0.7.0";
+pub(crate) const CONTRACT_VERSION: &str = "0.8.0";
 
 /// If the component exports `tau:extension` interfaces of another
 /// contract version, say so — "missing export tau:extension/tools@0.6.0"
@@ -705,7 +646,6 @@ fn preopen_host_fs(ctx: &mut WasiCtxBuilder) {
 pub struct ExtensionHost {
     pub(crate) engine: Engine,
     policy: sign::TrustPolicy,
-    pub(crate) wasi: WasiPolicy,
     /// pub(crate): bridge loading wires the same channel into bridge
     /// instances (docs/im-channels.md contract amendment).
     pub(crate) channel: Arc<HostChannel>,
@@ -759,12 +699,7 @@ pub(crate) fn block_on_component<T: Send>(fut: impl std::future::Future<Output =
         rt.block_on(fut)
     }
     if tokio::runtime::Handle::try_current().is_ok() {
-        std::thread::scope(|scope| {
-            scope
-                .spawn(|| drive(fut))
-                .join()
-                .expect("component thread")
-        })
+        std::thread::scope(|scope| scope.spawn(|| drive(fut)).join().expect("component thread"))
     } else {
         drive(fut)
     }
@@ -782,7 +717,6 @@ impl ExtensionHost {
         Self {
             engine: engine(),
             policy,
-            wasi: WasiPolicy::default(),
             channel: Arc::new(HostChannel::default()),
         }
     }
@@ -792,26 +726,6 @@ impl ExtensionHost {
     /// every extension this host loaded (or later loads) sees it.
     pub fn wire_host_channel(&self, bus: tau_core::EventBus, control: tau_core::ControlTx) {
         self.channel.wire(bus, control);
-    }
-
-    /// Set the ambient WASI policy (default allow-all).
-    pub fn with_wasi(mut self, policy: WasiPolicy) -> Self {
-        self.wasi = policy;
-        self
-    }
-
-    /// Per-load WASI override: a host sharing this one's engine and
-    /// trust policy but instantiating components under `policy`. Engine
-    /// clones are cheap (Arc internals); use this for per-fingerprint
-    /// remembered posture (a recalled deny tightens one component's load
-    /// without touching the host default).
-    pub fn with_wasi_policy(&self, policy: WasiPolicy) -> Self {
-        Self {
-            engine: self.engine.clone(),
-            policy: self.policy.clone(),
-            wasi: policy,
-            channel: self.channel.clone(),
-        }
     }
 
     /// Read a component file and enforce the trust policy on its bytes.
@@ -843,28 +757,18 @@ impl ExtensionHost {
     }
 
     /// Load one component file. Ambient WASI access follows the host's
-    /// [`WasiPolicy`] (allow-all by default; `--deny-wasi` to sandbox).
-    /// Session injection (`host.steer`/`follow-up`) is NOT consented;
-    /// use [`load_with_inject`](Self::load_with_inject) to grant it.
+    /// [`WasiPolicy`].
+    ///
+    /// One load path since 0.8.0: the session-injection consent flag is gone
+    /// with the other runtime gates (docs/wit-0.8-draft.md ruling 1) — a
+    /// loaded component may steer, and that is part of what installing it
+    /// meant.
     pub fn load(&self, path: impl AsRef<Path>) -> Result<LoadedExtension, ExtError> {
-        self.load_with_inject(path, false)
-    }
-
-    /// Load one component file, with `inject` as the session-injection
-    /// consent: passing `true` IS the consent (the CLI derives it from
-    /// `--allow-inject` or a per-fingerprint remembered grant). Without
-    /// it, steer/follow-up fail at call time with a named error;
-    /// notify/emit (facts) always work.
-    pub fn load_with_inject(
-        &self,
-        path: impl AsRef<Path>,
-        inject: bool,
-    ) -> Result<LoadedExtension, ExtError> {
         let path = path.as_ref().to_path_buf();
-        block_on_component(self.load_inner(&path, inject))
+        block_on_component(self.load_inner(&path))
     }
 
-    async fn load_inner(&self, path: &Path, inject: bool) -> Result<LoadedExtension, ExtError> {
+    async fn load_inner(&self, path: &Path) -> Result<LoadedExtension, ExtError> {
         let bytes = self.read_verified(path)?;
         let component =
             Component::from_binary(&self.engine, &bytes).map_err(|e| ExtError::Load {
@@ -886,9 +790,7 @@ impl ExtensionHost {
             engine: self.engine.clone(),
             component: component.clone(),
             linker,
-            wasi: self.wasi,
             channel: self.channel.clone(),
-            inject,
         };
         let mut instance = factory.instantiate().await.map_err(|e| ExtError::Load {
             path: path.display().to_string(),
@@ -979,9 +881,8 @@ pub(crate) fn tool_def_strict(
     description: String,
     parameters_json: &str,
 ) -> Result<ToolDef, String> {
-    let parameters = serde_json::from_str(parameters_json).map_err(|e| {
-        format!("tool '{name}' has an invalid parameters-json schema: {e}")
-    })?;
+    let parameters = serde_json::from_str(parameters_json)
+        .map_err(|e| format!("tool '{name}' has an invalid parameters-json schema: {e}"))?;
     Ok(ToolDef {
         name,
         description,
@@ -1028,7 +929,10 @@ impl Tool for WasmTool {
                 // 校验即错误: invalid/oversize blocks become a tool error
                 // the model sees — never silently truncated or dropped.
                 Ok(content) => ToolOutput {
-                    content: content.into_iter().map(tau_core::types::Content::from).collect(),
+                    content: content
+                        .into_iter()
+                        .map(tau_core::types::Content::from)
+                        .collect(),
                     is_error: r.is_error,
                 },
                 Err(e) => ToolOutput::err(format!("invalid tool result: {e}")),
@@ -1105,323 +1009,6 @@ impl ProbeHandler for WasmProbes {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Provider components (world "provider"): models behind WIT, push streaming.
-// ---------------------------------------------------------------------------
-
-/// Provider component instance: separate state type so the store's `T`
-/// matches the provider bindgen's Host requirements.
-struct ProviderState {
-    ctx: WasiCtx,
-    table: ResourceTable,
-    /// Origin-allowlisted HTTP egress, granted by per-fingerprint consent.
-    /// Behind a lock the host import may hand to `spawn_blocking`: the
-    /// registry is the blocking reqwest client, and its methods must not
-    /// run on a runtime worker (`Arc` so the body can move off-thread).
-    http: std::sync::Arc<std::sync::Mutex<http::HttpRegistry>>,
-}
-
-impl WasiView for ProviderState {
-    fn ctx(&mut self) -> WasiCtxView<'_> {
-        WasiCtxView {
-            ctx: &mut self.ctx,
-            table: &mut self.table,
-        }
-    }
-}
-
-/// The provider's event type in core terms. Malformed frames are
-/// impossible by construction (the type is generated from the contract);
-/// what survives is the semantic check the host has always made -- an
-/// audio delta with no media type cannot be assembled into anything.
-fn event_to_core(
-    event: provider_bindings::exports::tau::extension::models::Event,
-) -> Result<tau_core::ModelEvent, String> {
-    use provider_bindings::exports::tau::extension::models::Event;
-    use provider_bindings::tau::extension::types::StopReason;
-    Ok(match event {
-        Event::TextDelta(text) => tau_core::ModelEvent::TextDelta { text },
-        Event::ToolCallDelta(d) => tau_core::ModelEvent::ToolCallDelta {
-            index: d.index,
-            id: d.id,
-            name: d.name,
-            arguments_delta: d.arguments_delta,
-        },
-        Event::AudioDelta(a) => {
-            if a.media_type.is_empty() {
-                return Err("run: audio-delta with an empty media-type".into());
-            }
-            tau_core::ModelEvent::AudioDelta {
-                data: a.data,
-                media_type: a.media_type,
-            }
-        }
-        Event::InputAudioChunk(a) => {
-            if a.media_type.is_empty() {
-                return Err("run: input-audio-chunk with an empty media-type".into());
-            }
-            tau_core::ModelEvent::InputAudioChunk {
-                data: a.data,
-                media_type: a.media_type,
-            }
-        }
-        Event::SpeechStarted => tau_core::ModelEvent::SpeechStarted,
-        Event::SpeechStopped => tau_core::ModelEvent::SpeechStopped,
-        Event::Interrupted => tau_core::ModelEvent::Interrupted,
-        Event::Done(stop) => tau_core::ModelEvent::Done {
-            stop: match stop {
-                StopReason::Stop => tau_core::StopReason::Stop,
-                StopReason::ToolUse => tau_core::StopReason::ToolUse,
-                StopReason::Length => tau_core::StopReason::Length,
-                StopReason::Error => tau_core::StopReason::Error,
-                StopReason::Aborted => tau_core::StopReason::Aborted,
-            },
-        },
-        Event::Error(message) => tau_core::ModelEvent::Error { message },
-    })
-}
-
-/// Consumes the event stream a provider's `run` returned (0.7.0: the
-/// guest writes it, the host reads it -- `events.emit` is gone) and
-/// forwards each event into the model's channel.
-///
-/// The end needs no detection: when the guest drops its writer the
-/// machinery drops this consumer, which drops `tx`, which is what ends
-/// the model stream's drain loop.
-struct EventConsumer {
-    tx: tokio::sync::mpsc::UnboundedSender<tau_core::ModelEvent>,
-    /// Dropped with the consumer, which is what ends the drive: see
-    /// [`crate::Done`].
-    _done: crate::DoneHolder,
-}
-
-impl<D> wasmtime::component::StreamConsumer<D> for EventConsumer {
-    type Item = provider_bindings::exports::tau::extension::models::Event;
-
-    fn poll_consume(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-        mut store: wasmtime::StoreContextMut<D>,
-        mut source: wasmtime::component::Source<'_, Self::Item>,
-        finish: bool,
-    ) -> std::task::Poll<wasmtime::Result<wasmtime::component::StreamResult>> {
-        use wasmtime::component::StreamResult;
-        // An empty source means "nothing to take": the ABI forbids
-        // `Completed` here (the caller would trap), so wait for the
-        // writer.
-        if source.remaining(store.as_context_mut()) == 0 {
-            return if finish {
-                std::task::Poll::Ready(Ok(StreamResult::Cancelled))
-            } else {
-                std::task::Poll::Pending
-            };
-        }
-        let mut events: Vec<Self::Item> =
-            Vec::with_capacity(source.remaining(store.as_context_mut()));
-        source.read(store.as_context_mut(), &mut events)?;
-        let this = self.get_mut();
-        for event in events {
-            match event_to_core(event) {
-                Ok(event) => {
-                    if this.tx.send(event).is_err() {
-                        // Nobody is listening any more (the run was
-                        // aborted): stop reading, which makes the guest's
-                        // next write fail -- the contract's cancellation.
-                        return std::task::Poll::Ready(Ok(StreamResult::Dropped));
-                    }
-                }
-                Err(why) => eprintln!("tau provider {why}"),
-            }
-        }
-        std::task::Poll::Ready(Ok(StreamResult::Completed))
-    }
-}
-
-/// Consumes the verdict future `run` returned: `ok` when the guest saw the
-/// host read its stream to the end, `err` when the host closed it early.
-/// Diagnostic only -- the events already carried the terminal state, and
-/// holding no sender here keeps a guest that never resolves the future
-/// from keeping the model stream open.
-struct VerdictConsumer;
-
-impl<D> wasmtime::component::FutureConsumer<D> for VerdictConsumer {
-    type Item = Result<(), provider_bindings::tau::extension::types::Error>;
-
-    fn poll_consume(
-        self: std::pin::Pin<&mut Self>,
-        _cx: &mut std::task::Context<'_>,
-        mut store: wasmtime::StoreContextMut<D>,
-        mut source: wasmtime::component::Source<'_, Self::Item>,
-        _finish: bool,
-    ) -> std::task::Poll<wasmtime::Result<()>> {
-        if source.remaining(store.as_context_mut()) == 0 {
-            return std::task::Poll::Pending;
-        }
-        let mut values: Vec<Self::Item> =
-            Vec::with_capacity(source.remaining(store.as_context_mut()));
-        source.read(store.as_context_mut(), &mut values)?;
-        for value in values {
-            if let Err(error) = value {
-                let detail = match error {
-                    provider_bindings::tau::extension::types::Error::Refused(d)
-                    | provider_bindings::tau::extension::types::Error::Failed(d)
-                    | provider_bindings::tau::extension::types::Error::Invalid(d) => d,
-                };
-                eprintln!("tau provider run: the host ended the stream early: {detail}");
-            }
-        }
-        std::task::Poll::Ready(Ok(()))
-    }
-}
-
-struct ProviderInstance {
-    store: Store<ProviderState>,
-    bindings: provider_bindings::Provider,
-}
-
-/// Everything needed to (re)create a provider instance. A trapped guest
-/// poisons its instance; the CLI reuses one provider across every run of
-/// a REPL session, so without a rebuild one crash would fail every later
-/// prompt until restart.
-struct ProviderFactory {
-    engine: Engine,
-    component: Component,
-    linker: Linker<ProviderState>,
-    wasi: WasiPolicy,
-    origins: std::collections::HashSet<String>,
-}
-
-impl ProviderFactory {
-    async fn instantiate(&self) -> Result<ProviderInstance, wasmtime::Error> {
-        let state = ProviderState {
-            ctx: self.wasi.ctx_builder().build(),
-            table: ResourceTable::new(),
-            http: std::sync::Arc::new(std::sync::Mutex::new(http::HttpRegistry::new(
-                self.origins.clone(),
-            ))),
-        };
-        let mut store = Store::new(&self.engine, state);
-        let bindings =
-            provider_bindings::Provider::instantiate_async(&mut store, &self.component, &self.linker)
-                .await?;
-        Ok(ProviderInstance { store, bindings })
-    }
-}
-
-struct SharedProviderInstance {
-    instance: ProviderInstance,
-    factory: ProviderFactory,
-}
-
-impl SharedProviderInstance {
-    /// Drop a poisoned instance and build a fresh one. Best-effort: if
-    /// re-instantiation somehow fails, the poisoned instance stays and
-    /// runs keep surfacing the trap.
-    async fn revive(&mut self) {
-        if let Ok(fresh) = self.factory.instantiate().await {
-            self.instance = fresh;
-        }
-    }
-}
-
-type SharedProvider = Arc<tokio::sync::Mutex<SharedProviderInstance>>;
-
-/// A model served by a wasm provider component. Since 0.7.0 the component
-/// returns its events as a stream from `run`; `stream` consumes that
-/// stream and forwards each event into the returned event stream.
-pub struct WasmModel {
-    shared: SharedProvider,
-    model: String,
-    /// Bearer token injected into every request payload as
-    /// `{"auth": {"bearer": ...}}`; None omits the field entirely.
-    auth: Option<String>,
-}
-
-impl ExtensionHost {
-    /// Load a provider component and select one of its models by id.
-    /// Load a provider component. `origins` is the HTTP egress allowlist
-    /// (`scheme://host[:port]`) this component may reach — passing it IS
-    /// the consent; empty means every http call fails permission-denied.
-    /// `auth`, when given, is handed to the component inside every
-    /// request payload (`{"auth": {"bearer": ...}}`) — passing it IS the
-    /// consent to place the token in guest memory. It is never persisted
-    /// by the host.
-    pub fn load_provider(
-        &self,
-        path: impl AsRef<Path>,
-        model: impl Into<String>,
-        origins: std::collections::HashSet<String>,
-        auth: Option<String>,
-    ) -> Result<WasmModel, ExtError> {
-        let path = path.as_ref().to_path_buf();
-        let model = model.into();
-        block_on_component(self.load_provider_inner(&path, model, origins, auth))
-    }
-
-    async fn load_provider_inner(
-        &self,
-        path: &Path,
-        model: String,
-        origins: std::collections::HashSet<String>,
-        auth: Option<String>,
-    ) -> Result<WasmModel, ExtError> {
-        let bytes = self.read_verified(path)?;
-        let component =
-            Component::from_binary(&self.engine, &bytes).map_err(|e| ExtError::Load {
-                path: path.display().to_string(),
-                reason: e.to_string(),
-            })?;
-        let mut linker: Linker<ProviderState> = Linker::new(&self.engine);
-        wasmtime_wasi::p2::add_to_linker_async(&mut linker)?;
-        provider_bindings::Provider::add_to_linker::<_, HasSelf<_>>(&mut linker, |state| state)?;
-        let factory = ProviderFactory {
-            engine: self.engine.clone(),
-            component,
-            linker,
-            wasi: self.wasi,
-            origins,
-        };
-        let mut instance = factory.instantiate().await.map_err(|e| ExtError::Load {
-            path: path.display().to_string(),
-            reason: format!("provider instantiation failed: {e}"),
-        })?;
-        // The load contract is "select one of the component's models by
-        // id" — enforce it. Without this check a typo'd --model silently
-        // runs whatever the guest's run() does with an unknown model
-        // name, and the user never learns the real ids.
-        let models = instance
-            .bindings
-            .tau_extension_models()
-            .call_list_models(&mut instance.store)
-            .await
-            .map_err(|e| ExtError::Load {
-                path: path.display().to_string(),
-                reason: format!("list_models trapped: {}", compact_wasm_error(&e)),
-            })?;
-        if !models.iter().any(|m| m.id == model) {
-            let available = models
-                .iter()
-                .map(|m| m.id.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            return Err(ExtError::Load {
-                path: path.display().to_string(),
-                reason: format!(
-                    "model '{model}' not provided by this component (available: {available})"
-                ),
-            });
-        }
-        Ok(WasmModel {
-            shared: Arc::new(tokio::sync::Mutex::new(SharedProviderInstance {
-                instance,
-                factory,
-            })),
-            model,
-            auth,
-        })
-    }
-}
-
 /// Lock a registry, surviving a poisoned mutex: a panic inside one
 /// blocking call must not poison every later call in the session.
 /// A host-side budget knob: `name=<milliseconds>` overrides the
@@ -1456,219 +1043,6 @@ pub(crate) fn lock_registry(
     registry: &std::sync::Mutex<http::HttpRegistry>,
 ) -> std::sync::MutexGuard<'_, http::HttpRegistry> {
     lock_poisoned(registry)
-}
-
-/// Lifts an HTTP failure into the contract's `types.error` (three-way since
-/// 0.7.0, docs/wit-redesign.md): the classification is made where the
-/// failure happens (`http::HttpError`), never by matching on a message.
-fn http_error_to_wit(
-    error: http::HttpError,
-) -> provider_bindings::tau::extension::types::Error {
-    use provider_bindings::tau::extension::types::Error;
-    match error {
-        http::HttpError::Refused(detail) => Error::Refused(detail),
-        http::HttpError::Failed(detail) => Error::Failed(detail),
-        http::HttpError::Invalid(detail) => Error::Invalid(detail),
-    }
-}
-
-/// The interface's freestanding functions. Since 0.7.0 `request` is an
-/// `async func` in the contract, and an async import needs the store (the
-/// async lift is driven on it), so it lands here rather than on the plain
-/// trait: the receiver is an `Accessor`, and store access is taken in
-/// short synchronous blocks -- an `Accessor`'s borrow cannot cross an
-/// await (wasmtime::component::Accessor::with).
-impl<U> provider_bindings::tau::extension::http::HostWithStore<U> for HasSelf<ProviderState> {
-    /// Consent is checked synchronously (the registry lock is scoped to
-    /// the gate, so no std guard is held across the await); the request
-    /// itself is awaited on the runtime -- 0.6.0 handed it to the blocking
-    /// pool because the client was the blocking one.
-    async fn request(
-        accessor: &Accessor<U, Self>,
-        method: String,
-        url: String,
-        headers: Vec<(String, String)>,
-        body: Vec<u8>,
-    ) -> Result<Resource<http::HostResponse>, provider_bindings::tau::extension::types::Error> {
-        let client = accessor
-            .with(|mut access| crate::lock_registry(&access.get().http).start(&url))
-            .map_err(http_error_to_wit)?;
-        let response = http::send(
-            &client,
-            &method,
-            &url,
-            &headers,
-            &body,
-            http::request_timeout(),
-            http::idle_timeout(),
-        )
-        .await
-        .map_err(http_error_to_wit)?;
-        accessor.with(|mut access| {
-            access.get().table.push(response).map_err(|_| {
-                provider_bindings::tau::extension::types::Error::Invalid(
-                    "http.request: the resource table is full".into(),
-                )
-            })
-        })
-    }
-}
-
-/// The resource's own methods that need no store access: the response
-/// lives in this state's resource table, so `&mut self` is enough.
-impl provider_bindings::tau::extension::http::HostResponse for ProviderState {
-    async fn status(&mut self, response: Resource<http::HostResponse>) -> u16 {
-        self.table
-            .get(&response)
-            .map(http::HostResponse::status)
-            .unwrap_or(0)
-    }
-
-    async fn header(&mut self, response: Resource<http::HostResponse>, name: String) -> Option<String> {
-        self.table
-            .get(&response)
-            .ok()
-            .and_then(|response| response.header(&name))
-    }
-
-    /// Dropping the response is the only close it has: the body stream is
-    /// what the guest holds, and the host's sender is released when the
-    /// guest drops that stream.
-    async fn drop(&mut self, response: Resource<http::HostResponse>) -> wasmtime::Result<()> {
-        self.table.delete(response)?;
-        Ok(())
-    }
-}
-
-/// `models`'s request and result mention `tools.definition` /
-/// `tools.tool-result`, which makes the component type import the whole
-/// `tools` interface for those types -- and the component model makes the
-/// host supply the complete instance, functions included, whether or not
-/// anything can call them. Nothing in this world can (the provider world's
-/// import list is `http` alone), so the honest answer is "not provided
-/// here": an empty table, and a refusal for a call that cannot arrive.
-impl provider_bindings::tau::extension::types::Host for ProviderState {}
-
-impl provider_bindings::tau::extension::tools::Host for ProviderState {}
-
-impl<U> provider_bindings::tau::extension::tools::HostWithStore<U> for HasSelf<ProviderState> {
-    async fn definitions(
-        _accessor: &Accessor<U, Self>,
-    ) -> Vec<provider_bindings::tau::extension::tools::Definition> {
-        Vec::new()
-    }
-
-    async fn execute(
-        _accessor: &Accessor<U, Self>,
-        _name: String,
-        _arguments_json: String,
-    ) -> provider_bindings::tau::extension::tools::ToolResult {
-        // The contract gives this function no error channel (`-> tool-result`),
-        // so the only honest unreachable answer is an in-band error.
-        provider_bindings::tau::extension::tools::ToolResult {
-            content: Vec::new(),
-            is_error: true,
-        }
-    }
-}
-
-/// The marker the linker asks for even when every method is store-flagged.
-impl provider_bindings::tau::extension::http::Host for ProviderState {}
-
-/// `response.body` is the one call that has to hand the guest a stream, and
-/// a stream handle lives in the store -- hence the `store` flag on this
-/// method (docs/wit-redesign.md, leg 4's binding recipe).
-impl<U> provider_bindings::tau::extension::http::HostResponseWithStore<U>
-    for HasSelf<ProviderState>
-{
-    fn body(
-        mut host: Access<U, Self>,
-        response: Resource<http::HostResponse>,
-    ) -> StreamReader<u8> {
-        let stream = http::take_body(&mut host.get().table, &response);
-        StreamReader::new(&mut host, stream).expect("stream allocation")
-    }
-}
-
-#[async_trait]
-impl tau_core::Model for WasmModel {
-    async fn stream(
-        &self,
-        req: &tau_core::Request,
-    ) -> futures::stream::BoxStream<'static, tau_core::ModelEvent> {
-        use tau_core::ModelEvent;
-
-        let request = provider_request::build(&self.model, req, self.auth.as_deref());
-
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<ModelEvent>();
-        let shared = self.shared.clone();
-        let call = tokio::spawn(async move {
-            let mut guard = shared.lock().await;
-            // 0.7.0: the provider hands back the event stream and its
-            // verdict future, and the host reads both. Reading is a
-            // *drive*: the guest's writer is only polled while the store
-            // is running concurrently, so the call stays inside one
-            // `run_concurrent` until the guest's writer ends (the
-            // consumer's [`crate::DoneHolder`] says when) -- a drive that
-            // returned earlier would deliver nothing and the model stream
-            // would sit empty.
-            let (done, done_rx) = crate::Done::new(1);
-            let ProviderInstance { store, bindings } = &mut guard.instance;
-            let result = store
-                .run_concurrent(async |acc| {
-                    let (events, verdict) = bindings
-                        .tau_extension_models()
-                        .call_run(acc, request)
-                        .await?;
-                    acc.with(|store| {
-                        events.pipe(
-                            store,
-                            EventConsumer {
-                                tx,
-                                _done: done.holder(),
-                            },
-                        )
-                    })?;
-                    acc.with(|store| verdict.pipe(store, VerdictConsumer))?;
-                    let _ = done_rx.await;
-                    Ok::<(), wasmtime::Error>(())
-                })
-                .await;
-            if result.is_err() {
-                // The trap poisoned the guest; rebuild so the next run
-                // reaches a fresh provider instead of trapping for the
-                // rest of the REPL session.
-                guard.revive().await;
-            }
-            result
-        });
-
-        async_stream::stream! {
-            // Drain events until the component hangs up (the consumer
-            // holding the sender is dropped when the guest's writer is),
-            // then surface any trap as an error
-            // event — the Model contract forbids propagating failures.
-            // Events arrive already typed (0.2.0 contract): there is no
-            // malformed-frame path to skip.
-            while let Some(event) = rx.recv().await {
-                yield event;
-            }
-            // Three layers deep: the spawned task's JoinError, the
-            // drive's own error, then the closure's.
-            match call.await {
-                Ok(Ok(Ok(()))) => {}
-                Ok(Ok(Err(e))) | Ok(Err(e)) => {
-                    yield ModelEvent::Error { message: format!("provider trapped: {}", compact_wasm_error(&e)) };
-                    yield ModelEvent::Done { stop: tau_core::StopReason::Error };
-                }
-                Err(e) => {
-                    yield ModelEvent::Error { message: format!("provider task failed: {e}") };
-                    yield ModelEvent::Done { stop: tau_core::StopReason::Error };
-                }
-            }
-        }
-        .boxed()
-    }
 }
 
 #[cfg(test)]
@@ -1723,132 +1097,6 @@ mod compact_error_tests {
         // appended.
         let display = "first line\nsecond line";
         assert_eq!(super::compact_error_display(display, display), "first line");
-    }
-}
-
-#[cfg(test)]
-mod auth_payload_tests {
-    //! The provider request is a typed value since 0.7.0 (`models.request`),
-    //! so 0.6.0's JSON-shape assertions become field assertions.
-    use crate::provider_bindings::exports::tau::extension::models;
-
-    #[test]
-    fn the_provider_request_carries_auth_only_when_consented() {
-        let req = tau_core::Request {
-            system: None,
-            messages: vec![tau_core::Message::user("hi")],
-            tools: vec![],
-        };
-        let without = super::provider_request::build("m", &req, None);
-        assert!(without.auth.is_none());
-        assert_eq!(without.model, "m");
-        assert_eq!(without.messages.len(), 1);
-
-        let with = super::provider_request::build("m", &req, Some("tok-1"));
-        assert!(
-            matches!(with.auth, Some(models::Auth::Bearer(token)) if token == "tok-1"),
-            "the grant is the bearer arm and carries the token"
-        );
-    }
-}
-
-#[cfg(test)]
-mod large_payload_tests {
-    use std::collections::HashSet;
-    use std::path::PathBuf;
-
-    use futures::StreamExt;
-    use tau_core::{Content, Media, Model, ModelEvent, Request};
-
-    fn artifact() -> Option<PathBuf> {
-        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("../../examples/echo-provider/target/wasm32-wasip2/release/echo_provider.wasm");
-        path.exists().then_some(path)
-    }
-
-    /// Same FNV-1a the echo provider's "probe" reports.
-    fn fnv1a(bytes: &[u8]) -> u64 {
-        let mut hash: u64 = 0xcbf29ce484222325;
-        for &b in bytes {
-            hash ^= b as u64;
-            hash = hash.wrapping_mul(0x100000001b3);
-        }
-        hash
-    }
-
-    /// The request's media must arrive at the guest byte-for-byte. 8 MiB of
-    /// noise is far beyond the few KiB every other test sends, and the guest
-    /// reports back the length and checksum of the bytes IT received. Both
-    /// are recomputed here over the very bytes the host sends, so truncation
-    /// or corruption anywhere on the host→component copy mismatches loudly.
-    /// (0.6.0 measured this over the request JSON, whose base64 inflated the
-    /// fixture past 10 MiB; the payload is typed now, so the bytes cross the
-    /// boundary as bytes.)
-    #[tokio::test]
-    async fn a_multi_mib_request_arrives_at_the_guest_byte_for_byte() {
-        let Some(path) = artifact() else {
-            eprintln!("skipping: echo_provider.wasm not built");
-            return;
-        };
-        let mut message = tau_core::Message::user("probe");
-        // xorshift noise, not a repeating pattern: a checksum over
-        // periodic bytes could miss a swapped or duplicated chunk.
-        let mut bytes = vec![0u8; 8 * 1024 * 1024];
-        let mut state: u64 = 0x9e3779b97f4a7c15;
-        for b in bytes.iter_mut() {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            *b = state as u8;
-        }
-        message.content.push(Content::Image {
-            media: Media::bytes("image/png", bytes.clone()),
-        });
-        let req = Request {
-            system: None,
-            messages: vec![message],
-            tools: vec![],
-        };
-        assert_eq!(bytes.len(), 8 * 1024 * 1024, "fixture is 8 MiB of media");
-
-        let host = super::ExtensionHost::new();
-        let model = host
-            .load_provider(&path, "echo", HashSet::new(), None)
-            .expect("load echo provider");
-        let mut stream = model.stream(&req).await;
-        let mut text = String::new();
-        let mut done = false;
-        while let Some(event) = stream.next().await {
-            match event {
-                ModelEvent::TextDelta { text: t } => text.push_str(&t),
-                ModelEvent::Done { .. } => done = true,
-                ModelEvent::Error { message } => panic!("provider error: {message}"),
-                _ => {}
-            }
-        }
-        assert!(done, "stream never completed");
-        let want = format!("bytes={} fnv1a={:016x}", bytes.len(), fnv1a(&bytes));
-        assert!(
-            text.contains(&want),
-            "guest received a different payload than the host sent: got {text:?}, want {want:?}"
-        );
-
-        // The instance is reused across runs: a normal-sized turn right
-        // after the big one must still work (no poisoned allocator, no
-        // leaked linear memory breaking the next call).
-        let followup = Request {
-            system: None,
-            messages: vec![tau_core::Message::user("still alive ")],
-            tools: vec![],
-        };
-        let mut stream = model.stream(&followup).await;
-        let mut text = String::new();
-        while let Some(event) = stream.next().await {
-            if let ModelEvent::TextDelta { text: t } = event {
-                text.push_str(&t);
-            }
-        }
-        assert_eq!(text, "still alive ");
     }
 }
 
@@ -1927,7 +1175,6 @@ mod stream_subscription_tests {
             ctx: WasiCtxBuilder::new().build(),
             table: ResourceTable::new(),
             channel: Arc::new(HostChannel::default()),
-            inject: false,
         }
     }
 
@@ -1945,7 +1192,9 @@ mod stream_subscription_tests {
     fn wired() -> (ComponentState, tau_core::EventBus) {
         let state = state();
         let bus = tau_core::bus::new_bus();
-        state.channel.wire(bus.clone(), tau_core::control::channel().0);
+        state
+            .channel
+            .wire(bus.clone(), tau_core::control::channel().0);
         (state, bus)
     }
 
@@ -2108,7 +1357,10 @@ mod replace_tests {
             model: "m".into(),
         };
         assert!(matches!(
-            replace_probe_payload(ProbePoint::BeforeRun, wit_probes::Payload::SessionEnd(facts)),
+            replace_probe_payload(
+                ProbePoint::BeforeRun,
+                wit_probes::Payload::SessionEnd(facts)
+            ),
             Verdict::Continue
         ));
     }
@@ -2135,7 +1387,10 @@ mod budget_tests {
     #[test]
     fn a_knob_reads_as_milliseconds_and_junk_keeps_the_default() {
         assert_eq!(parse_budget(Some("300")), Some(Duration::from_millis(300)));
-        assert_eq!(parse_budget(Some(" 300 ")), Some(Duration::from_millis(300)));
+        assert_eq!(
+            parse_budget(Some(" 300 ")),
+            Some(Duration::from_millis(300))
+        );
         assert_eq!(parse_budget(None), None);
         // Anything that is not a positive number means "no opinion": zero
         // is not a budget (it would cut off every wait), and a value that
@@ -2148,7 +1403,10 @@ mod budget_tests {
     #[test]
     fn a_name_nothing_exported_keeps_the_callers_default() {
         assert_eq!(
-            budget("TAU_VALIDATE_NOBODY_EXPORTS_THIS_MS", Duration::from_secs(7)),
+            budget(
+                "TAU_VALIDATE_NOBODY_EXPORTS_THIS_MS",
+                Duration::from_secs(7)
+            ),
             Duration::from_secs(7)
         );
     }
@@ -2159,170 +1417,21 @@ mod budget_tests {
         // environment in play, each host budget is the long one.
         assert_eq!(crate::http::request_timeout(), crate::http::REQUEST_TIMEOUT);
         assert_eq!(crate::http::idle_timeout(), crate::http::IDLE_TIMEOUT);
-        assert_eq!(crate::ws::connect_timeout_ms(), crate::ws::CONNECT_TIMEOUT_MS);
+        assert_eq!(
+            crate::ws::connect_timeout_ms(),
+            crate::ws::CONNECT_TIMEOUT_MS
+        );
         // The process pipes (bridge.rs): 0.7.0's guest cannot keep a clock
         // (no awaiting `wasi:clocks`), so the two deadlines 0.6.0's
         // `write-stdin(timeout-ms)` / `read-stdout(timeout-ms)` carried
         // live host-side now.
-        assert_eq!(crate::bridge::stdin_idle_timeout(), crate::bridge::STDIN_IDLE_DEFAULT);
-        assert_eq!(crate::bridge::pipe_idle_timeout(), crate::bridge::PIPE_IDLE_DEFAULT);
-    }
-}
-
-/// Core to the provider world's generated types.
-///
-/// bindgen generates the contract's types once per world, so this mirrors
-/// `convert::` one world over (the same mapping, different Rust types).
-/// Aliasing the shared `types` interface into one module with `with:` is the
-/// way to collapse that duplication; it is a change to the binding layer, not
-/// to the contract, and is deliberately not part of 0.7.0's migration
-/// (docs/wit-redesign.md section 7).
-mod provider_request {
-    use crate::provider_bindings::exports::tau::extension::models;
-    use crate::provider_bindings::tau::extension::types as wit;
-    use tau_core::tool::ToolDef;
-    use tau_core::types::{Content, Media, MediaSource, Message, ResultBlock, Role};
-
-    /// The payload handed to `models.run`: the request is a typed
-    /// value since 0.7.0, plus `auth` when the caller consented a token.
-    pub(super) fn build(
-        model: &str,
-        req: &tau_core::Request,
-        auth: Option<&str>,
-    ) -> models::Request {
-        models::Request {
-            model: model.to_string(),
-            system: req.system.clone(),
-            messages: req.messages.iter().map(message).collect(),
-            tools: req.tools.iter().map(definition).collect(),
-            auth: auth.map(|token| models::Auth::Bearer(token.to_string())),
-        }
-    }
-
-    fn message(message: &Message) -> wit::Message {
-        wit::Message {
-            role: match message.role {
-                Role::User => wit::Role::User,
-                Role::Assistant => wit::Role::Assistant,
-                Role::Tool => wit::Role::Tool,
-            },
-            content: message.content.iter().map(content).collect(),
-        }
-    }
-
-    fn content(content: &Content) -> wit::Content {
-        match content {
-            Content::Text { text } => wit::Content::Text(text.clone()),
-            Content::Image { media } => wit::Content::Image(media_to_wit(media)),
-            Content::Audio { media } => wit::Content::Audio(media_to_wit(media)),
-            Content::Video { media } => wit::Content::Video(media_to_wit(media)),
-            Content::File { media, name } => wit::Content::File(wit::File {
-                media: media_to_wit(media),
-                name: name.clone(),
-            }),
-            Content::ToolCall {
-                id,
-                name,
-                arguments,
-            } => wit::Content::ToolCall(wit::ToolCall {
-                id: id.clone(),
-                name: name.clone(),
-                arguments_json: arguments.to_string(),
-            }),
-            Content::ToolResult {
-                call_id,
-                content,
-                is_error,
-            } => wit::Content::ToolResult(wit::ToolResult {
-                call_id: call_id.clone(),
-                content: content.iter().map(result_block).collect(),
-                is_error: *is_error,
-            }),
-        }
-    }
-
-    /// The wire's `result-block` is narrower than `content` (the toolchain
-    /// refuses a recursive `content`), so a nested call or result degrades
-    /// to its text projection -- the same posture `convert::` takes.
-    fn result_block(block: &Content) -> wit::ResultBlock {
-        match ResultBlock::try_from(block.clone()) {
-            Ok(block) => match block {
-                ResultBlock::Text { text } => wit::ResultBlock::Text(text),
-                ResultBlock::Image { media } => wit::ResultBlock::Image(media_to_wit(&media)),
-                ResultBlock::Audio { media } => wit::ResultBlock::Audio(media_to_wit(&media)),
-                ResultBlock::Video { media } => wit::ResultBlock::Video(media_to_wit(&media)),
-                ResultBlock::File { media, name } => wit::ResultBlock::File(wit::File {
-                    media: media_to_wit(&media),
-                    name,
-                }),
-            },
-            Err(_) => wit::ResultBlock::Text(tau_core::types::tool_result_text(
-                std::slice::from_ref(block),
-            )),
-        }
-    }
-
-    fn media_to_wit(media: &Media) -> wit::Media {
-        wit::Media {
-            media_type: media.media_type.clone(),
-            source: match &media.source {
-                MediaSource::Bytes(bytes) => wit::MediaSource::Bytes(bytes.clone()),
-                MediaSource::Url(url) => wit::MediaSource::Url(url.clone()),
-                MediaSource::Blob { hash } => wit::MediaSource::Blob(hash.clone()),
-            },
-        }
-    }
-
-    fn definition(def: &ToolDef) -> models::Definition {
-        models::Definition {
-            name: def.name.clone(),
-            description: def.description.clone(),
-            parameters_json: def.parameters.to_string(),
-        }
-    }
-}
-
-/// The "everyone is done" signal a drive loop waits on.
-///
-/// A host-side drive (`Store::run_concurrent`) has to stay active for as
-/// long as the consumers it registered are alive: the machinery drops a
-/// consumer when the guest's writer ends, and a driver that returns
-/// earlier stops running the executor, so nothing would ever be
-/// delivered. Each consumer holds one [`DoneHolder`] and drops it with
-/// itself; the last one out hands the receiver its `()`.
-pub(crate) struct Done {
-    live: std::sync::atomic::AtomicUsize,
-    signal: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
-}
-
-impl Done {
-    /// `live` is how many holders will exist.
-    pub(crate) fn new(live: usize) -> (std::sync::Arc<Self>, tokio::sync::oneshot::Receiver<()>) {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        (
-            std::sync::Arc::new(Self {
-                live: std::sync::atomic::AtomicUsize::new(live),
-                signal: std::sync::Mutex::new(Some(tx)),
-            }),
-            rx,
-        )
-    }
-
-    /// One holder, for one consumer.
-    pub(crate) fn holder(self: &std::sync::Arc<Self>) -> DoneHolder {
-        DoneHolder(std::sync::Arc::clone(self))
-    }
-}
-
-/// A consumer's share of a [`Done`]; dropping it counts it out.
-pub(crate) struct DoneHolder(std::sync::Arc<Done>);
-
-impl Drop for DoneHolder {
-    fn drop(&mut self) {
-        if self.0.live.fetch_sub(1, std::sync::atomic::Ordering::SeqCst) == 1
-            && let Some(tx) = self.0.signal.lock().unwrap().take()
-        {
-            let _ = tx.send(());
-        }
+        assert_eq!(
+            crate::bridge::stdin_idle_timeout(),
+            crate::bridge::STDIN_IDLE_DEFAULT
+        );
+        assert_eq!(
+            crate::bridge::pipe_idle_timeout(),
+            crate::bridge::PIPE_IDLE_DEFAULT
+        );
     }
 }
