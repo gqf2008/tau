@@ -123,11 +123,9 @@ pub fn request_body(model: &str, req: &Request) -> Json {
                                         }));
                                     }
                                 }
-                                other => text.push_str(
-                                    &tau_core::types::tool_result_text(
-                                        std::slice::from_ref(other),
-                                    ),
-                                ),
+                                other => text.push_str(&tau_core::types::tool_result_text(
+                                    std::slice::from_ref(other),
+                                )),
                             }
                         }
                         if text.is_empty() {
@@ -145,8 +143,9 @@ pub fn request_body(model: &str, req: &Request) -> Json {
                     }
                 }
                 if !images.is_empty() {
-                    let mut parts =
-                        vec![json!({ "type": "text", "text": "Attached image(s) from tool result:" })];
+                    let mut parts = vec![
+                        json!({ "type": "text", "text": "Attached image(s) from tool result:" }),
+                    ];
                     parts.extend(images);
                     messages.push(json!({ "role": "user", "content": parts }));
                 }

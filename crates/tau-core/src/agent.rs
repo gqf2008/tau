@@ -635,10 +635,12 @@ impl Agent {
                 let output = match self.probe(ProbePoint::AfterTool, outcome).await {
                     // A replacement rewrites what the model is told the tool
                     // returned; the call itself is history and stays.
-                    Verdict::Replace(ProbePayload::AfterTool(replaced)) => crate::tool::ToolOutput {
-                        content: replaced.content.into_iter().map(Content::from).collect(),
-                        is_error: replaced.is_error,
-                    },
+                    Verdict::Replace(ProbePayload::AfterTool(replaced)) => {
+                        crate::tool::ToolOutput {
+                            content: replaced.content.into_iter().map(Content::from).collect(),
+                            is_error: replaced.is_error,
+                        }
+                    }
                     _ => output,
                 };
                 self.frame(crate::frames::Frame::ToolResult {

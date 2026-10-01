@@ -303,11 +303,11 @@ impl TryFrom<Content> for ResultBlock {
             Content::Audio { media } => Ok(ResultBlock::Audio { media }),
             Content::Video { media } => Ok(ResultBlock::Video { media }),
             Content::File { media, name } => Ok(ResultBlock::File { media, name }),
-            Content::ToolCall { .. } | Content::ToolResult { .. } => Err(
-                crate::error::HostError::invalid(
+            Content::ToolCall { .. } | Content::ToolResult { .. } => {
+                Err(crate::error::HostError::invalid(
                     "a tool result block cannot be a tool call or a nested tool result",
-                ),
-            ),
+                ))
+            }
         }
     }
 }
@@ -352,7 +352,6 @@ impl Message {
             })
             .collect()
     }
-
 }
 
 /// Text projection of tool-result blocks: text concatenated, media as
@@ -364,22 +363,14 @@ pub fn tool_result_text(blocks: &[Content]) -> String {
     for block in blocks {
         match block {
             Content::Text { text } => out.push_str(text),
-            Content::Image { media } => {
-                out.push_str(&format!("[image: {}]", media.media_type))
-            }
-            Content::Audio { media } => {
-                out.push_str(&format!("[audio: {}]", media.media_type))
-            }
-            Content::Video { media } => {
-                out.push_str(&format!("[video: {}]", media.media_type))
-            }
+            Content::Image { media } => out.push_str(&format!("[image: {}]", media.media_type)),
+            Content::Audio { media } => out.push_str(&format!("[audio: {}]", media.media_type)),
+            Content::Video { media } => out.push_str(&format!("[video: {}]", media.media_type)),
             Content::File { media, name } => out.push_str(&format!(
                 "[file: {}]",
                 name.as_deref().unwrap_or(&media.media_type)
             )),
-            Content::ToolCall { name, .. } => {
-                out.push_str(&format!("[tool-call: {name}]"))
-            }
+            Content::ToolCall { name, .. } => out.push_str(&format!("[tool-call: {name}]")),
             Content::ToolResult { call_id, .. } => {
                 out.push_str(&format!("[tool-result: {call_id}]"))
             }

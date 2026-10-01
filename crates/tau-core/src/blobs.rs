@@ -223,9 +223,7 @@ fn materialize_blocks(blocks: &mut [Content], store: &BlobStore) {
             | Content::File { .. } => {
                 let (hash, media_type) = match media_of(content) {
                     Some(media) => match &media.source {
-                        MediaSource::Blob { hash } => {
-                            (hash.clone(), media.media_type.clone())
-                        }
+                        MediaSource::Blob { hash } => (hash.clone(), media.media_type.clone()),
                         _ => continue,
                     },
                     None => continue,
@@ -247,9 +245,7 @@ fn materialize_blocks(blocks: &mut [Content], store: &BlobStore) {
                         // A corrupt blob (the read verified the hash and it
                         // did not match) degrades the same way — but says so.
                         *content = Content::Text {
-                            text: format!(
-                                "[media unavailable: {media_type} blob {hash}: {e}]"
-                            ),
+                            text: format!("[media unavailable: {media_type} blob {hash}: {e}]"),
                         };
                     }
                 }

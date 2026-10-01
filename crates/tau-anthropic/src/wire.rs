@@ -244,7 +244,9 @@ mod tests {
                     role: Role::Tool,
                     content: vec![Content::ToolResult {
                         call_id: "t1".into(),
-                        content: vec![Content::Text { text: "a cat".into() }],
+                        content: vec![Content::Text {
+                            text: "a cat".into(),
+                        }],
                         is_error: false,
                     }],
                 },

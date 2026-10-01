@@ -19,13 +19,13 @@
 //! and deletes both functions.
 
 use serde::de::DeserializeOwned;
-use serde_json::{json, Value as Json};
+use serde_json::{Value as Json, json};
 
 use crate::error::HostError;
 use crate::model::StopReason;
 use crate::probe::ProbePoint;
 use crate::tool::ToolDef;
-use crate::types::{tool_result_text, Content, Message, ResultBlock, ToolCall};
+use crate::types::{Content, Message, ResultBlock, ToolCall, tool_result_text};
 
 /// `before_run`: the prompt the run starts from.
 #[derive(Debug, Clone)]
@@ -346,12 +346,14 @@ fn present<T: DeserializeOwned>(
 ) -> Result<Option<T>, HostError> {
     match value.get(key) {
         None => Ok(None),
-        Some(raw) => serde_json::from_value(raw.clone()).map(Some).map_err(|error| {
-            HostError::invalid(format!(
-                "{}: field `{key}` does not fit the point's payload: {error}",
-                point.name()
-            ))
-        }),
+        Some(raw) => serde_json::from_value(raw.clone())
+            .map(Some)
+            .map_err(|error| {
+                HostError::invalid(format!(
+                    "{}: field `{key}` does not fit the point's payload: {error}",
+                    point.name()
+                ))
+            }),
     }
 }
 
@@ -465,7 +467,12 @@ mod tests {
                 .clone()
                 .merge_json(replacement)
                 .expect("a payload's own json must merge back");
-            assert_eq!(back.to_json(), json, "round trip changed {:?}", payload.point());
+            assert_eq!(
+                back.to_json(),
+                json,
+                "round trip changed {:?}",
+                payload.point()
+            );
         }
     }
 
@@ -520,7 +527,12 @@ mod tests {
         let ProbePayload::AfterTool(outcome) = replaced else {
             panic!("arm changed");
         };
-        assert_eq!(outcome.content, vec![ResultBlock::Text { text: "rewritten".into() }]);
+        assert_eq!(
+            outcome.content,
+            vec![ResultBlock::Text {
+                text: "rewritten".into()
+            }]
+        );
         assert!(outcome.is_error);
 
         // A replacement that only flips `isError` keeps the recorded blocks.
@@ -534,7 +546,10 @@ mod tests {
         let ProbePayload::AfterTool(outcome) = kept else {
             panic!("arm changed");
         };
-        assert_eq!(outcome.content, vec![ResultBlock::Text { text: "HI".into() }]);
+        assert_eq!(
+            outcome.content,
+            vec![ResultBlock::Text { text: "HI".into() }]
+        );
         assert!(outcome.is_error);
     }
 }
