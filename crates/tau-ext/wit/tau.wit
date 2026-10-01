@@ -1,10 +1,10 @@
 package tau:extension@0.8.0;
 
-/// ---- 0.8.0: subtraction (draft for review, 2026-10-01) ----
+/// ---- 0.8.0: subtraction (owner rulings, 2026-10-01) ----
 ///
-/// STATUS: proposal. The contract in force is still `wit/tau.wit` (0.7.0);
-/// this file becomes it only after review (docs/wit-redesign.md is the
-/// 0.7.0 precedent for how a draft becomes the contract).
+/// This file is the contract in force. The review record -- the rulings, the
+/// Jev second opinions, the OS-module reconciliation -- is
+/// docs/wit-0.8-draft.md; the 0.7.0 text it replaces is in git history.
 ///
 /// Three rulings, one direction: the contract keeps only what only it can do.
 ///
