@@ -2,7 +2,8 @@
 
 > **状态：Phase 0/1/2a/2b 已落地**（2026-09-28；Phase 2b 随契约
 > `tau:extension@0.3.0` 封印，`world realtime` + `examples/realtime-echo`
-> + validate.sh 11b/11c/11d 三腿）。**仅 Phase 3（wasip3 流 ABI）未落地**，
+> + validate.sh 11b/11c/11d 三腿；**这两样已于 0.8.0 删除**，见下条）。
+> **仅 Phase 3（wasip3 流 ABI）未落地**，
 > 排期见 `docs/wasip3-streams.md`（Rust 1.100 解锁）。
 > **代码不得先行于本文**：已落地部分同样以本文为准，改行为先改本文。
 >
@@ -15,6 +16,15 @@
 > 的只剩 **guest 迁 `wasm32-wasip3` target** 一项（wasip3-streams.md
 > 的解锁条件），接口形态不再等它。下文 Phase 2b 的记录保留原样
 > （那是落地时的真实形状）。
+>
+> **2026-10-01 更新（契约 0.8.0 减法）**：**Phase 2b 的 WIT 封印已随
+> 裁定 2/3 删除**——`world realtime`、`interface session` 与
+> `microphone`/`camera` 两个 consent 门类都不在契约里了，
+> `examples/realtime-echo` 目录已删。今天的形态是红线 1 的彻底化：
+> **音视频全程宿主内部，媒体路径上不再有 guest**——订阅通道的
+> `audio-delta` 臂只剩计数，observer 看得见助手在说话、永远听不到
+> 声音。下文凡与本节冲突处，以本节为准；Phase 2b 的记录作为
+> 「已删除」的历史保留。
 
 ## 现状家底（代码实证，2026-09-27）
 
@@ -28,9 +38,10 @@
 
 ## 架构红线（从脊柱推导，不得破）
 
-1. **采集/播放是宿主侧 I/O，永远不进 wasm guest**——WASI 无音频设备；
-   mic/camera 走 consent 门类（per-fingerprint，UX 显示设备名，与
-   process/http 同姿势），沙箱故事不被稀释。
+1. **采集/播放是宿主侧 I/O，永远不进 wasm guest**——WASI 无音频设备。
+   0.8.0 起这条是结构性的：realtime world 删除后媒体路径上根本没有
+   guest，设备门类（microphone/camera）也随之删除；宿主 CLI 按用户的
+   显式命令动作（录制即授权），不为 wasm 侧保留任何设备门。
 2. **音视频块全是事件**（事实；高吞吐路径绝不放 probe，
    `docs/events.md` 规则 3）；**打断/会话控制走控制通道**（决定）。
 3. 新通道不发明新时序：上行块与打断在现有 checkpoint 规则落地。
@@ -124,7 +135,8 @@ server VAD 与 barge-in → 关会话）。Phase 2 的本质就是补这个抽�
 
 Phase 2 按 Phase 0/1 的既定姿势再拆两刀：**2a 宿主先行**（trait +
 事件 kind + faux 替身 + CLI 闭环，WIT 一字不动），**2b 契约殿后**
-（WIT world `realtime` + consent 门类 microphone/camera + wasm 示例）。
+（WIT world `realtime` + consent 门类 microphone/camera + wasm 示例；
+0.8.0 已全部删除——本节保留 2a/2b 的切分账目作为历史）。
 理由与 Phase 0/1 相同：先把语义在宿主侧跑真，契约只封印已验证的
 形状。
 
@@ -164,7 +176,8 @@ Phase 2 按 Phase 0/1 的既定姿势再拆两刀：**2a 宿主先行**（trait 
   assistant 消息——与 run 后写账同形状。
 - **consent**：2a 不需要新门类——宿主 CLI 按显式命令动作，与
   /mic 同权；microphone/camera 门类管的是 wasm provider 驱动宿主
-  采集的场景，随 2b 落地。
+  采集的场景，随 2b 落地。（0.8.0：门类随 world realtime 一并删除，
+  这段是落地时的记录。）
 - **验收**（validate.sh 11c，pty，两腿）：①`/live 2 sine` →
   断言 speech-started 行、sink announce 行（`audio/pcm;rate=
   16000 @ 16kHz`——pcm 路径）、close 后逐样本账目
@@ -196,7 +209,7 @@ Phase 2 按 Phase 0/1 的既定姿势再拆两刀：**2a 宿主先行**（trait 
   调 `open`、把事件通道接上 → `WasmRealtimeSession`）。guest
   trap = 该会话当场 `Err`（门拒收姿势），不毒化后续会话
   （session-per-instance 天然隔离）。
-- **consent 门类**：`RememberedConsent` 增 `microphone`/`camera`
+- **consent 门类（0.8.0 已删除，以下为落地时的记录）**：`RememberedConsent` 增 `microphone`/`camera`
   两个 sticky bool（与 wasi_deny/inject 同姿势）。**门类管的是
   设备，不是会话**：wasm realtime provider 驱动宿主采集真实
   麦克风须持 microphone 授予（`--microphone`，`--remember` 可记）；
@@ -204,7 +217,7 @@ Phase 2 按 Phase 0/1 的既定姿势再拆两刀：**2a 宿主先行**（trait 
   camera 门类先行入册但**无采集路径即恒拒**——不为不存在的路径
   发明 UX。原生/demo provider 走宿主显式命令 doctrine（录制即
   consent），不需门类授予。
-- **示例 `examples/realtime-echo`**（world realtime）：与
+- **示例 `examples/realtime-echo`（0.8.0 已删除）**（world realtime）：与
   FauxRealtime 同剧本（首块 VAD-started + 文本注记；每块回
   input-audio-chunk 事实 + audio-delta 回声；interrupt →
   interrupted；close → speech-stopped + done）——**同一剧本两种
@@ -214,6 +227,10 @@ Phase 2 按 Phase 0/1 的既定姿势再拆两刀：**2a 宿主先行**（trait 
   照样通（设备语义而非会话语义）；②持授予 + sine：VAD 行、sink
   announce（pcm 裸流）、逐样本账目 32000、会话树双块——全链
   隔着 wasm 边界断言。
+
+> 0.8.0 注：Phase 2b 的 WIT（`world realtime` / `interface session`）、
+> 两个设备门类（`microphone`/`camera`）、`examples/realtime-echo`
+> 与 validate.sh 11d 腿均已删除；上面是落地时的验收记录，保留作历史。
 
 ### Phase 3 — wasip3 换 ABI
 
@@ -249,7 +266,8 @@ base64-JSON 块调用换 `stream<u8>`，按 `docs/wasip3-streams.md` 的
       [sine]` 全双工环（合成 RunStart/RunEnd 复用 Phase 1 全部
       sink 臂，Ctrl-C = barge-in，close 后双块落账）；validate.sh
       11c 两腿 pty 门禁（账目 32000 逐样本精确 + barge-in 存活）。
-      **2b**（同日落地）：WIT world `realtime`（interface `session`，
+      **2b**（同日落地；**0.8.0 已整体删除**——见文首 2026-10-01 更新）：
+      WIT world `realtime`（interface `session`，
       `model-event` 增四案 realtime kind）+ consent 门类
       `microphone`/`camera` 入册（门类管设备不管会话——sine 路径无需
       授予；camera 无采集路径恒拒）+ `examples/realtime-echo`（与

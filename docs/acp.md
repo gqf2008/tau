@@ -214,14 +214,15 @@ call go `failed`.
 
 **Outside this mode there is no gate at all.** In print and REPL modes
 nothing asks: the built-in tools are host code running with the
-permissions of the tau process, and `--deny-wasi` does not apply to them
-(`docs/builtin-tools.md`, `docs/extensions.md` §7). The gate is a
+permissions of the tau process (`docs/builtin-tools.md`,
+`docs/extensions.md` §7). The gate is a
 property of the editor-attached mode, where there is a human on the
 other end of the connection to ask.
 
-The wasm components' own consent model is unchanged and separate: bridge
-origins, provider origins, and the WASI sandbox are still per-fingerprint
-decisions made on the CLI with `--remember`.
+The wasm components' posture is separate and simpler since 0.8.0: there
+are no per-fingerprint grants left to make — a component runs with the
+tau process's permissions, and installing/trusting its signature is the
+authorization.
 
 ## What v1 does not do
 
@@ -239,8 +240,8 @@ decisions made on the CLI with `--remember`.
   no microphone or playback is opened. Audio *prompts* are carried (see
   the prompt table); what v1 does not carry is the model's audio coming
   back out.
-- Per-session working directories, and per-session isolation of a wasm
-  provider's state.
+- Per-session working directories, and per-session isolation of a
+  component's state.
 
 ## Troubleshooting
 

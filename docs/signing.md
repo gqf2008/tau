@@ -73,19 +73,14 @@ and the exact `tau trust --from-component` command that would onboard it
 ## What this does and does not do
 
 - **Does**: tamper evidence (any byte change breaks verification), publisher
-  identity (the fingerprint is the component's author id), and remembered
-  consent — capability grants are recorded per fingerprint
-  (`~/.tau/consent/<fingerprint>.json`): pass `--remember` once, later runs
-  recall the grants without the flags (`tau consent --list` / `--revoke`).
-  The record covers transport consent (bridge command/url, egress origins)
-  and two capability grants: `auth_delivery` (the provider credential may
-  flow from `TAU_PROVIDER_AUTH`) and `wasi_deny` (the component loads under
-  `--deny-wasi` semantics). Grants merge across runs — origins union,
-  booleans sticky-on; `--remember` never revokes, only `--revoke` does.
-  Secrets are never recorded, only grants.
-  Explicit flags still win per field, and unsigned components can never be
-  remembered — no fingerprint, no memory.
-- **Does not**: replace the sandbox. A trusted component still gets no
-  capabilities beyond its world's imports and the host's consent gates.
-  Signature answers "who wrote this and was it modified", the sandbox answers
-  "what can it do". Both are needed; neither implies the other.
+  identity (the fingerprint is the component's author id), and the
+  onboarding decision itself — trusting a fingerprint is the one
+  authorization act left. 0.8.0 deleted the consent store with the gates:
+  there is no `~/.tau/consent/*`, no `--remember`, no
+  `tau consent --list` / `--revoke`, and no per-fingerprint capability
+  grants, because there is no call-time gate to pass.
+- **Does not**: say what a component may do. A trusted component gets
+  ambient WASI and runs with the permissions of the tau process, exactly
+  like any other component its world admits (`docs/extensions.md` §7).
+  Signature answers "who wrote this and was it modified"; the world it was
+  installed as says what it can reach; neither is a sandbox.

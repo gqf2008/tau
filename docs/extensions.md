@@ -2,9 +2,9 @@
 
 End-to-end: from an empty crate to a signed, distributed component. The
 contract is `wit/tau.wit` (versioned — the `package` line there is the
-authority, currently `tau:extension@0.7.0`); this guide
-walks the three worlds — `extension` (tools + probes), `provider`
-(models), `bridge` (external protocols) — using the shipped examples as
+authority, currently `tau:extension@0.8.0`); this guide
+walks the two worlds — `extension` (tools + probes) and `bridge`
+(external protocols) — using the shipped examples as
 reference implementations. For the same path walked hands-on, with every
 command and its output, see `docs/tutorial.md`.
 
@@ -26,7 +26,7 @@ arbitrary.** Concretely:
 - Typed: the message trunk (`message` / `content` / `media` /
   `tool-call` / `tool-result`), verdicts, definitions, probe points
   and payloads (since 0.7.0 — the point set and every payload shape
-  are tau's own, docs/probes.md), the provider request, errors.
+  are tau's own, docs/probes.md), errors.
 - JSON strings only at schema-less leaves: `arguments-json` (arbitrary
   model-produced JSON), `parameters-json` (JSON Schema is itself a
   schema language) and `host.emit`'s `event-json` (the extension owns
@@ -43,13 +43,17 @@ raw `list<u8>`, never base64 — which is what the data model
 
 Since 0.7.0 the stateful ends are **resources** (`process.child`,
 `http.response`, `ws.connection`, `ingress.registration`,
-`host.subscription`, `session.session`) and the waits are **streams and
+`host.subscription`) and the waits are **streams and
 futures** — a guest's own await is where a deadline belongs, so every
 `timeout-ms` parameter left the contract (the budgets are host knobs,
 `TAU_*_TIMEOUT_MS`, each refusal naming its budget). The toolchain cost
 the old `u64` posture avoided is now measured rather than assumed:
 `docs/wasm-languages.md` records which generators carry the async ABI
 today (C and Python pass; C++, JS/TS and Go are toolchain-blocked).
+Since 0.8.0 those ends live only in the `bridge` world — with `world
+provider` and `world realtime` deleted, the component-model async ABI
+is a property of talking to the outside world, not of writing a tau
+extension.
 
 Prerequisites: a Rust toolchain with the component target —
 
@@ -169,7 +173,8 @@ extension must not wedge the harness.
 
 Since `tau:extension@0.2.0` the extension world imports `host` — the
 guest→host active channel (design: `docs/host-channel.md`). Facts are
-always allowed; decisions are consent-gated:
+always allowed; the run-affecting calls are validated, but since 0.8.0
+there is no call-time gate left to pass:
 
 - `notify(level, content)` — a user-visible notice ("info" / "warn" /
   "error"); the renderer draws text blocks and media placeholders.
@@ -179,10 +184,12 @@ always allowed; decisions are consent-gated:
   (`AgentEvent::ExtensionFact`). The schema is yours, so this stays a
   JSON leaf — but it must be well-formed JSON, or the result says so.
 - `steer(message)` / `follow-up(message)` — inject a user message into
-  the run. **Consent-gated**: pass `--allow-inject` (or persist the
-  grant with `--remember`); without it the call fails with a named
-  refusal. Messages must have `role: user`; the host validates and caps
-  size (4 MiB). Enqueue-only: delivery follows the control channel's
+  the run. **Installing the component is the authorization** (0.8.0:
+  `--allow-inject` and its call-time refusal are gone; the authority is
+  part of the install record, and it is the one capability ambient WASI
+  cannot imitate). Messages must have `role: user`; the host validates
+  and caps size (4 MiB). Enqueue-only: delivery follows the control
+  channel's
   checkpoints (steer after the current turn's tool results, follow-up
   when the run finishes) — a probe mid-call never re-enters the loop.
 - `subscribe(topics)` — observe the run's high-frequency streams
@@ -196,108 +203,46 @@ always allowed; decisions are consent-gated:
   with `subscription.poll()` inside its own invocations — the host
   never calls into a component asynchronously on this path, so
   granularity is the guest's own call frequency and an overrun surfaces
-  as a `lagged(n)` marker.
+  as a `lagged(n)` marker. **0.9.0 pending**: this pull shape is the
+  0.7.0 answer; the call-convention unification (resource handlers plus
+  `dispatch`) that replaces it is 0.9.0 work, not 0.8.0.
 
-The calls return `result<_, error>` — a typed `refused` / `failed` /
-`invalid` arm since 0.7.0, so a guest branches on the arm instead of
+The calls return `result<_, error>` — a typed `failed` / `invalid`
+arm (`refused` was 0.7.0's third arm; 0.8.0 deleted it, because with
+the gates gone nothing refuses at call time and a variant with no
+producer is not a contract), so a guest branches on the arm instead of
 matching English prose (the detail string still says what happened);
 nothing is silently swallowed. Demos: `examples/notifier` — its
 `poke` tool does notify/emit/steer and reports each outcome in the tool
-result, so the consent gate is visible in the transcript;
+result, so every outcome is visible in the transcript;
 `examples/streamer` — subscribes at `session_start` and polls at
 `before_run_end`, reporting the observed delta count via `notify`.
 
-## 5. Providers (world `provider`)
+## 5. Providers — removed in 0.8.0
 
-A provider component serves models. Streaming is a **stream the guest
-writes**: `run` returns `tuple<stream<event>, future<result<_, error>>>`
-— the 0.6.0 `events.emit(json)` push channel is gone, the stream *is*
-the channel, and the events are typed.
+No component is a model. `world provider`, `world realtime`,
+`interface models` and `interface session` were deleted, and with them
+`--provider-wasm`, `--provider-origin`, `--provider-auth` and the
+credential-delivery story (token injected as `auth.bearer`, grant
+remembered with `--remember`). The model is the harness's own brain:
+the built-in providers are host code — OpenAI chat completions, OpenAI
+Responses, Anthropic Messages, each pointed at a base URL through the
+environment — and the media plane is host-internal end to end
+(`docs/realtime-av.md`, red line 1).
 
-- `list-models()` — ids the user can select with `--model`. Load fails
-  for any other id, naming the available ones, so keep this list honest.
-- `run(request)` — `async` since 0.7.0, and the request is a typed
-  record (`model`, `system`, `messages`, `tools`, `auth`): you still
-  re-serialize into your vendor's wire format, you just no longer parse
-  tau's JSON to get there. Write `text-delta` / `audio-delta` /
-  `tool-call-delta` events to the stream, then exactly one `done` with
-  a stop reason; the future reports the host's verdict on the stream
-  (`err` means the host closed it early). **Contract:** never trap on
-  request/transport failures — write an `error` event followed by
-  `done(error)`.
-
-Network access is consent-gated: the `http` import is always linked
-but granted empty, so calls fail at call time until the user allows
-your origins (`--provider-origin https://api.example.com`, remembered
-per fingerprint with `--remember`). When the user hands the host a
-bearer token, it arrives as `auth.bearer(…)` on the request record —
-never persisted by the host.
-
-References: `examples/echo-provider` (no network, word-by-word echo —
-start here), `examples/http-provider` (real consent-gated HTTPS + SSE).
-
-Load with:
-
-```bash
-tau --provider-wasm target/wasm32-wasip2/release/my_provider.wasm \
-  --model my-model --provider-origin https://api.example.com -p "hi"
-```
-
-## 5.5 Realtime providers (world `realtime`)
-
-A provider that also exports `session` becomes a realtime provider: the
-world is `import http`, `export models + session` — so the
-component still doubles as an ordinary provider (`models.run` serves
-print mode), while `/live N` in the REPL opens a full-duplex session.
-Capability discovery is the export itself: the host probes the component
-type for `tau:extension/session@…`, there is no flag to set.
-
-- `session.create(config)` — a static `async` constructor returning
-  the `session` **resource** (a resource since 0.7.0: 0.6.0's "one
-  session per instance, open once" was where the state could live, not
-  a design). The config carries `input-media-type` (e.g.
-  `audio/pcm;rate=16000`) plus optional output media type and
-  instructions. Refuse a config you cannot serve with `err` — no
-  session exists at all, which beats 0.6.0's session that refuses
-  every call.
-- `uplink-audio(stream<u8>)` / `uplink-image(stream<list<u8>>)` —
-  uplink as streams: the host writes for as long as the session lives,
-  you read at your own pace (a slow provider suspends the host's write
-  instead of overrunning a buffer); dropping the writable end ends the
-  uplink.
-- `downlink()` — returns `tuple<stream<event>, future<…>>`: the
-  assistant's audio plus the VAD/barge-in facts, in order; the host
-  drains it at playback pace.
-- `interrupt()` — the user barged in (Ctrl-C during `/live`). What you
-  already wrote to the downlink is what the user heard; freeze the
-  current output segment and write an `interrupted` event. `close` is
-  gone with the resource: flush your terminal events (`speech-stopped`,
-  then exactly one `done`) and drop — a trapped session still poisons
-  only its own instance.
-
-The downlink stream carries the same `models.event` variant as plain
-providers, with four extra arms: `input-audio-chunk` (uplink fact),
-`speech-started` / `speech-stopped` (VAD), `interrupted`. The audio
-bytes cross to the host in `audio-delta` payloads; the guest-side
-subscription channel stays count-only by design (no audio hot path
-through `subscription.poll`).
-
-Device consent is the host's job, not yours: a real microphone uplink
-requires the user's `--microphone` grant (the category guards the
-device, not the session — the synthetic `sine` uplink needs none), and
-the `camera` category is registered but admits no capture path yet.
-
-Reference: `examples/realtime-echo` — a deterministic VAD + echo double
-(the same script as the native demo provider), exercised end to end by
-validate.sh step 11d.
+The cost is stated rather than discovered: model coverage is release
+cadence now, and a vendor tau does not ship has no component path. What
+remains for a component author is §2–§4 (`extension`) and §6
+(`bridge`); the 0.7.0 text of this section is in the repository
+history and summarized in `CHANGELOG.md`.
 
 ## 6. Bridges (world `bridge`)
 
 Since 0.3.0 the bridge world also imports `ws` — a WebSocket frame pipe
 for stream-mode protocols (IM long connections, docs/im-channels.md).
 Resource-based since 0.7.0: `connect(url)` is `async` and returns a
-`connection` (origin allowlist shared with `http`; `--mcp-url` accepts
-ws(s) URLs); `send(frame)` awaits the socket write — Ok still means
+`connection` (`--mcp-url` accepts ws(s)
+URLs); `send(frame)` awaits the socket write — Ok still means
 *written*, not queued (the dingtalk honest-ack amendment); and receiving
 has two legs for the two kinds of guest: `receive()` returns
 `tuple<stream<frame>, future<…>>` for a consumer that can await, while
@@ -309,20 +254,24 @@ named reason after 60s of inbound silence — but the `timeout-ms`
 parameters are gone (a guest has no clock to await): the connect budget
 is the host knob `TAU_WS_CONNECT_TIMEOUT_MS` (30s), and a silent peer's
 stream simply ends with the reason named. Demo:
-`examples/ws-echo-bridge`.
+`examples/ws-echo-bridge`. **0.9.0 pending**: `poll()` is the 0.7.0
+pull shape; the call-convention unification (resource handlers plus
+`dispatch`) that replaces it is 0.9.0 work, not 0.8.0.
 
 Also since 0.3.0 (the docs/im-channels.md contract amendment): bridges
 import the **host channel** and export **probes** — the IM adapter
 three-leg set. `host.steer`/`follow-up` inject inbound messages into the
-session behind the same `inject` consent as extensions (`--allow-inject`
-or a remembered grant); `host.notify`/`emit`/`subscribe`/`poll`/
-`unsubscribe` behave exactly as for extensions. Probe points are opt-in
+session on the same terms as extensions (installing the component is the
+authorization; 0.8.0 deleted the `--allow-inject` gate);
+`host.notify`/`emit`/`subscribe`/`poll` behave exactly as for
+extensions. Probe points are opt-in
 via `points()` (empty = observe nothing); `after_response` is the IM
 outbound leg. Demo: `examples/feishu-bridge` (ws long connection in,
 reply POST out; loopback mock `scripts/im_mock.py`, validate.sh 5c).
 
 Webhook platforms need the mirror capability: `ingress.listen(route)`,
-consent-gated per listen address (`--ingress 127.0.0.1:8080`), returns
+serving on the host's listen address (`--ingress 127.0.0.1:8080` — host
+configuration, not a per-component grant since 0.8.0), returns
 a `registration` resource — dropping it stops serving the route — and
 the host pushes each request into the mandatory
 `ingress-handler.handle-request` export (`async` since 0.7.0; the host
@@ -342,72 +291,66 @@ waiting (open the socket, drain the frames, post the reply) here; a
 bridge that needs no such hook exports an explicit no-op.
 
 Bridges translate an external tool protocol into tau tools — the host
-stays protocol-agnostic and only grants capabilities: `process`
-(spawn-with-pipes), `http`/`ws` (origin allowlist), `ingress`
-(consented listen addresses) and `host` (session injection,
-consent-gated). All are always linked, granted
-empty, checked at call time; the user's consent UX shows the exact
-argv / origin / grant.
+stays protocol-agnostic and only provides capabilities: `process`
+(spawn-with-pipes), `http`/`ws`, `ingress` and `host` (session
+injection). Since 0.8.0 there is no call-time gate behind any of them:
+the world a component was installed as is the declaration, and the
+capability interfaces the host serves are exactly the ones that world
+imports.
 
 Reference: `examples/mcp-bridge` (MCP stdio + streamable HTTP, with
 protocol-version negotiation). `docs/bridges.md` has the capability
 model and the walgit worked example.
 
-## 7. WASI: ambient by default — and why the gates are not a wall
+## 7. WASI: ambient, always — and why that is the whole posture
 
-Components run with ambient WASI — fs/env/stdio/args/network — unless
-the user passes `--deny-wasi` (or remembered it for your fingerprint).
-Design for both: read env vars defensively, treat filesystem access as
-a bonus not a requirement. `examples/echo-provider`'s `env NAME`
-prompt demos the difference live.
+Components run with ambient WASI — fs/env/stdio/args/network — always.
+0.8.0 deleted `--deny-wasi` and the `WasiPolicy` type with it: there
+is one posture, not a default plus a tightening knob, and no
+`--remember` to make the tightening sticky for a fingerprint. Design
+accordingly: read env vars defensively if you like, but filesystem and
+network access are simply there.
 
 Be precise about what "ambient" hands over, because it is more than the
-word suggests. Under the default policy (`WasiPolicy::AllowAll`) every
-component — extension, bridge, provider, realtime alike — gets:
+word suggests. Every component — extension and bridge alike — gets:
 
 - stdio, the **whole host environment**, and the host's argv;
 - network access and DNS resolution;
 - the **entire host filesystem preopened read-write** (`/` on unix; on
   Windows every existing drive, as `/c`, `/d`, …).
 
-One consequence deserves to be stated outright rather than discovered:
+The consequence that 0.7.0 stated as a warning is now the design:
 
-> **The consent gates on `http` and `process` are not a security
-> boundary.** A component that imports `wasi:sockets` or
-> `wasi:filesystem` directly goes around them: what the user never
-> granted is refused on the gated interface and simply not enforced on
-> the ambient one. The gates are a declaration of intent — they make a
-> component's reach auditable in one place, and they stop honest
-> mistakes — not a wall against code that means to get out.
+> **Nothing here is a boundary.** 0.7.0 had per-capability gates on
+> `http` and `process` and they were never a wall — a component that
+> imports `wasi:sockets` or `wasi:filesystem` goes around them
+> (`docs/wit-review.md`, F1). A gate that only stops honest mistakes
+> costs every user the vocabulary and buys nothing, so 0.8.0 keeps only
+> the world boundary — a component that needs `process` has to be a
+> bridge — and drops the call-time checks.
 
-What actually closes ambient WASI is host-side and all-or-nothing per
-component (there is no per-capability ambient subset):
+What is left as the authorization act is **installing/trusting signed
+bytes**, and the declaration shown at that moment is read from the
+component type (its imports and exports), not hand-written. The signing
+chain — fingerprint → trust — is what makes "this component, and not
+another one" answerable at all. It answers *which* component this is,
+never *what it may do*; it is not a sandbox and does not pretend to be
+one.
 
-- `--deny-wasi` — this run, every component;
-- `--deny-wasi --remember` — sticky for that signing fingerprint; only
-  `tau consent --revoke` lifts it.
-
-Under deny the WASI interfaces still link, but nothing is granted: fs
-and network calls fail permission-denied, env and args come back empty,
-stdio goes nowhere.
+Which leaves the honest answer for a real boundary: that is an OS-level
+question about the process tau runs in (a separate account, a container,
+a VM).
 
 The same honesty applies to the tools tau ships itself. The eight
 built-in tools (`docs/builtin-tools.md`) are **host code, not
 components**: they read, write, and spawn with the permissions of the
-tau process, and `--deny-wasi` says nothing about them. They are not
-consent-gated either — turning them off is `--no-builtin-tools`, which
+tau process, and no wasm-side policy ever applied to them. They are not
+gated either — turning them off is `--no-builtin-tools`, which
 is about what the model may call, not about what the sandbox allows.
 The one place a built-in asks before it acts is ACP mode, where the four
 mutating tools go through the editor's `session/request_permission`
 first (`docs/acp.md`); that is a prompt shown to a person, which is not
 the same thing as a boundary, and outside that mode there is none.
-
-So do not mistake the gates for a sandbox. If a real boundary is what
-you need, that is an OS-level question about the process tau runs in.
-What does hold is the signing chain — fingerprint → trust → consent is
-what makes "this component, and not another one" answerable at all. The
-gates record what the user agreed to; they do not enforce it against a
-component that routes around them.
 
 ## 8. Sign and distribute
 
@@ -443,17 +386,19 @@ rebuild (the signature covers the exact bytes); tags are mutable —
 receivers who want immutability pull by digest
 (`oci://ghcr.io/you/my-ext@sha256:…`).
 
-Consent (bridge argv, HTTP origins, credential delivery, WASI-deny) is
-remembered per **signing fingerprint**, not per file — your users keep
-their grants across your releases as long as you sign with the same
-key. `tau consent --list` / `tau consent --revoke <fingerprint>` is
-their escape hatch.
+0.8.0 deleted the consent store along with the gates: there is no
+`~/.tau/consent/*`, no `--remember`, no `tau consent --list` /
+`--revoke`. Signing still travels per **signing fingerprint**, not per
+file — but it now answers only "which component is this", and the
+authorization is the act of installing/trusting those bytes.
 
 ## 9. Checklist
 
 - [ ] `definitions()`/`list-models()` return fast — they run at load
 - [ ] no panics on bad input; `is_error` / `error` events instead
 - [ ] probes are fast (the harness waits) and degrade gracefully
-- [ ] works under `--deny-wasi` or documents why it cannot
+- [ ] declares its reach by its world and imports — there is no runtime
+      gate to fall back on (0.8.0: ambient WASI always, and the component
+      runs with the tau process's permissions)
 - [ ] signed after the final build; fingerprint published out-of-band
 - [ ] pushed by tag for convenience, by digest for the cautious

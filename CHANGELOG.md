@@ -62,6 +62,82 @@
   0.8.0 resets the clock), and a one-time authorization to file three
   upstream tracking issues (wit-bindgen cpp / jco / TinyGo).
 
+## [0.8.0] — 2026-10-01
+
+### Breaking — contract `tau:extension@0.8.0`: subtraction (gates, providers, consent)
+
+`wit/tau.wit` (identically vendored at `crates/tau-ext/wit/tau.wit`) is
+`tau:extension@0.8.0`. 0.7.0 changed the shape of the contract; 0.8.0
+only deletes — three rulings, one direction: keep only what only the
+contract can do. Every deletion is ABI-breaking for a component that
+used the surface, and the bump is taken one day after 0.7.0 precisely
+because nothing outside this repository targets it yet: there are no
+third-party components to migrate. By theme:
+
+- **Four worlds become two** (`extension`, `bridge`). `world provider`,
+  `world realtime`, `interface models` and `interface session` are
+  deleted: no component is a model. The model is the harness's own
+  brain; the vendor wire formats (chat completions, Responses, Messages,
+  realtime sockets) are host code, which is also where the media plane
+  already lived. `--provider-wasm`, `--provider-origin`,
+  `--provider-auth` and `TAU_PROVIDER_AUTH` go with them — `--provider`
+  stays, restricted to the three built-ins, and the escape hatch for a
+  vendor tau does not ship is an OpenAI-compatible base URL.
+  `examples/echo-provider`, `examples/http-provider` and
+  `examples/realtime-echo` are deleted. Audio and video never cross the
+  ABI (ruling 3): with the realtime world gone the media path is
+  host-internal end to end, and the subscription's `audio-delta` arm is
+  a COUNT — an observer can see that the assistant is speaking, never
+  hear it.
+- **Every runtime capability gate is gone.** `http` has no origin
+  allowlist, `process` has no argv approval, and the ingress listen
+  address is host configuration (`--ingress` stays), not a
+  per-component grant. The `microphone` and `camera` device categories
+  are deleted. `--deny-wasi` is deleted and the `WasiPolicy` type with
+  it: a component always gets ambient WASI (fs / env / stdio / args /
+  network) and runs with the permissions of the tau process. The reason
+  is the one `docs/extensions.md` §7 had already written down
+  (wit-review F1): a gate a guest walks around with `wasi:sockets` /
+  `wasi:filesystem` is a declaration of intent, not a wall, and it cost
+  every user the vocabulary while buying nothing. The world a component
+  was installed as is the declaration now, read from the component type.
+- **The consent system is deleted with the gates**: `consent.rs`,
+  `~/.tau/consent/*`, `--remember`, `tau consent --list` / `--revoke`.
+  One authorization act is left — installing/trusting signed bytes — and
+  signing answers "which component is this", never "what may it do".
+  Host config that used to be a grant (`--mcp-command`, `--mcp-url`,
+  `--ingress`) is just config, and `BridgeConsent` becomes
+  `BridgeConfig`: `command` / `mcp_url` / `listen`, nothing else.
+- **`types.error` loses `refused`** (three arms become two: `failed` /
+  `invalid`). Nothing refuses at call time any more, and a variant with
+  no producer is not a contract. The host's own `HostError::Refused`
+  stays, but only for the signing/trust chain, and it folds to `failed`
+  when it crosses to a guest.
+- **`host.steer` / `follow-up` need no flag.** Installing the component
+  is the authorization — the authority is part of the install record,
+  and it is the one capability ambient WASI cannot imitate.
+  `--allow-inject` is deleted; `notify` / `emit` were never gated.
+- **Not in this release**: the call-convention unification (resource
+  handlers plus `dispatch`, and deleting the pull shapes `ws.poll` and
+  `host.subscribe`) is 0.9.0 work — the docs mark those shapes
+  "0.9.0 pending" rather than describing them as settled.
+
+An old component is rejected by name — `component targets
+tau:extension@0.7.0; this host requires @0.8.0; rebuild with the 0.8.0
+bindings (wit/tau.wit), see CHANGELOG.md` — and the examples in this
+repository are rebuilt against it. The rulings and their cost accounting
+are written up in `docs/wit-0.8-draft.md`.
+
+### Docs
+
+- The documentation follows the contract: `docs/extensions.md` §5
+  (providers) is deleted with a tombstone and §7 is rewritten as
+  "ambient WASI, always"; `docs/bridges.md`, `docs/architecture.md`,
+  `README.md` and the rest of `docs/` lose their live references to
+  gates, consent and wasm providers; `docs/realtime-av.md` and
+  `docs/wit-redesign.md` keep their records and mark the deleted parts
+  as deleted instead of rewriting history.
+
 ## [0.7.0] — 2026-09-30
 
 ### Breaking — contract `tau:extension@0.7.0`: exports that wait are async, probes carry types, resources replace handles

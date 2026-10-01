@@ -195,7 +195,7 @@ media 工具能力，或交给 provider 侧（realtime API 多直接吃 PCM）�
 通道级单文件，JSON（仓内状态文件一律 JSON：consent/keys/trust 同款，
 组件侧 serde_json 解析有 mcp-bridge 先例）。**组件自读**：宿主经环境
 变量 `TAU_IM_CONFIG` 把路径交给 bridge，组件用 ambient WASI fs 读
-（默认 allow-all；`--deny-wasi` 下读失败 = fail-loud，文档即本文）。
+（0.8.0：ambient WASI 是唯一的 posture，`--deny-wasi` 已删除）。
 否决项：宿主解析后经 env 内联（宿主开始懂 IM 通道 schema，违背
 「宿主不懂 IM 协议」分层红线）；只写规范不落地（清单不前进）。
 
@@ -356,16 +356,18 @@ mock →(text 帧)→ 组件：钉钉形 CALLBACK 帧（data 为转义 JSON）
 - [x] host-channel 落地（见 docs/host-channel.md 清单，0.2.0 已落地）
 - [x] `ws` 能力（0.3.0 落地）：bridge world `import ws`——
       connect/send/recv/close + text|binary 帧；宿主 actor 线程只做
-      帧管道；consent 与 http 共享 origin 白名单（ws:→http:,
-      wss:→https:，`--mcp-url` 接受 ws(s) URL）；F9 语义入契约注释
+      帧管道；与 http 同一套 origin 语义（ws:→http:, wss:→https:；
+      0.8.0 起两边都没有 origin 白名单）；`--mcp-url` 接受 ws(s) URL；
+      F9 语义入契约注释
       （ping 30s / 60s 无入站即 close 报因 / recv 必须带显式超时）。
       示例 `examples/ws-echo-bridge` + `scripts/ws_echo_mock.py`
       回环验收（validate.sh 步骤 5b）
 - [x] bridge world 追加 `import host` + `export probes`（契约修正案，
       见文首；2026-09-28 落地）：宿主侧复用既有 host 链接与 probe
       调度（共享 free fn + BridgeProbes over SharedBridge），bridge
-      steer 与 extension 同门（`--allow-inject` / remembered inject，
-      BridgeConsent↔RememberedConsent 双向携带、merge sticky-on）；
+      steer 与 extension 同权（0.8.0：门与 `--allow-inject` 已删，
+      安装即授权；落地时是 BridgeConsent↔RememberedConsent 双向携带、
+      merge sticky-on）；
       既有 bridge 示例（mcp-bridge / ws-echo-bridge）补空 probes 导出
 - [x] 飞书 bridge 组件（`examples/feishu-bridge`，2026-09-28 落地）：
       session_start 建连、after_response 先回帖后泵入站、steer 注入、
@@ -378,10 +380,10 @@ mock →(text 帧)→ 组件：钉钉形 CALLBACK 帧（data 为转义 JSON）
       TAU_IM_CONFIG 读文件，endpoint 对照 consent、未知 chat 忽略、
       users.allow fail-closed；validate.sh 5c 加未授权 user 拒绝腿
 - [x] `ingress` 能力（2026-09-28 落地）：bridge world `import ingress`
-      + 必需 `export ingress-handler`；宿主 tiny_http 监听 consent 的
-      `--ingress <addr:port>`，把每个 webhook 请求同步推进组件导出
-      （push 模型，无 idle 泵窗口）；consent 按监听地址记、可
-      remember/union；`examples/whatsapp-bridge` + `scripts/wa_mock.py`
+      + 必需 `export ingress-handler`；宿主 tiny_http 监听
+      `--ingress <addr:port>`（0.8.0：监听地址是宿主配置，不是按
+      组件发的 grant），把每个 webhook 请求同步推进组件导出
+      （push 模型，无 idle 泵窗口）；`examples/whatsapp-bridge` + `scripts/wa_mock.py`
       回环；validate.sh 5d 双腿（pty 驱动交互 REPL：deliver→ack 200→
       idle steer 唤醒回合→reply POST；无 --ingress 时 listen 拒、零回帖）。
       配套修复：REPL 空闲时注入的 steer/follow-up 现在直接成为下一回合
@@ -400,8 +402,8 @@ mock →(text 帧)→ 组件：钉钉形 CALLBACK 帧（data 为转义 JSON）
       按 honest-ack 红线族裁定同步）；validate.sh 5f 全绿（print
       模式：CALLBACK → ack → steer → 回帖 POST）
 - [x] validate.sh IM 回环案例（步骤 5c，`scripts/im_mock.py`）：
-      注入→steer→turn 2→回帖 POST 全链断言 + 无 --allow-inject 时
-      steer 拒、零回帖的拒绝路径
+      注入→steer→turn 2→回帖 POST 全链断言 + （0.8.0 前）无
+      --allow-inject 时 steer 拒、零回帖的拒绝路径；该门已删
 - [x] 0.7.0 资源/流式化（2026-09-29）：ws/http/process/ingress 的
       u64 句柄全部资源化（connection/response/child/registration，
       drop 即释放），`timeout-ms` 参数全部下线（预算改宿主旋钮，

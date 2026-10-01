@@ -9,6 +9,10 @@
 > 契约修正案）——IM 适配器的入站注入腿；steer/follow-up 走同一
 > inject consent 门（`--allow-inject` / remembered grant），宿主侧
 > 与 extension 共用同一组实现。
+>
+> **0.8.0 注**：inject consent 门（`--allow-inject` / remembered
+> grant）与整套 consent store 一并删除——steer/follow-up 的授权就是
+> 「安装了这个组件」，本文其余部分保留当时的形状。
 
 ## 动机
 
@@ -188,6 +192,7 @@ v1 写的「旧组件照常实例化」在 package 版本提升下不成立—�
       超尺寸三条拒绝路径）
 - [x] consent 新门类「会话注入」（`RememberedConsent.inject`，sticky-on
       合并，`tau consent --list` 可见，`--revoke` 收回）
+      ——**0.8.0 已删除**（门与 consent store 一并撤，安装即授权）
 - [x] 演示示例 `examples/notifier`（既有示例不动）
 - [x] `docs/extensions.md`/`docs/events.md`/`docs/probes.md` 更新
 - [x] CHANGELOG；`scripts/validate.sh` 加 consent 门案例（step 10b）

@@ -51,7 +51,7 @@ fingerprints — `touch examples/mcp-bridge/src/lib.rs` and rerun before
 believing the green.
 
 **Contract bumps: build the fixtures before the suites.** The tau-ext unit
-tests load example artifacts (`echo-provider`, `upper`, `guard`, …) straight
+tests load example artifacts (`upper`, `guard`, …) straight
 from `examples/*/target/wasm32-wasip2/release`. After a WIT version bump a
 stale artifact fails the test as a version mismatch ("this host requires
 @x.y.z") — which reads like a code defect but is just an old fixture.

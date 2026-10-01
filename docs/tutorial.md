@@ -364,27 +364,28 @@ development and unacceptable for their production.
 - **Probes** — influence a run instead of just serving calls:
   `docs/probes.md`, and `tau probes` prints the point list with payload
   shapes and verdict semantics for the tau you have installed.
-- **Other worlds** — a component can also be a provider (`world provider`),
-  a realtime provider (`world realtime`), or a bridge (`world bridge`, the
-  external-protocol world: stdio/http/websocket + ingress):
-  `docs/extensions.md` §5–§6, `docs/bridges.md`.
-- **The host channel** — notify/emit facts, ask for consent, steer the run:
+- **The other world** — besides `extension` there is `bridge`, the
+  external-protocol world (stdio/http/websocket + ingress). A component
+  cannot be a model: `world provider` and `world realtime` were deleted in
+  0.8.0. `docs/extensions.md` §5–§6, `docs/bridges.md`.
+- **The host channel** — notify/emit facts, steer the run:
   `docs/extensions.md` §4, `docs/host-channel.md`.
 - **Other languages** — this walkthrough is Rust (`wit-bindgen`); the
   contract is a WIT world, and `docs/wasm-languages.md` carries the build
   commands and acceptance for C, C++, Go, Java, JavaScript, Python,
   TypeScript — the `examples/{c,cpp,go,java,js,python,ts}-upper` crates are
   the same tool in each.
-- **Capabilities and consent** — ambient WASI is on by default; scoped
-  capabilities (bridge spawn, provider origins) are gated, and a signed
-  component can remember grants per fingerprint with `--remember`
-  (`tau consent --list`, `--revoke`). Unsigned components can never be
-  remembered: no fingerprint, no memory.
+- **Capabilities** — ambient WASI is always on and a component runs with
+  the permissions of the tau process; 0.8.0 deleted the per-capability
+  gates, the consent store and `--remember`. What is left is the world
+  boundary (only `bridge` imports `process`/`http`/`ws`/`ingress`) and
+  one authorization act: installing/trusting the signed bytes.
 - **Media results** — a tool result can carry images/audio/files, not just
   text: `docs/tool-media.md`.
 - **Before you publish** — `docs/extensions.md` §9's checklist
-  (fast `definitions()`, no panics, fast probes, works under `--deny-wasi`,
-  signed after the final build, fingerprint published out-of-band).
+  (fast `definitions()`, no panics, fast probes, reach declared by world
+  and imports, signed after the final build, fingerprint published
+  out-of-band).
 
 ## 7. Traps
 
@@ -394,8 +395,8 @@ that read like something else.
 - **A vendored WIT that no longer matches the host.** After a contract bump
   the refusal names both versions and the fix, which is why it is worth
   vendor *and* re-vendor deliberately:
-  ``no exported instance named `tau:extension/tools@0.7.0` [component targets
-  tau:extension@0.6.0; this host requires @0.7.0; rebuild with the 0.7.0
+  ``no exported instance named `tau:extension/tools@0.8.0` [component targets
+  tau:extension@0.7.0; this host requires @0.8.0; rebuild with the 0.8.0
   bindings (wit/tau.wit), see CHANGELOG.md]``.
 - **More than one key in the keyring** → `tau sign` refuses until you pass
   `--key <fingerprint>` (see §4).
