@@ -2,17 +2,18 @@
 //! capability (docs/im-channels.md) — the webhook-platform leg, dual of
 //! feishu-bridge's ws long connection:
 //!
-//! - inbound: `session_start` calls `ingress.listen("/im/whatsapp")`
-//!   (consent: --ingress <addr:port>); the platform POSTs each message
-//!   event to that route and the host pushes it into
+//! - inbound: `session_start` calls `ingress.listen("/im/whatsapp")` —
+//!   the listen ADDRESS is host config (`--ingress <addr:port>`), not a
+//!   per-component grant; the platform POSTs each message event to that
+//!   route and the host pushes it into
 //!   `ingress-handler.handle-request` — no pump, no idle window: the
-//!   export steers the message into the session (consent:
-//!   --allow-inject) and its return value is the webhook's HTTP response
-//!   (the platform's ack).
+//!   export steers the message into the session (no steering flag since
+//!   0.8.0: the install record authorizes it) and its return value is the
+//!   webhook's HTTP response (the platform's ack).
 //! - outbound: `after_response` posts the assembled assistant message to
-//!   the platform's send API over the origin-allowlisted `http`
-//!   capability (TAU_MCP_URL + "/send" — WhatsApp's Graph API messages
-//!   endpoint stands behind that shape).
+//!   the platform's send API over the `http` capability (TAU_MCP_URL +
+//!   "/send" — WhatsApp's Graph API messages endpoint stands behind that
+//!   shape; no origin allowlist since 0.8.0).
 //!
 //! 0.7.0 shape: the listener is a `registration` resource — dropping it
 //! stops serving the route, so the adapter HOLDS it (the state cell is a
@@ -34,7 +35,7 @@
 //! Use (loopback mock):
 //!   tau --allow-unsigned --mcp-bridge .../whatsapp_bridge.wasm \
 //!       --mcp-url http://127.0.0.1:API_PORT \
-//!       --ingress 127.0.0.1:HOOK_PORT --allow-inject --demo -p "hi"
+//!       --ingress 127.0.0.1:HOOK_PORT --demo -p "hi"
 
 wit_bindgen::generate!({
     path: "../../wit/tau.wit",
@@ -90,7 +91,6 @@ fn say(level: Level, text: String) {
 /// says never to match on it, so this never does).
 fn host_error(verb: &str, error: HostError) -> String {
     match error {
-        HostError::Refused(detail) => format!("{verb} refused: {detail}"),
         HostError::Failed(detail) => format!("{verb} failed: {detail}"),
         HostError::Invalid(detail) => format!("{verb} invalid: {detail}"),
     }
@@ -138,8 +138,8 @@ impl Probes for WhatsAppBridge {
     fn probe(point: Point, _payload: Payload) -> Verdict {
         if point == Point::SessionStart {
             // Failure is a notice, not a load error — without --ingress
-            // this bridge simply has no inbound leg (the notice names the
-            // missing consent).
+            // the host has no address to serve, so this bridge simply has
+            // no inbound leg (the notice carries the host's reason).
             match ingress::listen(ROUTE) {
                 Ok(registration) => {
                     ADAPTER.with(|cell| cell.borrow_mut().registration = Some(registration))
@@ -160,22 +160,31 @@ impl BridgeIo for WhatsAppBridge {
 }
 
 /// Post the assembled assistant message back to the platform's send API
-/// (outbound is the http capability, origin-consented via --mcp-url). The
-/// text is the typed payload's first text block — 0.6.0 scraped the JSON
-/// payload for one.
+/// (outbound is the `http` capability; the base URL is TAU_MCP_URL, host
+/// config via --mcp-url). The text is the typed payload's first text
+/// block — 0.6.0 scraped the JSON payload for one.
 async fn post_reply(payload: &Payload) {
     let pending = ADAPTER.with(|cell| {
         let adapter = cell.borrow();
-        adapter.awaiting_reply.then(|| adapter.chat_id.clone()).flatten()
+        adapter
+            .awaiting_reply
+            .then(|| adapter.chat_id.clone())
+            .flatten()
     });
     let Some(chat_id) = pending else { return };
-    let Some(base) = std::env::var("TAU_MCP_URL").ok() else { return };
+    let Some(base) = std::env::var("TAU_MCP_URL").ok() else {
+        return;
+    };
     let text = match payload {
         Payload::AfterResponse(response) => {
-            response.message.content.iter().find_map(|block| match block {
-                Content::Text(text) => Some(text.clone()),
-                _ => None,
-            })
+            response
+                .message
+                .content
+                .iter()
+                .find_map(|block| match block {
+                    Content::Text(text) => Some(text.clone()),
+                    _ => None,
+                })
         }
         _ => None,
     };
@@ -244,16 +253,18 @@ impl IngressHandler for WhatsAppBridge {
                 });
                 say(
                     Level::Info,
-                    format!("wa: inbound message from {user} steered into the session (chat {chat_id})"),
+                    format!(
+                        "wa: inbound message from {user} steered into the session (chat {chat_id})"
+                    ),
                 );
                 ok("{\"ok\":true}")
             }
             // The ack is honest: 200 would tell the platform the message
-            // landed when it did not (no inject consent) — 403 names the
-            // refusal and the platform's retry is correct behavior.
+            // landed when it did not — 403 names the steer failure and the
+            // platform's retry is correct behavior.
             Err(error) => {
                 say(Level::Error, host_error("wa: steer", error));
-                bad(403, "session injection not consented")
+                bad(403, "session injection failed")
             }
         }
     }

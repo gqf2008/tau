@@ -1,23 +1,23 @@
-//! Example tau extension exercising the host channel (tau:extension@0.7.0).
+//! Example tau extension exercising the host channel (tau:extension@0.8.0).
 //!
 //! Tool `poke` does all three host calls in one shot, and its result
-//! reports each outcome — so the consent gate is observable in the tool
+//! reports each outcome — so all three legs show up in the tool
 //! transcript itself:
 //!
 //! - `host.notify(info, …)` — a user-visible fact. Always allowed.
 //! - `host.emit({"poke": …})` — an extension-defined fact on the event
 //!   bus. Always allowed.
 //! - `host.steer(user message)` — a decision: inject the text into the
-//!   run. Consent-gated: without `--allow-inject` the call fails and the
-//!   tool result carries the refusal; with it, the steer lands after the
-//!   current turn's tool results (enqueue-only, never re-entrant).
+//!   run. No call-time gate since 0.8.0 — the install record (signed
+//!   bytes, trusted fingerprint) is the one authorization act, so the
+//!   steer is queued and lands after the current turn's tool results
+//!   (enqueue-only, never re-entrant).
 //!
 //! Build:
 //!   cargo build --manifest-path examples/notifier/Cargo.toml \
 //!       --target wasm32-wasip2 --release
 //! Use:
-//!   tau --demo -e .../notifier.wasm -p "hello"                    # steer refused
-//!   tau --demo -e .../notifier.wasm --allow-inject -p "hello"     # steer lands
+//!   tau --demo -e .../notifier.wasm -p "hello"    # notify, emit and steer all land
 
 wit_bindgen::generate!({
     path: "../../wit/tau.wit",
@@ -29,13 +29,11 @@ use exports::tau::extension::tools::{Definition, Guest as Tools, ToolResult};
 use tau::extension::host::{self, Level};
 use tau::extension::types::{Content, Error as HostError, Message, ResultBlock, Role};
 
-/// A host error as one report line: the typed kind picks the wording (a
-/// missing consent grant is a different situation from a dead peer), and
-/// the detail is the host's own sentence handed through verbatim — the
-/// contract says never to match on it, so this never does.
+/// A host error as one report line: the typed variant is what a guest
+/// branches on (never the string), and the detail is the host's own
+/// sentence handed through verbatim.
 fn host_error(verb: &str, error: HostError) -> String {
     match error {
-        HostError::Refused(detail) => format!("{verb} refused: {detail}"),
         HostError::Failed(detail) => format!("{verb} failed: {detail}"),
         HostError::Invalid(detail) => format!("{verb} invalid: {detail}"),
     }
@@ -86,8 +84,9 @@ impl Tools for Notifier {
             Err(error) => report.push(host_error("emit", error)),
         }
 
-        // Decision: steer the run. Consent-gated — the refusal text is
-        // part of the demo (it proves the gate fails closed).
+        // Decision: steer the run. No call-time gate since 0.8.0 — the
+        // install record authorizes it, so the call only reports contract
+        // misuse (wrong role, size limit) or a host-side failure.
         let message = Message {
             role: Role::User,
             content: vec![Content::Text(text)],

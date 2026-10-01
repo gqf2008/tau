@@ -5,14 +5,16 @@
 //! carrying "crash" make the probe panic instead: the host degrades a
 //! broken probe to continue, so the call still goes through. Arguments
 //! carrying "wasicheck" make the probe read the ambient environment:
-//! under the default allow-all WASI it sees the host's TAU_AMBIENT and
-//! blocks (proving the leak); under --deny-wasi the guest env is empty
-//! and the call passes (proving the sandbox). Arguments carrying
-//! "fscheck" do the same for ambient filesystem preopens: allow-all
-//! preopens `/` (unix) or each drive as `/<letter>` (Windows), so a
-//! probe that can list any of them blocks; deny-all shows zero. It also registers the
-//! observe-only `session_start` point and reports the session via
-//! `host.notify` — observe leg (probes.md), verdict ignored by contract.
+//! since 0.8.0 there is no WASI gate at all — every component inherits
+//! the host's env and filesystem (installing/trusting signed bytes is the
+//! one authorization act), so a probe that can read the host's
+//! TAU_AMBIENT blocks: the ambient reach is unconditional, by design.
+//! Arguments carrying "fscheck" do the same for ambient filesystem
+//! preopens: `/` (unix) or each drive as `/<letter>` (Windows) is
+//! always preopened, so a probe that can list any of them blocks. It also
+//! registers the observe-only `session_start` point and reports the
+//! session via `host.notify` — observe leg (probes.md), verdict ignored
+//! by contract.
 //!
 //! Build:
 //!   cargo build --manifest-path examples/guard/Cargo.toml \
@@ -40,7 +42,6 @@ use tau::extension::types::{Content, Error as HostError, ResultBlock, ToolCall};
 /// of the variant, which is not a sentence.
 fn host_error(verb: &str, error: HostError) -> String {
     match error {
-        HostError::Refused(detail) => format!("{verb} refused: {detail}"),
         HostError::Failed(detail) => format!("{verb} failed: {detail}"),
         HostError::Invalid(detail) => format!("{verb} invalid: {detail}"),
     }
@@ -56,7 +57,9 @@ impl Tools for Guard {
 
     async fn execute(name: String, _arguments_json: String) -> ToolResult {
         ToolResult {
-            content: vec![ResultBlock::Text(format!("guard provides no tools (called: {name})"))],
+            content: vec![ResultBlock::Text(format!(
+                "guard provides no tools (called: {name})"
+            ))],
             is_error: true,
         }
     }
@@ -110,21 +113,20 @@ fn decide(text: Option<&str>) -> Verdict {
     if text.is_some_and(|t| t.contains("crash")) {
         panic!("the guard blew up");
     }
-    // The sandbox boundary, observable from inside: read an ambient env
-    // var. Default ambient WASI inherits the host env (block to prove the
-    // leak); --deny-wasi leaves the guest env empty.
+    // Ambient WASI, observable from inside: read an env var. Every
+    // component inherits the host env since 0.8.0 (0.8.0 deleted the WASI
+    // gate), so a probe that can read it blocks.
     if text.is_some_and(|t| t.contains("wasicheck")) {
         if std::env::var("TAU_AMBIENT").is_ok() {
             return Verdict::Block("ambient env leaked into the guest".into());
         }
         return Verdict::Continue;
     }
-    // Same boundary for the ambient filesystem: allow-all preopens
-    // `/` (unix) / every drive as `/<letter>` (Windows). Count how many
-    // candidate roots actually list — under allow-all at least one must,
-    // under --deny-wasi none can. (Regression: a host that preopened
-    // drives under mangled guest names failed this check — the preopens
-    // existed but at paths the guest never guesses.)
+    // Same for the ambient filesystem: `/` (unix) / every drive as
+    // `/<letter>` (Windows) is preopened, always. Count how many
+    // candidate roots actually list — at least one must. (Regression: a
+    // host that preopened drives under mangled guest names failed this
+    // check — the preopens existed but at paths the guest never guesses.)
     if text.is_some_and(|t| t.contains("fscheck")) {
         let mut reachable = std::fs::read_dir("/").is_ok() as usize;
         for letter in b'a'..=b'z' {

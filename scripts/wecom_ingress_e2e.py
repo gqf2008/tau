@@ -154,7 +154,6 @@ def main():
                 f"http://127.0.0.1:{api_port}",
                 "--ingress",
                 f"127.0.0.1:{ingress_port}",
-                "--allow-inject",
                 "--demo",
             ],
             cwd=WORK,

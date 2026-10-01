@@ -6,8 +6,8 @@
 //!
 //! - inbound: `session_start` reads the crypto material from the
 //!   environment (`WECOM_TOKEN` / `WECOM_ENCODING_AES_KEY` /
-//!   `WECOM_CORP_ID` — keys never enter config files or consent
-//!   storage) and calls `ingress.listen("/wecom/callback")`. Every
+//!   `WECOM_CORP_ID` — the component holds the secret; keys never enter
+//!   a config file) and calls `ingress.listen("/wecom/callback")`. Every
 //!   callback request carries `msg_signature`/`timestamp`/`nonce` in
 //!   the QUERY string (which is why the ingress contract passes the
 //!   raw query through — the host is a pipe):
@@ -17,11 +17,12 @@
 //!     envelope's `Encrypt` element, decrypt (AES-256-CBC, key =
 //!     base64(EncodingAESKey+"="), IV = key[:16], frame = 16 random +
 //!     u32be(len) + msg + corpid, PKCS#7 with wecom's 32-byte block),
-//!     check corpid, steer the text into the session (consent:
-//!     --allow-inject) and ack "success" — 403 when injection is not
-//!     consented, same honest-ack rule as whatsapp-bridge.
+//!     check corpid, steer the text into the session (no steering flag
+//!     since 0.8.0: the install record authorizes it) and ack "success"
+//!     — 403 when the steer fails, same honest-ack rule as
+//!     whatsapp-bridge.
 //! - outbound: `after_response` posts the assembled assistant text to
-//!   the send API over the origin-allowlisted `http` capability
+//!   the send API over the `http` capability
 //!   (`{TAU_MCP_URL}/cgi-bin/message/send?access_token=…` — wecom's
 //!   async reply is plain JSON; the crypto only guards the inbound
 //!   callback). The encrypted passive reply (5s window) is documented
@@ -47,7 +48,7 @@
 //!   WECOM_TOKEN=… WECOM_ENCODING_AES_KEY=… WECOM_CORP_ID=… \
 //!   tau --allow-unsigned --mcp-bridge .../wecom_bridge.wasm \
 //!       --mcp-url http://127.0.0.1:API_PORT \
-//!       --ingress 127.0.0.1:HOOK_PORT --allow-inject --demo
+//!       --ingress 127.0.0.1:HOOK_PORT --demo
 
 wit_bindgen::generate!({
     path: "../../wit/tau.wit",
@@ -75,7 +76,8 @@ use tau::extension::{http, ingress};
 const ROUTE: &str = "/wecom/callback";
 
 /// The callback crypto material, from the environment at session_start.
-/// Keys never enter config files or consent storage (docs red line).
+/// The component holds the secret; keys never enter a config file, and
+/// the host never sees them (docs red line).
 struct WecomCrypto {
     token: String,
     key: [u8; 32],
@@ -119,7 +121,6 @@ fn say(level: Level, text: String) {
 /// says never to match on it, so this never does).
 fn host_error(verb: &str, error: HostError) -> String {
     match error {
-        HostError::Refused(detail) => format!("{verb} refused: {detail}"),
         HostError::Failed(detail) => format!("{verb} failed: {detail}"),
         HostError::Invalid(detail) => format!("{verb} invalid: {detail}"),
     }
@@ -158,8 +159,7 @@ fn percent_decode(value: &str) -> Result<String, String> {
             }
             let hex = std::str::from_utf8(&bytes[i + 1..i + 3])
                 .map_err(|_| "bad percent escape".to_string())?;
-            let byte =
-                u8::from_str_radix(hex, 16).map_err(|_| "bad percent escape".to_string())?;
+            let byte = u8::from_str_radix(hex, 16).map_err(|_| "bad percent escape".to_string())?;
             out.push(byte);
             i += 3;
         } else {
@@ -312,16 +312,25 @@ impl BridgeIo for WecomBridge {
 async fn post_reply(payload: &Payload) {
     let pending = ADAPTER.with(|cell| {
         let adapter = cell.borrow();
-        adapter.awaiting_reply.then(|| adapter.user.clone()).flatten()
+        adapter
+            .awaiting_reply
+            .then(|| adapter.user.clone())
+            .flatten()
     });
     let Some(user) = pending else { return };
-    let Some(base) = std::env::var("TAU_MCP_URL").ok() else { return };
+    let Some(base) = std::env::var("TAU_MCP_URL").ok() else {
+        return;
+    };
     let text = match payload {
         Payload::AfterResponse(response) => {
-            response.message.content.iter().find_map(|block| match block {
-                Content::Text(text) => Some(text.clone()),
-                _ => None,
-            })
+            response
+                .message
+                .content
+                .iter()
+                .find_map(|block| match block {
+                    Content::Text(text) => Some(text.clone()),
+                    _ => None,
+                })
         }
         _ => None,
     };
@@ -430,10 +439,9 @@ impl IngressHandler for WecomBridge {
                     // fan out here).
                     return ok("success");
                 }
-                let (Some(user), Some(text)) = (
-                    xml_get(&inner, "FromUserName"),
-                    xml_get(&inner, "Content"),
-                ) else {
+                let (Some(user), Some(text)) =
+                    (xml_get(&inner, "FromUserName"), xml_get(&inner, "Content"))
+                else {
                     return bad(400, "text message missing FromUserName/Content");
                 };
                 let message = Message {
@@ -458,7 +466,7 @@ impl IngressHandler for WecomBridge {
                     // it did not.
                     Err(error) => {
                         say(Level::Error, host_error("wecom: steer", error));
-                        bad(403, "session injection not consented")
+                        bad(403, "session injection failed")
                     }
                 }
             }

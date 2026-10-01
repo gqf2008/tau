@@ -15,12 +15,13 @@
 //!    `senderStaffId`).
 //!
 //! - inbound: `session_start` opens the ws long connection
-//!   (TAU_MCP_URL; origin consent via --mcp-url); later call points
-//!   drain frames, ack the CALLBACK, steer the inner text into the
-//!   session (consent: --allow-inject).
+//!   (TAU_MCP_URL, host config via --mcp-url); later call points drain
+//!   frames, ack the CALLBACK, steer the inner text into the session
+//!   (no call-time gate since 0.8.0: the install record authorizes
+//!   steering).
 //! - outbound: `after_response` posts the assembled assistant text to
-//!   the robot send API shape (`{ws-origin}/reply`, same origin as the
-//!   ws consent).
+//!   the robot send API shape (`{ws-origin}/reply`, derived from the ws
+//!   URL — no origin allowlist since 0.8.0).
 //!
 //! 0.7.0 shape: the connection is a resource, the ack is an awaited
 //! `send` (so "sent" means on the wire — print mode may exit right after
@@ -40,7 +41,7 @@
 //!       --target wasm32-wasip2 --release
 //! Use (loopback mock):
 //!   tau --allow-unsigned --mcp-bridge .../dingtalk_bridge.wasm \
-//!       --mcp-url ws://127.0.0.1:PORT/dt --allow-inject --demo -p "hi"
+//!       --mcp-url ws://127.0.0.1:PORT/dt --demo -p "hi"
 
 wit_bindgen::generate!({
     path: "../../wit/tau.wit",
@@ -93,7 +94,6 @@ fn say(level: Level, text: String) {
 /// says never to match on it, so this never does).
 fn host_error(verb: &str, error: HostError) -> String {
     match error {
-        HostError::Refused(detail) => format!("{verb} refused: {detail}"),
         HostError::Failed(detail) => format!("{verb} failed: {detail}"),
         HostError::Invalid(detail) => format!("{verb} invalid: {detail}"),
     }
@@ -160,8 +160,9 @@ fn utf8_len(first: u8) -> usize {
     }
 }
 
-/// ws(s) URL → the reply API URL: same origin (so the ws consent
-/// covers it), path replaced with /reply — the feishu pattern.
+/// ws(s) URL → the reply API URL: same authority (the reply API sits
+/// next to the ws endpoint), path replaced with /reply — the feishu
+/// pattern.
 fn reply_url(ws_url: &str) -> Option<String> {
     let (httpish, rest) = if let Some(rest) = ws_url.strip_prefix("ws://") {
         ("http", rest)
@@ -209,7 +210,9 @@ async fn pump_inbound(connection: &ws::Connection) {
 /// Handle one drained frame. Returns true when it was a CALLBACK this pump
 /// is done with (acked and steered, or noted and dropped).
 async fn handle_frame(connection: &ws::Connection, frame: ws::Frame) -> bool {
-    let ws::Frame::Text(text) = frame else { return false };
+    let ws::Frame::Text(text) = frame else {
+        return false;
+    };
     if json_get(&text, "type") != Some("CALLBACK") {
         return false;
     }
@@ -221,7 +224,9 @@ async fn handle_frame(connection: &ws::Connection, frame: ws::Frame) -> bool {
         return false;
     }
     // `data` is a string holding escaped JSON — decode the second layer.
-    let Some(inner) = json_get_escaped(&text, "data") else { return false };
+    let Some(inner) = json_get_escaped(&text, "data") else {
+        return false;
+    };
     if json_get(&inner, "msgtype") != Some("text") {
         return true; // cards/rich media: beyond the text loopback (doc says so)
     }
@@ -247,11 +252,13 @@ async fn handle_frame(connection: &ws::Connection, frame: ws::Frame) -> bool {
                 adapter.steered = true;
                 (
                     Level::Info,
-                    format!("dingtalk: inbound message from {user} acked and steered into the session"),
+                    format!(
+                        "dingtalk: inbound message from {user} acked and steered into the session"
+                    ),
                 )
             }
-            // A refused steer leaves `awaiting_reply` false, so no reply
-            // can leave over a channel the user did not consent to.
+            // A failed steer leaves `awaiting_reply` false, so no reply
+            // leaves for a message that never entered the session.
             Err(error) => (Level::Error, host_error("dingtalk: steer", error)),
         }
     });
@@ -261,27 +268,39 @@ async fn handle_frame(connection: &ws::Connection, frame: ws::Frame) -> bool {
 }
 
 /// Post the assembled assistant text back over the robot send API shape
-/// (same origin as the ws consent). The text is the typed payload's first
+/// (same authority as the ws URL). The text is the typed payload's first
 /// text block — 0.6.0 scraped the JSON payload for one.
 async fn post_reply(payload: &Payload) {
     let pending = ADAPTER.with(|cell| {
         let adapter = cell.borrow();
-        adapter.awaiting_reply.then(|| adapter.user.clone()).flatten()
+        adapter
+            .awaiting_reply
+            .then(|| adapter.user.clone())
+            .flatten()
     });
     let Some(user) = pending else { return };
     let text = match payload {
         Payload::AfterResponse(response) => {
-            response.message.content.iter().find_map(|block| match block {
-                Content::Text(text) => Some(text.clone()),
-                _ => None,
-            })
+            response
+                .message
+                .content
+                .iter()
+                .find_map(|block| match block {
+                    Content::Text(text) => Some(text.clone()),
+                    _ => None,
+                })
         }
         _ => None,
     };
     let Some(text) = text else { return };
-    let Some(ws_url) = std::env::var("TAU_MCP_URL").ok() else { return };
+    let Some(ws_url) = std::env::var("TAU_MCP_URL").ok() else {
+        return;
+    };
     let Some(url) = reply_url(&ws_url) else {
-        return say(Level::Error, format!("dingtalk: cannot derive reply URL from {ws_url}"));
+        return say(
+            Level::Error,
+            format!("dingtalk: cannot derive reply URL from {ws_url}"),
+        );
     };
     // The body is built as JSON rather than interpolated: assistant text
     // routinely contains quotes and newlines.

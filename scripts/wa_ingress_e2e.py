@@ -6,14 +6,15 @@ listener is up lands; print mode's sub-second run would be a race, not
 a test.
 
 Consented leg: wa_mock.py POSTs one inbound message event to the
-bridge's ingress route; the guest's ingress-handler steers it (inject
-consented), the REPL runs the turn, and after_response posts the reply
-to the mock's /send API. Asserted end to end: ack 200, steer line in
-the REPL, reply notice, WA SEND at the mock.
+bridge's ingress route; the guest's ingress-handler steers it (the
+listen address is host configuration since 0.8.0, so there is no
+call-time gate to pass), the REPL runs the turn, and after_response
+posts the reply to the mock's /send API. Asserted end to end: ack 200,
+steer line in the REPL, reply notice, WA SEND at the mock.
 
-Refusal leg: without --ingress the listen call fails closed — the REPL
-shows the notice naming the missing consent, the mock never delivers,
-no reply leaves.
+No-address leg: without --ingress the host serves no listen address, so
+the listen call fails with a named error — the REPL shows the notice,
+the mock never delivers, no reply leaves.
 
 Usage: python scripts/wa_ingress_e2e.py <path-to-tau-binary> <whatsapp_bridge.wasm> <work-dir>
 Requires pywinpty; validate.sh skips step 5d when it is missing.
@@ -140,7 +141,6 @@ def consented_leg():
                 f"http://127.0.0.1:{api_port}",
                 "--ingress",
                 f"127.0.0.1:{ingress_port}",
-                "--allow-inject",
                 "--demo",
             ],
             cwd=WORK,
@@ -176,16 +176,18 @@ def refusal_leg():
                 BRIDGE,
                 "--mcp-url",
                 f"http://127.0.0.1:{api_port}",
-                "--allow-inject",
                 "--demo",
             ],
             cwd=WORK,
         )
         try:
             tau.wait("you> ")
-            # Fail-closed: the listen call errors, the notice names the
-            # missing consent, and no listener ever exists.
-            tau.wait("wa: ingress refused: ingress not consented", 15)
+            # Host configuration, not a gate (0.8.0): with no --ingress the
+            # host serves no address, the listen call fails by name, and no
+            # listener ever exists.
+            tau.wait(
+                "wa: ingress failed: ingress: the host serves no listen address", 15
+            )
             tau.send("/quit\r")
             # No turn ever ran (nothing steered), so there is no
             # "ready (session: ...)" line to wait on — /quit just exits.
@@ -194,10 +196,10 @@ def refusal_leg():
             tau.close()
         log = read_log(f"{WORK}/wa_mock_e2e_refusal.log")
         assert "webhook undelivered" in log, f"refusal leg delivered?!: {log}"
-        assert "WA SEND: " not in log, f"reply left without ingress consent: {log}"
+        assert "WA SEND: " not in log, f"reply left without an ingress leg: {log}"
     finally:
         mock.terminate()
-    print("ok — no --ingress: listen refused (named consent), webhook undelivered, zero reply")
+    print("ok — no --ingress: listen failed by name, webhook undelivered, zero reply")
 
 
 consented_leg()
