@@ -16,6 +16,11 @@
   with optional user instructions appended to the summarization request;
   `compact` is unchanged and delegates. `JsonlStore::path()` exposes the
   session file the store appends to.
+- REPL 对齐 pi T2（thread `repl-pi-alignment-t2`）：`/resume`（列出当前目录
+  会话并按序号/名前缀切换）、`/name`（显示名由会话文件名携带，不动 JSONL
+  格式——冻结期裁定见 docs/repl.md）、`/copy`（最近 assistant 消息进系统
+  剪贴板，平台工具不引新依赖）、`/export` 的 .html 路径渲染自包含 HTML、
+  `/reload`（按启动旗标重建 harness 并热换 agent，重接 host 通道）。
 
 ### Fixed
 

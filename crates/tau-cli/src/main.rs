@@ -3,6 +3,7 @@
 //! `-p` on a terminal): scrollback REPL — see `repl` module.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use clap::Parser;
@@ -20,7 +21,7 @@ mod live;
 mod repl;
 mod setup;
 
-#[derive(Parser)]
+#[derive(Parser, Clone)]
 #[command(
     name = "tau",
     version,
@@ -200,7 +201,7 @@ impl Cli {
     }
 }
 
-#[derive(clap::Subcommand)]
+#[derive(clap::Subcommand, Clone)]
 enum Sub {
     /// Generate a signing keypair into ~/.tau/keys and trust it.
     Keygen,
@@ -545,7 +546,7 @@ async fn main() -> Result<()> {
     // the next turn's prompt (an inbound IM wakes the agent;
     // docs/im-channels.md). Print mode forwards straight through.
     let (inject_tx, inject_rx) = tokio::sync::mpsc::unbounded_channel::<tau_core::Control>();
-    host.wire_host_channel(agent.bus(), inject_tx);
+    host.wire_host_channel(agent.bus(), inject_tx.clone());
     // The harness composed this already: `--system` plus whatever the
     // working directory had to say (docs/skills.md).
     if let Some(system) = system {
@@ -628,8 +629,47 @@ async fn main() -> Result<()> {
     }
 
     if interactive {
-        return repl::interactive(agent, store, history, base, session_facts, inject_rx, mic_consent)
-            .await;
+        // `/reload`: rebuild the harness from the same flags, replicating
+        // the startup assembly (setup::build -> agent -> host-channel
+        // wiring -> system prompt). The REPL calls the factory, swaps the
+        // agent, and keeps the returned host alive.
+        let reload: Option<repl::ReloadFactory> = {
+            let flags = cli.clone();
+            let inject_tx = inject_tx.clone();
+            Some(Box::new(move || {
+                let flags = flags.clone();
+                let inject_tx = inject_tx.clone();
+                Box::pin(async move {
+                    let rebuilt = setup::build(&flags).await?;
+                    let mut agent =
+                        Agent::new(Box::new(SharedModel(rebuilt.model)), rebuilt.tools)
+                            .probes(rebuilt.probes)
+                            .blobs(tau_core::BlobStore::new(
+                                tau_core::BlobStore::default_dir(),
+                            ));
+                    rebuilt.host.wire_host_channel(agent.bus(), inject_tx);
+                    if let Some(system) = rebuilt.system {
+                        agent = agent.system(system);
+                    }
+                    Ok(repl::Reloaded {
+                        agent: Arc::new(agent),
+                        model_label: rebuilt.model_label.to_string(),
+                        keep_alive: Box::new(rebuilt.host),
+                    })
+                })
+            }))
+        };
+        return repl::interactive(
+            agent,
+            store,
+            history,
+            base,
+            session_facts,
+            inject_rx,
+            mic_consent,
+            reload,
+        )
+        .await;
     }
     let prompt_text = cli.print.expect("print mode checked above");
 

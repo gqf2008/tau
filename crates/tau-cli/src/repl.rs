@@ -13,13 +13,13 @@
 //! commands (owner ruling 2026-10-01, thread `repl-pi-alignment`); the
 //! mapping table and the deliberate non-goals live in `docs/repl.md`.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use anyhow::{Context, Result};
 use tau_core::probe::ProbePoint;
 use tau_core::probe_payload::{Branch, ProbePayload, SessionFacts};
-use tau_core::types::{Content, Media, MediaSource};
+use tau_core::types::{Content, Media, MediaSource, Role};
 use tau_core::{Agent, AgentEvent, Control, JsonlStore, Message};
 use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
 
@@ -69,15 +69,19 @@ struct SlashCommand {
 
 const COMMANDS: &[SlashCommand] = &[
     SlashCommand { usage: "/new", desc: "start a fresh session file", group: Group::Session },
+    SlashCommand { usage: "/resume [#n|name]", desc: "list the sessions here; switch to one", group: Group::Session },
+    SlashCommand { usage: "/name <name>", desc: "display name for the session (carried by the file name)", group: Group::Session },
     SlashCommand { usage: "/session", desc: "session file, entries, head, model", group: Group::Session },
     SlashCommand { usage: "/tree", desc: "print the session tree, head marked", group: Group::Session },
     SlashCommand { usage: "/fork [#index|id-prefix]", desc: "fork history at an older entry", group: Group::Session },
     SlashCommand { usage: "/clone", desc: "duplicate the session file, continue in the copy", group: Group::Session },
     SlashCommand { usage: "/compact [instructions]", desc: "compact context; instructions steer the summary", group: Group::Session },
     SlashCommand { usage: "/import <path>", desc: "open another session JSONL and continue it here", group: Group::Session },
-    SlashCommand { usage: "/export [path]", desc: "write the session JSONL out (default: export-<id>.jsonl)", group: Group::Export },
+    SlashCommand { usage: "/export [path]", desc: "write the session out (JSONL; a .html path renders HTML)", group: Group::Export },
+    SlashCommand { usage: "/copy", desc: "copy the last assistant message to the clipboard", group: Group::Export },
     SlashCommand { usage: "/hotkeys", desc: "key bindings", group: Group::Runtime },
     SlashCommand { usage: "/changelog", desc: "recent changelog entries (nearest CHANGELOG.md)", group: Group::Runtime },
+    SlashCommand { usage: "/reload", desc: "rebuild tools/probes/model from the startup flags", group: Group::Runtime },
     SlashCommand { usage: "/help", desc: "this list", group: Group::Runtime },
     SlashCommand { usage: "/quit", desc: "exit (alias: /exit)", group: Group::Runtime },
     SlashCommand { usage: "/mic <sec> [sine]", desc: "record a voice message (sine synthesizes)", group: Group::Tau },
@@ -93,6 +97,22 @@ fn command_word(usage: &str) -> &str {
 }
 
 /// Tab-completion candidates for a `/`-prefixed line start.
+/// What `/reload` swaps in: a freshly built agent, its model label, and
+/// a keep-alive for whatever the rebuilt harness must not drop (the
+/// extension host — its channel wiring is Arc-shared, but main.rs keeps
+/// the original alive too, so the REPL does the same for rebuilds).
+pub(crate) struct Reloaded {
+    pub(crate) agent: Arc<Agent>,
+    pub(crate) model_label: String,
+    pub(crate) keep_alive: Box<dyn std::any::Any + Send + Sync>,
+}
+
+/// `/reload` factory: rebuilds the harness from the startup flags. Lives
+/// in main.rs, where the startup assembly (setup::build, host-channel
+/// wiring, system prompt) can be replicated; None in tests without one.
+pub(crate) type ReloadFactory =
+    Box<dyn FnMut() -> futures::future::BoxFuture<'static, Result<Reloaded>> + Send>;
+
 fn slash_candidates(prefix: &str) -> Vec<String> {
     COMMANDS
         .iter()
@@ -148,6 +168,251 @@ fn print_changelog(print: &impl Fn(&str)) {
     print("changelog: no CHANGELOG.md found here — see https://github.com/gqf2008/tau/blob/main/CHANGELOG.md");
 }
 
+// ---- T2 helpers (thread repl-pi-alignment-t2) -----------------------------
+
+/// One session file in the `/resume` listing.
+struct SessionFile {
+    path: PathBuf,
+    /// File name as shown and prefix-matched against (`/resume research`).
+    name: String,
+    current: bool,
+    entries: usize,
+    /// "12m ago"-style age of the last modification.
+    age: String,
+    head: String,
+}
+
+/// The `*.jsonl` session files in `dir`, most recently modified first.
+/// Unreadable files list as `(unreadable)` rather than vanishing.
+fn list_sessions(dir: &Path, current: &Path) -> Vec<SessionFile> {
+    let mut files: Vec<(PathBuf, std::time::SystemTime)> = std::fs::read_dir(dir)
+        .map(|rd| {
+            rd.filter_map(|entry| entry.ok())
+                .map(|entry| entry.path())
+                .filter(|path| path.extension().is_some_and(|ext| ext == "jsonl"))
+                .map(|path| {
+                    let modified = std::fs::metadata(&path)
+                        .and_then(|meta| meta.modified())
+                        .unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+                    (path, modified)
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    files.sort_by_key(|(_, modified)| std::cmp::Reverse(*modified));
+    files
+        .into_iter()
+        .map(|(path, modified)| {
+            let name = path
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default();
+            let age = fmt_age(modified.elapsed().unwrap_or_default());
+            let is_current = path == current;
+            match JsonlStore::open(&path) {
+                Ok(store) => {
+                    let head = store
+                        .head()
+                        .map(tau_core::session::entry_summary)
+                        .unwrap_or_else(|| "(empty)".to_string());
+                    SessionFile {
+                        path,
+                        name,
+                        current: is_current,
+                        entries: store.entries().len(),
+                        age,
+                        head,
+                    }
+                }
+                Err(_) => SessionFile {
+                    path,
+                    name,
+                    current: is_current,
+                    entries: 0,
+                    age,
+                    head: "(unreadable)".to_string(),
+                },
+            }
+        })
+        .collect()
+}
+
+fn fmt_age(elapsed: std::time::Duration) -> String {
+    let secs = elapsed.as_secs();
+    if secs < 60 {
+        format!("{secs}s ago")
+    } else if secs < 3600 {
+        format!("{}m ago", secs / 60)
+    } else if secs < 86400 {
+        format!("{}h ago", secs / 3600)
+    } else {
+        format!("{}d ago", secs / 86400)
+    }
+}
+
+/// `/name`: the display name travels in the file name, not the JSONL —
+/// the session format stays untouched while the 0.7.x contract is
+/// frozen, and a named file still opens in any older tau. Forbidden
+/// and whitespace characters collapse to dashes; the Windows-reserved
+/// basenames get a prefix; the result is capped at 40 chars.
+fn sanitize_session_name(name: &str) -> String {
+    let mut out = String::new();
+    let mut last_dash = false;
+    for ch in name.trim().chars() {
+        let usable = !matches!(ch, '<' | '>' | ':' | '"' | '/' | '\\' | '|' | '?' | '*')
+            && !ch.is_control()
+            && !ch.is_whitespace();
+        if usable {
+            out.push(ch);
+            last_dash = false;
+        } else if !last_dash {
+            out.push('-');
+            last_dash = true;
+        }
+    }
+    let capped: String = out.trim_matches(['-', '.']).chars().take(40).collect();
+    let capped = capped.trim_end_matches(['-', '.']);
+    const RESERVED: [&str; 22] = [
+        "con", "prn", "aux", "nul", "com1", "com2", "com3", "com4", "com5", "com6", "com7",
+        "com8", "com9", "lpt1", "lpt2", "lpt3", "lpt4", "lpt5", "lpt6", "lpt7", "lpt8", "lpt9",
+    ];
+    if RESERVED.contains(&capped.to_ascii_lowercase().as_str()) {
+        format!("session-{capped}")
+    } else {
+        capped.to_string()
+    }
+}
+
+/// `/copy`: the text of the most recent assistant message, if any.
+fn last_assistant_text(history: &[Message]) -> Option<String> {
+    history
+        .iter()
+        .rev()
+        .find(|message| message.role == Role::Assistant)
+        .map(|message| message.text())
+        .filter(|text| !text.trim().is_empty())
+}
+
+/// Write text to the system clipboard via the platform tool — no new
+/// dependency. The error names what was tried.
+fn copy_to_clipboard(text: &str) -> std::result::Result<(), String> {
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+    let candidates: &[&[&str]] = if cfg!(windows) {
+        &[&["clip"]]
+    } else if cfg!(target_os = "macos") {
+        &[&["pbcopy"]]
+    } else {
+        &[
+            &["xclip", "-selection", "clipboard"],
+            &["xsel", "--clipboard", "--input"],
+        ]
+    };
+    let mut tried = Vec::new();
+    for command in candidates {
+        tried.push(command[0]);
+        let spawned = Command::new(command[0])
+            .args(&command[1..])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(_) => continue,
+        };
+        let fed = child
+            .stdin
+            .take()
+            .map(|mut stdin| stdin.write_all(text.as_bytes()).is_ok())
+            .unwrap_or(false);
+        if !fed {
+            continue;
+        }
+        if matches!(child.wait(), Ok(status) if status.success()) {
+            return Ok(());
+        }
+    }
+    Err(format!("tried {}", tried.join(", ")))
+}
+
+fn html_escape(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+}
+
+/// `/export <path>.html`: the active branch as a self-contained page —
+/// inline CSS, one section per message, everything user-controlled
+/// escaped.
+fn render_session_html(store: &JsonlStore) -> String {
+    let branch = store
+        .head()
+        .map(|head| store.active_branch(&head.id).unwrap_or_default())
+        .unwrap_or_default();
+    let title = store
+        .path()
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let mut html = String::from("<!doctype html>\n<html lang=\"en\">\n<head>\n<meta charset=\"utf-8\">\n");
+    html.push_str(&format!("<title>tau session — {}</title>\n", html_escape(&title)));
+    html.push_str("<style>body{font:15px/1.55 system-ui,sans-serif;max-width:52rem;margin:2rem auto;padding:0 1rem;background:#141414;color:#ddd}h1{font-size:1.05rem;color:#aaa}section{margin:.9rem 0;padding:.6rem .9rem;border-radius:.5rem;background:#1d1d1d}h2{margin:0 0 .4rem;font-size:.75rem;text-transform:uppercase;letter-spacing:.06em;color:#888}p{margin:.35rem 0;white-space:pre-wrap}pre{margin:.35rem 0;padding:.5rem;background:#111;border-radius:.35rem;overflow:auto;font-size:.85rem}.user h2{color:#7ab8ff}.assistant h2{color:#8fd18f}.tool h2{color:#c9a227}</style>\n</head>\n<body>\n");
+    html.push_str(&format!("<h1>tau session — {}</h1>\n", html_escape(&title)));
+    for message in &branch {
+        let class = match message.role {
+            Role::User => "user",
+            Role::Assistant => "assistant",
+            Role::Tool => "tool",
+        };
+        html.push_str(&format!("<section class=\"{class}\"><h2>{class}</h2>\n"));
+        for block in &message.content {
+            match block {
+                Content::Text { text } => {
+                    html.push_str(&format!("<p>{}</p>\n", html_escape(text)));
+                }
+                Content::ToolCall {
+                    name, arguments, ..
+                } => {
+                    html.push_str(&format!(
+                        "<pre>→ {} {}</pre>\n",
+                        html_escape(name),
+                        html_escape(&arguments.to_string())
+                    ));
+                }
+                Content::ToolResult {
+                    content, is_error, ..
+                } => {
+                    html.push_str(&format!(
+                        "<pre>←{}{}</pre>\n",
+                        if *is_error { " (error) " } else { " " },
+                        html_escape(&tau_core::types::tool_result_text(content))
+                    ));
+                }
+                Content::Image { media } => {
+                    html.push_str(&format!("<p>[image: {}]</p>\n", html_escape(&media.media_type)));
+                }
+                Content::Audio { media } => {
+                    html.push_str(&format!("<p>[audio: {}]</p>\n", html_escape(&media.media_type)));
+                }
+                Content::Video { media } => {
+                    html.push_str(&format!("<p>[video: {}]</p>\n", html_escape(&media.media_type)));
+                }
+                Content::File { media, name } => {
+                    html.push_str(&format!(
+                        "<p>[file: {}]</p>\n",
+                        html_escape(name.as_deref().unwrap_or(&media.media_type))
+                    ));
+                }
+            }
+        }
+        html.push_str("</section>\n");
+    }
+    html.push_str("</body>\n</html>\n");
+    html
+}
+
 /// Tab-completion for slash commands (rustyline calls it on the line so
 /// far); everything else about the editor stays stock.
 struct SlashHelper;
@@ -181,6 +446,7 @@ impl rustyline::Helper for SlashHelper {}
 /// loop on the real terminal.
 /// `base` is the fork base from --continue-from: the parent the next
 /// append grows under. None seeds from the store head.
+#[allow(clippy::too_many_arguments)]
 pub(crate) async fn interactive(
     agent: Agent,
     store: JsonlStore,
@@ -189,6 +455,7 @@ pub(crate) async fn interactive(
     session_facts: SessionFacts,
     inject: UnboundedReceiver<Control>,
     mic_consent: bool,
+    reload: Option<ReloadFactory>,
 ) -> Result<()> {
     let agent = Arc::new(agent);
     let (line_tx, line_rx) = unbounded_channel();
@@ -271,6 +538,7 @@ pub(crate) async fn interactive(
         Some(session_facts.clone()),
         inject,
         mic_consent,
+        reload,
     )
     .await;
     if result.is_ok() {
@@ -283,32 +551,23 @@ pub(crate) async fn interactive(
     result
 }
 
-/// The REPL loop, factored for tests: lines arrive on a channel, rendered
-/// output goes to `print`. `base` seeds the parent of the next append (a
-/// fork base); None = store head.
-// The REPL loop's full wiring (channels in, printer out, session
-// payload, injection receiver) is the parameter list — bundling it into
-// a struct would only rename the same eight slots at nine call sites.
-#[allow(clippy::too_many_arguments)]
-pub(crate) async fn drive(
-    agent: Arc<Agent>,
-    mut store: JsonlStore,
-    mut history: Vec<Message>,
-    base: Option<String>,
-    mut lines: UnboundedReceiver<LineEvent>,
-    print: impl Fn(&str) + Send + Sync,
-    session_start: Option<SessionFacts>,
-    mut inject: UnboundedReceiver<Control>,
-    // May the host capture the real microphone for THIS model?
-    // (Consent category per fingerprint for wasm providers; host
-    // doctrine grants it to native/demo — docs/realtime-av.md.)
-    mic_consent: bool,
-) -> Result<()> {
+/// The renderer: another event-bus subscriber, formatting events into
+/// complete lines for the printer. It also owns the live playback
+/// sink (realtime-av Phase 1): AudioDelta bytes play as they
+/// arrive, an abort silences the buffer mid-run. Factored out of
+/// `drive` so `/reload` can re-attach a renderer to the swapped agent.
+fn spawn_renderer(
+    agent: &Arc<Agent>,
+) -> (
+    UnboundedReceiver<String>,
+    Arc<std::sync::atomic::AtomicU64>,
+    tokio::task::JoinHandle<()>,
+) {
     // Renderer: another event-bus subscriber, formatting events into
     // complete lines for the printer. It also owns the live playback
     // sink (realtime-av Phase 1): AudioDelta bytes play as they
     // arrive, an abort silences the buffer mid-run.
-    let (render_tx, mut render_rx) = unbounded_channel::<String>();
+    let (render_tx, render_rx) = unbounded_channel::<String>();
     let mut events = agent.events();
     let mut sink = crate::audio::PlaybackSink::new();
     let sink_streamed = sink.streamed_handle();
@@ -431,9 +690,39 @@ pub(crate) async fn drive(
         }
     });
 
+    (render_rx, sink_streamed, renderer)
+}
+
+/// The REPL loop, factored for tests: lines arrive on a channel, rendered
+/// output goes to `print`. `base` seeds the parent of the next append (a
+/// fork base); None = store head.
+// The REPL loop's full wiring (channels in, printer out, session
+// payload, injection receiver, reload factory) is the parameter list —
+// bundling it into a struct would only rename the same slots at the
+// call sites.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn drive(
+    mut agent: Arc<Agent>,
+    mut store: JsonlStore,
+    mut history: Vec<Message>,
+    base: Option<String>,
+    mut lines: UnboundedReceiver<LineEvent>,
+    print: impl Fn(&str) + Send + Sync,
+    session_start: Option<SessionFacts>,
+    mut inject: UnboundedReceiver<Control>,
+    // May the host capture the real microphone for THIS model?
+    // (Consent category per fingerprint for wasm providers; host
+    // doctrine grants it to native/demo — docs/realtime-av.md.)
+    mic_consent: bool,
+    mut reload: Option<ReloadFactory>,
+) -> Result<()> {
+    let (mut render_rx, mut sink_streamed, mut renderer) = spawn_renderer(&agent);
+    // Whatever the last rebuilt harness must keep alive (Reloaded::
+    // keep_alive); the startup harness lives in main.rs's scope.
+    let mut _reload_guard: Option<Box<dyn std::any::Any + Send + Sync>> = None;
     // The renderer is attached; session_start observes now so its
     // notices render (observe leg, probes.md — verdicts ignored).
-    let model_label = session_start
+    let mut model_label = session_start
         .as_ref()
         .map(|facts| facts.model.clone())
         .unwrap_or_else(|| "(unknown)".to_string());
@@ -845,6 +1134,19 @@ pub(crate) async fn drive(
                                 ));
                                 continue;
                             }
+                            let as_html = target.extension().is_some_and(|ext| {
+                                ext.eq_ignore_ascii_case("html") || ext.eq_ignore_ascii_case("htm")
+                            });
+                            if as_html {
+                                match std::fs::write(&target, render_session_html(&store)) {
+                                    Ok(()) => print(&format!(
+                                        "[tau] exported {} (HTML)",
+                                        target.display()
+                                    )),
+                                    Err(e) => print(&format!("[tau] export failed: {e}")),
+                                }
+                                continue;
+                            }
                             match std::fs::copy(store.path(), &target) {
                                 Ok(bytes) => print(&format!(
                                     "[tau] exported {} ({} bytes, JSONL)",
@@ -855,6 +1157,157 @@ pub(crate) async fn drive(
                             }
                             continue;
                         }
+                        line if line == "/resume" || line.starts_with("/resume ") => {
+                            if live.is_some() {
+                                print("[tau] live session active — end it first (Ctrl-C or /quit)");
+                                continue;
+                            }
+                            let arg = text.strip_prefix("/resume").unwrap().trim();
+                            let dir = store
+                                .path()
+                                .parent()
+                                .map(PathBuf::from)
+                                .unwrap_or_else(|| PathBuf::from("."));
+                            let mut listing = list_sessions(&dir, store.path());
+                            if !listing.iter().any(|file| file.current) {
+                                // The current session may not be on disk
+                                // yet — a file is created on its first
+                                // append. List it from memory.
+                                listing.insert(
+                                    0,
+                                    SessionFile {
+                                        path: store.path().to_path_buf(),
+                                        name: store
+                                            .path()
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().into_owned())
+                                            .unwrap_or_default(),
+                                        current: true,
+                                        entries: store.entries().len(),
+                                        age: "current".to_string(),
+                                        head: store
+                                            .head()
+                                            .map(tau_core::session::entry_summary)
+                                            .unwrap_or_else(|| "(empty)".to_string()),
+                                    },
+                                );
+                            }
+                            if listing.is_empty() {
+                                print("[tau] no session files here yet");
+                                continue;
+                            }
+                            if arg.is_empty() {
+                                print("sessions here — /resume <n|name> to switch:");
+                                for (index, file) in listing.iter().enumerate() {
+                                    print(&format!(
+                                        "  {}. {}{} — {} entries · {} · {}",
+                                        index + 1,
+                                        file.name,
+                                        if file.current { " (current)" } else { "" },
+                                        file.entries,
+                                        file.age,
+                                        file.head
+                                    ));
+                                }
+                                continue;
+                            }
+                            let pick = if let Ok(n) = arg.parse::<usize>() {
+                                n.checked_sub(1).and_then(|index| listing.get(index))
+                            } else {
+                                let matches: Vec<&SessionFile> = listing
+                                    .iter()
+                                    .filter(|file| file.name.starts_with(arg))
+                                    .collect();
+                                (matches.len() == 1).then_some(matches[0])
+                            };
+                            let Some(file) = pick else {
+                                print(&format!(
+                                    "[tau] no unique session matching {arg:?} — /resume lists them"
+                                ));
+                                continue;
+                            };
+                            match JsonlStore::open(&file.path) {
+                                Ok(opened) => {
+                                    let count = opened.entries().len();
+                                    let head = opened.head().map(|h| h.id.clone());
+                                    let branch = match &head {
+                                        Some(id) => {
+                                            opened.active_branch(id).unwrap_or_default()
+                                        }
+                                        None => Vec::new(),
+                                    };
+                                    store = opened;
+                                    parent = head;
+                                    history = branch;
+                                    print(&format!(
+                                        "[tau] resumed {} — {} entries, {} messages in context",
+                                        file.name,
+                                        count,
+                                        history.len()
+                                    ));
+                                }
+                                Err(e) => print(&format!("[tau] resume failed: {e}")),
+                            }
+                            continue;
+                        }
+                        line if line == "/name" || line.starts_with("/name ") => {
+                            if live.is_some() {
+                                print("[tau] live session active — end it first (Ctrl-C or /quit)");
+                                continue;
+                            }
+                            let arg = text.strip_prefix("/name").unwrap().trim();
+                            if arg.is_empty() {
+                                print("usage: /name <display-name> — carried by the session file name");
+                                continue;
+                            }
+                            let clean = sanitize_session_name(arg);
+                            if clean.is_empty() {
+                                print("[tau] that name has no usable characters");
+                                continue;
+                            }
+                            let dir = store.path().parent().map(PathBuf::from).unwrap_or_default();
+                            let target = dir.join(format!("{clean}.jsonl"));
+                            if target == *store.path() {
+                                print(&format!("[tau] already named {clean}"));
+                                continue;
+                            }
+                            if target.exists() {
+                                print(&format!(
+                                    "[tau] not overwriting existing file: {}",
+                                    target.display()
+                                ));
+                                continue;
+                            }
+                            match std::fs::rename(store.path(), &target) {
+                                Ok(()) => match JsonlStore::open(&target) {
+                                    Ok(opened) => {
+                                        store = opened;
+                                        print(&format!(
+                                            "[tau] named {arg:?} — session file is now {}",
+                                            target.display()
+                                        ));
+                                    }
+                                    Err(e) => {
+                                        print(&format!("[tau] renamed but reopen failed: {e}"))
+                                    }
+                                },
+                                Err(e) => print(&format!("[tau] rename failed: {e}")),
+                            }
+                            continue;
+                        }
+                        "/copy" => {
+                            match last_assistant_text(&history) {
+                                None => print("[tau] nothing to copy yet"),
+                                Some(text) => match copy_to_clipboard(&text) {
+                                    Ok(()) => print(&format!(
+                                        "[tau] copied {} chars to the clipboard",
+                                        text.chars().count()
+                                    )),
+                                    Err(e) => print(&format!("[tau] clipboard unavailable ({e})")),
+                                },
+                            }
+                            continue;
+                        }
                         "/hotkeys" => {
                             print("keys: Enter send · ↑/↓ prompt history · Tab complete /commands");
                             print("  Ctrl-C idle: hint · Ctrl-C mid-run: abort the turn (barge-in when live) · Ctrl-D: exit");
@@ -862,6 +1315,34 @@ pub(crate) async fn drive(
                         }
                         "/changelog" => {
                             print_changelog(&print);
+                            continue;
+                        }
+                        "/reload" => {
+                            if live.is_some() {
+                                print("[tau] live session active — end it first (Ctrl-C or /quit)");
+                                continue;
+                            }
+                            match &mut reload {
+                                None => print("[tau] reload is unavailable here"),
+                                Some(factory) => match factory().await {
+                                    Ok(reloaded) => {
+                                        renderer.abort();
+                                        agent = reloaded.agent;
+                                        model_label = reloaded.model_label;
+                                        let (rx, streamed, task) = spawn_renderer(&agent);
+                                        render_rx = rx;
+                                        sink_streamed = streamed;
+                                        renderer = task;
+                                        _reload_guard = Some(reloaded.keep_alive);
+                                        print(&format!(
+                                            "[tau] reloaded from the startup flags — model: {model_label}"
+                                        ));
+                                    }
+                                    Err(e) => print(&format!(
+                                        "[tau] reload failed: {e:#} — keeping the current harness"
+                                    )),
+                                },
+                            }
                             continue;
                         }
                         _ if text.starts_with('/') => {
@@ -1165,7 +1646,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, None));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("two".into())).unwrap();
@@ -1209,6 +1690,7 @@ mod tests {
             None,
             inject_rx,
             true,
+            None,
         ));
         // No typed line at all: the injection alone must run the turn.
         inject_tx
@@ -1282,6 +1764,7 @@ mod tests {
             }),
             unbounded_channel().1,
             true,
+            None,
         ));
         tx.send(LineEvent::Line("/quit".into())).unwrap();
         task.await.unwrap().unwrap();
@@ -1309,7 +1792,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, None));
 
         tx.send(LineEvent::Line("start".into())).unwrap();
         started.notified().await; // model is mid-stream now
@@ -1346,7 +1829,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, None));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("two".into())).unwrap();
@@ -1394,7 +1877,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, None));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("/compact".into())).unwrap();
@@ -1444,7 +1927,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, None));
         tx.send(LineEvent::Line("/help".into())).unwrap();
         tx.send(LineEvent::Line("/bogus".into())).unwrap();
         tx.send(LineEvent::Line("/quit".into())).unwrap();
@@ -1497,6 +1980,7 @@ mod tests {
             None,
             unbounded_channel().1,
             true,
+            None,
         ));
         (dir, tx, capture, task)
     }
@@ -1533,8 +2017,9 @@ mod tests {
             assert!(text.contains(header), "help lacks {header}: {text}");
         }
         for command in [
-            "/new", "/session", "/tree", "/fork", "/clone", "/compact", "/import", "/export",
-            "/hotkeys", "/changelog", "/help", "/quit", "/mic", "/live",
+            "/new", "/resume", "/name", "/session", "/tree", "/fork", "/clone", "/compact",
+            "/import", "/export", "/copy", "/hotkeys", "/changelog", "/reload", "/help",
+            "/quit", "/mic", "/live",
         ] {
             assert!(text.contains(command), "help lacks {command}: {text}");
         }
@@ -1701,6 +2186,184 @@ mod tests {
         assert!(text.contains(fallback), "output: {text}");
     }
 
+    #[tokio::test]
+    async fn resume_lists_sessions_and_marks_current() {
+        let (_dir, tx, capture, task) = rig();
+        tx.send(LineEvent::Line("one".into())).unwrap();
+        capture.ready.notified().await;
+        tx.send(LineEvent::Line("/new".into())).unwrap();
+        wait_for(&capture, "[tau] new session:").await;
+        tx.send(LineEvent::Line("/resume".into())).unwrap();
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        let text = capture.text();
+        assert!(text.contains("sessions here"), "output: {text}");
+        assert!(text.contains("session.jsonl"), "old file listed: {text}");
+        assert!(text.contains("(current)"), "current marked: {text}");
+        assert!(text.contains("1 entries") || text.contains("2 entries"), "counts: {text}");
+    }
+
+    #[tokio::test]
+    async fn resume_switches_by_index() {
+        let (_dir, tx, capture, task) = rig();
+        tx.send(LineEvent::Line("one".into())).unwrap();
+        capture.ready.notified().await;
+        tx.send(LineEvent::Line("/new".into())).unwrap();
+        wait_for(&capture, "[tau] new session:").await;
+        // Most recently modified first: 1 is the fresh file (current),
+        // 2 is session.jsonl with the first turn.
+        tx.send(LineEvent::Line("/resume 2".into())).unwrap();
+        wait_for(&capture, "[tau] resumed session.jsonl").await;
+        tx.send(LineEvent::Line("/session".into())).unwrap();
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        let text = capture.text();
+        assert!(
+            text.contains("2 entries, 2 messages in context"),
+            "switch report: {text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn name_renames_the_session_file_and_keeps_appending() {
+        let (dir, tx, capture, task) = rig();
+        tx.send(LineEvent::Line("one".into())).unwrap();
+        capture.ready.notified().await;
+        tx.send(LineEvent::Line("/name research log".into())).unwrap();
+        wait_for(&capture, "named \"research log\"").await;
+        tx.send(LineEvent::Line("two".into())).unwrap();
+        capture.ready.notified().await;
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        let renamed = dir.path().join("research-log.jsonl");
+        assert!(renamed.exists(), "files: {:?}", extra_session_files(dir.path()));
+        assert!(
+            !dir.path().join("session.jsonl").exists(),
+            "old name gone: {:?}",
+            extra_session_files(dir.path())
+        );
+        let store = JsonlStore::open(&renamed).unwrap();
+        assert_eq!(store.entries().len(), 4, "both turns survived the rename");
+    }
+
+    #[tokio::test]
+    async fn copy_reports_nothing_without_an_assistant_message() {
+        let (_dir, tx, capture, task) = rig();
+        tx.send(LineEvent::Line("/copy".into())).unwrap();
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        let text = capture.text();
+        assert!(text.contains("nothing to copy"), "output: {text}");
+    }
+
+    #[test]
+    fn last_assistant_text_picks_the_latest_assistant_text() {
+        let assistant = |text: &str| Message {
+            role: Role::Assistant,
+            content: vec![Content::Text { text: text.into() }],
+        };
+        let history = vec![
+            Message::user("hi"),
+            assistant("first"),
+            Message::user("again"),
+            assistant("second"),
+        ];
+        assert_eq!(last_assistant_text(&history).as_deref(), Some("second"));
+        assert_eq!(last_assistant_text(&[]), None);
+        assert_eq!(last_assistant_text(&[Message::user("hi")]), None);
+    }
+
+    #[test]
+    fn sanitize_session_name_cleans_and_caps() {
+        assert_eq!(sanitize_session_name("research log"), "research-log");
+        assert_eq!(
+            sanitize_session_name("a/b\\c:d*e?f\"g<h>i|j"),
+            "a-b-c-d-e-f-g-h-i-j"
+        );
+        assert_eq!(sanitize_session_name("CON"), "session-CON");
+        assert_eq!(sanitize_session_name("  ...  "), "");
+        assert_eq!(sanitize_session_name(&"x".repeat(100)).len(), 40);
+    }
+
+    #[tokio::test]
+    async fn export_html_writes_an_escaped_styled_copy() {
+        let (dir, tx, capture, task) = rig();
+        tx.send(LineEvent::Line("<b>bold</b> & co".into())).unwrap();
+        capture.ready.notified().await;
+        let target = dir.path().join("out.html");
+        tx.send(LineEvent::Line(format!("/export {}", target.display())))
+            .unwrap();
+        wait_for(&capture, "(HTML)").await;
+        tx.send(LineEvent::Line(format!("/export {}", target.display())))
+            .unwrap();
+        wait_for(&capture, "not overwriting").await;
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        let html = std::fs::read_to_string(&target).unwrap();
+        assert!(html.starts_with("<!doctype html>"), "html: {html}");
+        assert!(
+            html.contains("&lt;b&gt;bold&lt;/b&gt; &amp; co"),
+            "user text escaped: {html}"
+        );
+        assert!(!html.contains("<b>bold</b>"), "no raw markup: {html}");
+        assert!(html.contains("<section class=\"user\">"), "sections: {html}");
+        assert!(html.contains("tau is alive."), "assistant text: {html}");
+    }
+
+    #[tokio::test]
+    async fn reload_invokes_the_factory_and_swaps_the_agent() {
+        let (_dir, store) = store();
+        let agent = Arc::new(Agent::new(Box::new(StaticModel), ToolRegistry::new()));
+        let capture = Arc::new(Capture {
+            lines: Mutex::new(Vec::new()),
+            ready: Notify::new(),
+        });
+        let (tx, rx) = unbounded_channel();
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let calls_in = calls.clone();
+        let factory: ReloadFactory = Box::new(move || {
+            let calls = calls_in.clone();
+            Box::pin(async move {
+                calls.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                Ok(Reloaded {
+                    agent: Arc::new(Agent::new(Box::new(StaticModel), ToolRegistry::new())),
+                    model_label: "reloaded-model".to_string(),
+                    keep_alive: Box::new(()),
+                })
+            })
+        });
+        let printer = capture.printer();
+        let task = tokio::spawn(drive(
+            agent,
+            store,
+            Vec::new(),
+            None,
+            rx,
+            printer,
+            None,
+            unbounded_channel().1,
+            true,
+            Some(factory),
+        ));
+        tx.send(LineEvent::Line("/reload".into())).unwrap();
+        wait_for(&capture, "reloaded from the startup flags").await;
+        // A turn after the swap still works, on the new agent.
+        tx.send(LineEvent::Line("one".into())).unwrap();
+        capture.ready.notified().await;
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        assert_eq!(calls.load(std::sync::atomic::Ordering::Relaxed), 1);
+        let text = capture.text();
+        assert!(text.contains("model: reloaded-model"), "output: {text}");
+        assert!(text.contains("tau is alive"), "turn after swap: {text}");
+    }
+
     /// Records the text of every request; the compaction instructions
     /// must reach the summarizer (pi's `/compact [instructions]`).
     struct RecordingModel {
@@ -1749,6 +2412,7 @@ mod tests {
             None,
             unbounded_channel().1,
             true,
+            None,
         ));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
@@ -1802,7 +2466,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, None));
         tx.send(LineEvent::Line("hi".into())).unwrap();
         wait_for(&capture, "run failed: model error: boom").await;
         // The loop survived: the next prompt runs and completes.
@@ -1832,7 +2496,7 @@ mod tests {
             ready: Notify::new(),
         });
         let (tx, rx) = unbounded_channel();
-        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true));
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, None));
         tx.send(LineEvent::Line("one".into())).unwrap();
         capture.ready.notified().await;
         tx.send(LineEvent::Line("two".into())).unwrap();
