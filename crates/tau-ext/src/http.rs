@@ -299,11 +299,11 @@ pub(crate) async fn send(
     })
 }
 
-/// The consent allowlist plus the shared HTTP client. Every request goes
-/// through [`HttpRegistry::start`] before a byte leaves the process.
+/// The shared HTTP client, plus the URL-shape check every request passes
+/// through ([`HttpRegistry::start`]) before a byte leaves the process.
 pub(crate) struct HttpRegistry {
-    /// Redirects are never followed: a redirect would silently move the
-    /// request to an origin the user did not consent to.
+    /// Redirects are never followed: a redirect is a different endpoint
+    /// than the one the component asked for.
     client: reqwest::Client,
 }
 
@@ -342,7 +342,7 @@ impl HttpRegistry {
         Some(format!("{scheme}://{}", host_port.to_ascii_lowercase()))
     }
 
-    /// Check consent and hand back the shared client. Deliberately sync and
+    /// Hand back the shared client once the URL is dialable. Deliberately sync and
     /// lock-scoped: the caller awaits the request itself, so no mutex guard
     /// is ever held across an await (a std guard across an await makes the
     /// host's future `!Send`).

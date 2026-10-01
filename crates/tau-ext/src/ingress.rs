@@ -1,7 +1,7 @@
 //! Webhook ingress (docs/im-channels.md): WASI p2 has no listen, so the
-//! host runs the HTTP server for bridge components. The listen
-//! listen ADDRESS (CLI `--ingress`), orthogonal to the origin allowlist.
-//! The host is a pipe — method/path/headers/body pass through untouched;
+//! host runs the HTTP server for bridge components. The listen ADDRESS
+//! (CLI `--ingress`) is host configuration — not a grant, and not tied to the
+//! HTTP client's URL policy. The host is a pipe — method/path/headers/body pass through untouched;
 //! signature verification against platform secrets is the component's
 //! job. Each inbound request is pushed into the component's
 //! `ingress-handler` export under the instance lock (the server thread
@@ -133,8 +133,8 @@ impl IngressRegistry {
             }
         }
         for addr in &self.addrs {
-            // Past the consent check above, so a failure here is the bind
-            // itself (address in use, no permission to bind): `failed`.
+            // Addresses are host configuration, so a failure here is the
+            // bind itself (address in use, no permission to bind): `failed`.
             self.ensure_server(addr).map_err(IngressError::Failed)?;
         }
         Ok(HostRegistration {
@@ -145,7 +145,7 @@ impl IngressRegistry {
 
     /// `ingress.close`: stop serving `route`. Servers keep running until
     /// drop — a listener with zero routes answers 404, which is the
-    /// honest state (the address stays consented).
+    /// honest state (the address stays configured).
     pub(crate) fn close(&self, route: &str) -> Result<(), String> {
         let mut routes = self.routes.lock().unwrap_or_else(|e| e.into_inner());
         if routes.remove(route) {

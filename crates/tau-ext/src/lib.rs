@@ -279,15 +279,13 @@ pub(crate) fn level_name(level: wit_host::Level) -> &'static str {
 }
 
 /// Classify the host's own failures for the contract's `types.error`
-/// (two-way since 0.8.0: the runtime consent gates are gone, so nothing
-/// reaches a guest as "nobody granted this" -- docs/wit-0.8-draft.md ruling 1).
-/// The host's own `Refused` still exists for the trust/signing chain, which is
-/// an install-time matter and never a guest's call: it lifts to `failed` here,
-/// because from a guest's side the call simply did not work.
+/// (two-way since 0.8.0: the runtime consent gates are gone, so nothing reaches
+/// a guest as "nobody granted this" — docs/wit-0.8-draft.md ruling 1 — and the
+/// host's own twin of that arm went with them, since nothing could produce it).
 impl From<HostError> for wit::Error {
     fn from(error: HostError) -> Self {
         match error {
-            HostError::Refused(detail) | HostError::Failed(detail) => wit::Error::Failed(detail),
+            HostError::Failed(detail) => wit::Error::Failed(detail),
             HostError::Invalid(detail) => wit::Error::Invalid(detail),
         }
     }

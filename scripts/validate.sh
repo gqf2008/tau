@@ -43,7 +43,7 @@ cleanup() {
     rmdir --ignore-fail-on-non-empty "$HOME/.tau/blobs" 2> /dev/null || true
     cd "$ROOT" # cannot remove the workdir while standing in it (Windows)
     if [ -n "$THROWAWAY_FP" ]; then
-        rm -f "$HOME/.tau/keys/$THROWAWAY_FP.key"             "$HOME/.tau/trust/$THROWAWAY_FP.pub"             "$HOME/.tau/trust/$THROWAWAY_FP.pub.aside"             "$HOME/.tau/consent/$THROWAWAY_FP.json"
+        rm -f "$HOME/.tau/keys/$THROWAWAY_FP.key"             "$HOME/.tau/trust/$THROWAWAY_FP.pub"             "$HOME/.tau/trust/$THROWAWAY_FP.pub.aside"
     fi
     rm -rf "$WORK"
 }

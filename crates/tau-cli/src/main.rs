@@ -113,8 +113,8 @@ struct Cli {
     #[arg(long)]
     mcp_url: Option<String>,
 
-    /// Load unsigned components. By default every extension, provider, and
-    /// bridge must carry a valid signature from a key in ~/.tau/trust.
+    /// Load unsigned components. By default every extension and bridge must
+    /// carry a valid signature from a key in ~/.tau/trust.
     #[arg(long)]
     allow_unsigned: bool,
 

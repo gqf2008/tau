@@ -110,9 +110,10 @@ third-party components to migrate. By theme:
   `BridgeConfig`: `command` / `mcp_url` / `listen`, nothing else.
 - **`types.error` loses `refused`** (three arms become two: `failed` /
   `invalid`). Nothing refuses at call time any more, and a variant with
-  no producer is not a contract. The host's own `HostError::Refused`
-  stays, but only for the signing/trust chain, and it folds to `failed`
-  when it crosses to a guest.
+  no producer is not a contract — so the host's own `HostError::Refused`
+  arm went with it too, rather than lingering as a path nothing could
+  reach (the signing/trust chain rejects a component at load time and
+  never speaks to a guest).
 - **`host.steer` / `follow-up` need no flag.** Installing the component
   is the authorization — the authority is part of the install record,
   and it is the one capability ambient WASI cannot imitate.

@@ -221,8 +221,8 @@ media 工具能力，或交给 provider 侧（realtime API 多直接吃 PCM）�
 
 语义红线：
 
-- **`endpoint` 必须与 consent 的端点一致**（组件对照 TAU_MCP_URL，
-  不匹配 fail-loud）——配置不能偷渡一个没 consent 的端点。
+- **`endpoint` 必须与宿主给的 `TAU_MCP_URL` 一致**（组件对照，
+  不匹配 fail-loud）——映射不能指向宿主没指定的端点。
 - **未知 chat 的消息忽略**（notify 记录，不 steer）：映射是显式的，
   不存在「默认会话」。
 - **`users.allow` 缺席或空 = 无人可说话**（fail-closed：身份是

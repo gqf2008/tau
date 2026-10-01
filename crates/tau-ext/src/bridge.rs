@@ -621,14 +621,12 @@ fn inbound_error_to_bridge(error: crate::ws::InboundError, misuse: &str) -> brid
 }
 
 /// The host channel's own failures in this world's `types.error`: same
-/// three-way classification as the extension world's `From` impl (bindgen
+/// two-way classification as the extension world's `From` impl (bindgen
 /// generates the error type once per world, so the lift is written twice).
 fn channel_error(error: tau_core::error::HostError) -> bridge_types::Error {
     use tau_core::error::HostError;
     match error {
-        HostError::Refused(detail) | HostError::Failed(detail) => {
-            bridge_types::Error::Failed(detail)
-        }
+        HostError::Failed(detail) => bridge_types::Error::Failed(detail),
         HostError::Invalid(detail) => bridge_types::Error::Invalid(detail),
     }
 }

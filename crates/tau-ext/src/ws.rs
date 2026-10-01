@@ -1,8 +1,7 @@
 //! WebSocket frame-pipe capability for bridge components
 //! (docs/im-channels.md — IM stream modes). The host is a frame pipe
-//! only: it never parses payloads. Origin consent shares the `http`
-//! allowlist (ws: matches http:, wss: matches https:), granted empty by
-//! default — every call fails at call time without consent.
+//! only: it never parses payloads. There is no origin allowlist since 0.8.0
+//! (docs/wit-0.8-draft.md ruling 1): a connect goes where the component says.
 //!
 //! Keepalive / idle semantics (wit-review F9, contract-commented in
 //! `wit/tau.wit`): the actor thread pings every 30s; 60s without any
@@ -252,7 +251,6 @@ pub fn origin_of(url: &str) -> Option<String> {
     WsRegistry::origin_of(url)
 }
 
-/// The consent allowlist. Since 0.7.0 the connections themselves live in
 /// WebSocket registry. Since 0.7.0 the connections themselves live in the
 /// guest's resource table, not here; since 0.8.0 there is no allowlist
 /// either (docs/wit-0.8-draft.md ruling 1), so what is left is the connect

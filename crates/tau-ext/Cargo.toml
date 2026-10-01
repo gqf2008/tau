@@ -7,7 +7,7 @@ repository.workspace = true
 homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
-description = "Wasm component extension host for tau (wasmtime; ambient WASI open by default, consent-gated capabilities)"
+description = "Wasm component extension host for tau (wasmtime; ambient WASI always, no runtime capability gates)"
 
 [dependencies]
 tau-core = { path = "../tau-core", version = "0.7.0" }
