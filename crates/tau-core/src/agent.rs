@@ -149,6 +149,10 @@ pub struct Agent {
     /// Blob store for materializing externalized media at the request
     /// edge; sessions may carry `MediaSource::Blob` references.
     blobs: Option<crate::blobs::BlobStore>,
+    /// Durable run progress (frames.rs): the harness attaches a sink so
+    /// a crash mid-run salvages what committed. Set post-construction —
+    /// the harness owns the sidecar path, the agent just writes through.
+    frame_sink: std::sync::Mutex<Option<crate::frames::FrameSink>>,
 }
 
 impl Agent {
@@ -166,6 +170,7 @@ impl Agent {
             control_tx,
             control_rx: tokio::sync::Mutex::new(control_rx),
             blobs: None,
+            frame_sink: std::sync::Mutex::new(None),
         }
     }
 
@@ -173,6 +178,20 @@ impl Agent {
     /// back to bytes before each model request.
     /// Attach a blob store for materializing `MediaSource::Blob` media
     /// at the request edge.
+    /// Attach (or detach, with None) the frame sink — post-construction
+    /// because the harness owns the sidecar path, and a swapped-in agent
+    /// (/reload) needs the same sink re-attached by the REPL.
+    pub fn set_frame_sink(&self, sink: Option<crate::frames::FrameSink>) {
+        *self.frame_sink.lock().unwrap() = sink;
+    }
+
+    /// Write one durable progress frame (no-op without a sink).
+    fn frame(&self, frame: crate::frames::Frame) {
+        if let Some(sink) = &*self.frame_sink.lock().unwrap() {
+            sink(&frame);
+        }
+    }
+
     pub fn blobs(mut self, store: crate::blobs::BlobStore) -> Self {
         self.blobs = Some(store);
         self
@@ -432,6 +451,7 @@ impl Agent {
         let mut pending: Vec<Control> = Vec::new();
         let mut produced = vec![prompt];
         for _ in 0..self.max_turns {
+            self.frame(crate::frames::Frame::TurnStart);
             let mut request = Request {
                 system: self.system.clone(),
                 messages: [history, &produced].concat(),
@@ -621,6 +641,11 @@ impl Agent {
                     },
                     _ => output,
                 };
+                self.frame(crate::frames::Frame::ToolResult {
+                    call_id: id.clone(),
+                    text: output.text(),
+                    is_error: output.is_error,
+                });
                 self.emit(AgentEvent::ToolCallEnd {
                     id: id.clone(),
                     name,
@@ -700,6 +725,9 @@ impl Agent {
             match event {
                 ModelEvent::TextDelta { text: delta } => {
                     text.push_str(&delta);
+                    self.frame(crate::frames::Frame::TextDelta {
+                        text: delta.clone(),
+                    });
                     self.emit(AgentEvent::TextDelta(delta));
                 }
                 ModelEvent::AudioDelta { data, media_type } => {
@@ -737,6 +765,12 @@ impl Agent {
                     name,
                     arguments_delta,
                 } => {
+                    self.frame(crate::frames::Frame::ToolCallDelta {
+                        index,
+                        id: id.clone(),
+                        name: name.clone(),
+                        arguments_delta: arguments_delta.clone(),
+                    });
                     let call = calls.entry(index).or_default();
                     if let Some(id) = id {
                         call.0 = id;

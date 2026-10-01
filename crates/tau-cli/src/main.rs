@@ -523,6 +523,15 @@ async fn main() -> Result<()> {
         .with_context(|| format!("opening {}", session_path.display()))?
         .with_blobs(tau_core::BlobStore::new(tau_core::BlobStore::default_dir()));
     warn_torn_tail(&store);
+    // A surviving frames sidecar means the last run died mid-stream:
+    // fold its committed prefix into the session before anything reads
+    // history (frames.rs — progress, not history, until now).
+    if let Some(recovered) = tau_core::frames::salvage(&mut store)? {
+        eprintln!(
+            "[tau] recovered an interrupted run: {} entries ({} chars, {} unknown tool outcome(s))",
+            recovered.entries, recovered.text_chars, recovered.unknown_outcomes
+        );
+    }
     let mut history = if cli.r#continue {
         match store.head() {
             Some(head) => store.active_branch(&head.id)?,
@@ -790,6 +799,9 @@ async fn main() -> Result<()> {
         let _ = control.send(tau_core::Control::Abort);
     });
 
+    let frames = tau_core::frames::FrameTarget::default();
+    agent.set_frame_sink(Some(frames.sink()));
+    frames.point_at(tau_core::frames::frames_path_for(store.path()));
     let produced = agent.run(&history, Message::user(prompt_text)).await;
     ctrl_c.abort();
     let produced = produced?;
@@ -806,6 +818,7 @@ async fn main() -> Result<()> {
         parent = Some(entry.id.clone());
         store.append(entry)?;
     }
+    frames.retire();
     eprintln!("[tau] session: {}", session_path.display());
     agent
         .observe(ProbePoint::SessionEnd, ProbePayload::SessionEnd(session_facts))

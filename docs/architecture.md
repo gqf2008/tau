@@ -12,7 +12,8 @@ tau 是一个最小 agent harness，设计沿袭 pi（MIT, earendil-works/pi）�
 
 1. **会话即树**：append-only JSONL，条目带 id + parent；根到当前条目的
    路径是 active branch，供作模型历史；从旧条目继续即分叉。compaction
-   以摘要条目替换更早历史，原件留在树里。
+   以摘要条目替换更早历史，原件留在树里。run 中途死亡的已产出内容也
+   不丢：流式帧持久化在 sidecar（见 §3 帧级崩溃恢复）。
 2. **极简 agent 循环**：prompt → model stream → tool calls → results →
    重复。steering / follow-up / abort 走独立的控制通道。
 3. **一切皆可扩展**：核心刻意保持最小，功能长在扩展上。
@@ -92,6 +93,16 @@ tau-core 不知道 wasm 的存在；tau-ext 不知道 CLI 的存在；
   - **控制通道**（`control.rs`，无界 mpsc）：命令（steer/follow-up/
     abort），循环在检查点消费，steer 永不落在 tool_use 与
     tool_result 之间。
+- **帧级崩溃恢复**（`frames.rs`）：turn 原本是原子的——run 完成才
+  append 条目，进程中途死亡丢失整轮已产出内容。现在 agent 循环把
+  每个流式增量与每个已落地工具结果写成一帧（可选 sink，REPL 与
+  print 模式开启），帧落在 sidecar `<session>.frames.jsonl`——
+  **不进会话文件**：冻结期新增行型会被旧二进制读成 corrupt（与
+  `/name` 裁定同源）。帧是进度不是历史，永不过进上下文。干净 run
+  条目落盘即 retire sidecar；sidecar 幸存意味着 run 死亡，下次打开
+  （或 REPL 当场）由 `salvage` 重建已提交前缀为真实条目：部分
+  assistant 消息附 pi 原文的 interrupted 通告，未落地结果的调用
+  合成 "external outcome is unknown" 的诚实结果；通告即幂等标记。
 - **入口不新增核心构件**：print / REPL / ACP 三种模式共用同一份
   `Agent` + session 树 + 工具与探针注册表；ACP 只是这些构件的
   JSON-RPC 序列化外壳（`docs/acp.md`），tau-core 不知道协议存在。

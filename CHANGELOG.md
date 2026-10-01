@@ -21,6 +21,19 @@
   格式——冻结期裁定见 docs/repl.md）、`/copy`（最近 assistant 消息进系统
   剪贴板，平台工具不引新依赖）、`/export` 的 .html 路径渲染自包含 HTML、
   `/reload`（按启动旗标重建 harness 并热换 agent，重接 host 通道）。
+- Frame-level crash recovery (thread `frame-crash-recovery`, pi-parity
+  with pi's `progress.ts`/`recovery.ts` design): the agent loop writes
+  every streamed delta and landed tool result as a durable frame to a
+  sidecar `<session>.frames.jsonl` (never the session file — a new line
+  type would read as corrupt to frozen 0.7.x binaries). A clean run
+  retires the sidecar once its messages are entries; a surviving sidecar
+  means the run died, and `tau_core::frames::salvage` rebuilds the
+  committed prefix as real entries — the partial assistant message with
+  pi's verbatim interrupted notice, landed tool results kept, calls
+  whose result never landed answered with an honest
+  "external outcome is unknown" (idempotent: the notice is the marker).
+  Wired in the REPL (salvage on run failure, `/clone`, `/import`,
+  `/resume`, startup; the sidecar follows `/name`) and in print mode.
 
 ### Fixed
 

@@ -743,6 +743,11 @@ pub(crate) async fn drive(
         unbounded_channel::<crate::live::LiveOutcome>();
     let mut live: Option<UnboundedSender<crate::live::LiveCmd>> = None;
     let mut parent = base.or_else(|| store.head().map(|h| h.id.clone()));
+    // Durable run progress (frames.rs): attached here rather than at
+    // agent construction — the sidecar path is the harness's business,
+    // and store switches just re-point it at the next run.
+    let frames = tau_core::frames::FrameTarget::default();
+    agent.set_frame_sink(Some(frames.sink()));
 
     print("tau interactive — /help for commands, /quit to exit");
     print("  mid-run: text queues as follow-up, !text steers, Ctrl-C aborts");
@@ -825,6 +830,9 @@ pub(crate) async fn drive(
                                     let agent = agent.clone();
                                     let turn_history = history.clone();
                                     let done_tx = done_tx.clone();
+                                    frames.point_at(tau_core::frames::frames_path_for(
+                                        store.path(),
+                                    ));
                                     tokio::spawn(async move {
                                         let result = agent.run(&turn_history, message).await;
                                         let _ = done_tx.send(result);
@@ -1059,7 +1067,15 @@ pub(crate) async fn drive(
                             match cloned {
                                 // history/parent stay: the copy holds the
                                 // same entries, so the parent id resolves.
-                                Ok(copy) => {
+                                Ok(mut copy) => {
+                                    if let Ok(Some(recovered)) =
+                                        tau_core::frames::salvage(&mut copy)
+                                    {
+                                        print(&format!(
+                                            "[tau] recovered an interrupted run there: {} entries",
+                                            recovered.entries
+                                        ));
+                                    }
                                     store = copy;
                                     print(&format!(
                                         "[tau] cloned into {} — continuing there",
@@ -1086,7 +1102,15 @@ pub(crate) async fn drive(
                                 continue;
                             }
                             match JsonlStore::open(&path) {
-                                Ok(opened) => {
+                                Ok(mut opened) => {
+                                    if let Ok(Some(recovered)) =
+                                        tau_core::frames::salvage(&mut opened)
+                                    {
+                                        print(&format!(
+                                            "[tau] recovered an interrupted run there: {} entries",
+                                            recovered.entries
+                                        ));
+                                    }
                                     if let Some(torn) = opened.torn_tail() {
                                         print(&format!(
                                             "[tau] discarded a torn tail at line {} ({} bytes)",
@@ -1227,7 +1251,15 @@ pub(crate) async fn drive(
                                 continue;
                             };
                             match JsonlStore::open(&file.path) {
-                                Ok(opened) => {
+                                Ok(mut opened) => {
+                                    if let Ok(Some(recovered)) =
+                                        tau_core::frames::salvage(&mut opened)
+                                    {
+                                        print(&format!(
+                                            "[tau] recovered an interrupted run there: {} entries",
+                                            recovered.entries
+                                        ));
+                                    }
                                     let count = opened.entries().len();
                                     let head = opened.head().map(|h| h.id.clone());
                                     let branch = match &head {
@@ -1279,18 +1311,24 @@ pub(crate) async fn drive(
                                 continue;
                             }
                             match std::fs::rename(store.path(), &target) {
-                                Ok(()) => match JsonlStore::open(&target) {
-                                    Ok(opened) => {
-                                        store = opened;
-                                        print(&format!(
-                                            "[tau] named {arg:?} — session file is now {}",
-                                            target.display()
-                                        ));
+                                Ok(()) => {
+                                    let _ = std::fs::rename(
+                                        tau_core::frames::frames_path_for(store.path()),
+                                        tau_core::frames::frames_path_for(&target),
+                                    );
+                                    match JsonlStore::open(&target) {
+                                        Ok(opened) => {
+                                            store = opened;
+                                            print(&format!(
+                                                "[tau] named {arg:?} — session file is now {}",
+                                                target.display()
+                                            ));
+                                        }
+                                        Err(e) => print(&format!(
+                                            "[tau] renamed but reopen failed: {e}"
+                                        )),
                                     }
-                                    Err(e) => {
-                                        print(&format!("[tau] renamed but reopen failed: {e}"))
-                                    }
-                                },
+                                }
                                 Err(e) => print(&format!("[tau] rename failed: {e}")),
                             }
                             continue;
@@ -1355,6 +1393,7 @@ pub(crate) async fn drive(
                     let prompt = Message::user(text);
                     let turn_history = history.clone();
                     let done_tx = done_tx.clone();
+                    frames.point_at(tau_core::frames::frames_path_for(store.path()));
                     tokio::spawn(async move {
                         let result = agent.run(&turn_history, prompt).await;
                         let _ = done_tx.send(result);
@@ -1397,6 +1436,7 @@ pub(crate) async fn drive(
                         let agent = agent.clone();
                         let turn_history = history.clone();
                         let done_tx = done_tx.clone();
+                        frames.point_at(tau_core::frames::frames_path_for(store.path()));
                         tokio::spawn(async move {
                             let result = agent.run(&turn_history, message).await;
                             let _ = done_tx.send(result);
@@ -1428,6 +1468,24 @@ pub(crate) async fn drive(
                         print(&format!(
                             "[tau] run failed: {e} — session intact, keep going"
                         ));
+                        // The dead run's committed frames are still
+                        // valuable: fold them in as real entries.
+                        match tau_core::frames::salvage(&mut store) {
+                            Ok(Some(recovered)) => {
+                                parent = store.head().map(|h| h.id.clone());
+                                if let Some(id) = &parent {
+                                    history = store.active_branch(id).unwrap_or_default();
+                                }
+                                print(&format!(
+                                    "[tau] recovered the interrupted run: {} entries ({} chars, {} unknown tool outcome(s))",
+                                    recovered.entries,
+                                    recovered.text_chars,
+                                    recovered.unknown_outcomes
+                                ));
+                            }
+                            Ok(None) => {}
+                            Err(se) => print(&format!("[tau] frame recovery failed: {se}")),
+                        }
                         continue;
                     }
                     None => return Err(anyhow::anyhow!("run channel closed")),
@@ -1468,6 +1526,7 @@ pub(crate) async fn drive(
                     store.append(entry)?;
                     history.push(message);
                 }
+                frames.retire();
                 print(&format!("[tau] ready (session: {} messages)", history.len()));
             }
         }
@@ -2485,6 +2544,95 @@ mod tests {
             .map(|m| m.text())
             .collect();
         assert_eq!(branch, vec!["again", "recovered"]);
+    }
+
+    #[tokio::test]
+    async fn clean_turn_retires_the_frames_sidecar() {
+        let (_dir, store) = store();
+        let agent = Arc::new(Agent::new(Box::new(StaticModel), ToolRegistry::new()));
+        let capture = Arc::new(Capture {
+            lines: Mutex::new(Vec::new()),
+            ready: Notify::new(),
+        });
+        let (tx, rx) = unbounded_channel();
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, None));
+        tx.send(LineEvent::Line("one".into())).unwrap();
+        wait_for(&capture, "[tau] ready").await;
+        // Clean run: the frames became entries, the sidecar is retired.
+        assert!(
+            !tau_core::frames::frames_path_for(&_dir.path().join("session.jsonl")).exists(),
+            "frames sidecar survived a clean turn"
+        );
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+    }
+
+    #[tokio::test]
+    async fn failed_run_salvages_the_committed_prefix() {
+        let (_dir, store) = store();
+        // First turn streams partial text then dies; second answers.
+        let model = FauxModel::scripted(vec![
+            vec![
+                ModelEvent::TextDelta {
+                    text: "partial work".into(),
+                },
+                ModelEvent::Error {
+                    message: "boom".into(),
+                },
+                ModelEvent::Done {
+                    stop: StopReason::Error,
+                },
+            ],
+            vec![
+                ModelEvent::TextDelta {
+                    text: "recovered".into(),
+                },
+                ModelEvent::Done {
+                    stop: StopReason::Stop,
+                },
+            ],
+        ]);
+        let agent = Arc::new(Agent::new(Box::new(model), ToolRegistry::new()));
+        let capture = Arc::new(Capture {
+            lines: Mutex::new(Vec::new()),
+            ready: Notify::new(),
+        });
+        let (tx, rx) = unbounded_channel();
+        let task = tokio::spawn(drive(agent, store, Vec::new(), None, rx, capture.printer(), None, unbounded_channel().1, true, None));
+        tx.send(LineEvent::Line("hi".into())).unwrap();
+        wait_for(&capture, "recovered the interrupted run").await;
+        tx.send(LineEvent::Line("again".into())).unwrap();
+        wait_for(&capture, "[tau] ready").await;
+        tx.send(LineEvent::Line("/quit".into())).unwrap();
+        task.await.unwrap().unwrap();
+
+        // The dead turn's committed prefix became a real entry (with
+        // pi's notice), the sidecar is gone, and the next turn chained
+        // off the salvaged head.
+        assert!(
+            !tau_core::frames::frames_path_for(&_dir.path().join("session.jsonl")).exists(),
+            "sidecar not retired after salvage"
+        );
+        let store = JsonlStore::open(_dir.path().join("session.jsonl")).unwrap();
+        let branch = store.active_branch(&store.head().unwrap().id).unwrap();
+        assert_eq!(
+            branch.len(),
+            3,
+            "salvaged assistant + the successful exchange: {branch:?}"
+        );
+        assert_eq!(branch[0].role, Role::Assistant);
+        assert!(
+            branch[0].text().contains("partial work"),
+            "committed prefix lost: {:?}",
+            branch[0].text()
+        );
+        assert!(
+            branch[0].text().contains(tau_core::frames::INTERRUPTED_NOTICE),
+            "interrupted notice missing: {:?}",
+            branch[0].text()
+        );
+        assert_eq!(branch[1].text(), "again");
+        assert_eq!(branch[2].text(), "recovered");
     }
 
     #[tokio::test]
