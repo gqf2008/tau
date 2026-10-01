@@ -1,5 +1,5 @@
 //! Webhook ingress (docs/im-channels.md): WASI p2 has no listen, so the
-//! host runs the HTTP server for bridge components. Consent is the
+//! host runs the HTTP server for bridge components. The listen
 //! listen ADDRESS (CLI `--ingress`), orthogonal to the origin allowlist.
 //! The host is a pipe — method/path/headers/body pass through untouched;
 //! signature verification against platform secrets is the component's
@@ -11,7 +11,7 @@
 //! the HTTP response.
 //!
 //! TLS is terminated by the tunnel/reverse proxy in front (the docs say
-//! so honestly); this listener speaks plain HTTP on the consented
+//! so honestly); this listener speaks plain HTTP on the configured
 //! loopback/internal address only.
 
 use std::collections::{HashMap, HashSet};
@@ -51,7 +51,7 @@ impl std::fmt::Display for IngressError {
 /// One registered webhook route, owned by the guest as
 /// `ingress.registration`. Dropping it unregisters the route (the servers
 /// keep running -- a listener with zero routes answers 404, which is the
-/// honest state: the address stays consented).
+/// honest state: the address stays configured).
 pub struct HostRegistration {
     route: String,
     registry: Arc<IngressRegistry>,
@@ -63,7 +63,7 @@ impl Drop for HostRegistration {
     }
 }
 
-/// One bridge's ingress world: the consented listen addresses, the
+/// One bridge's ingress world: the configured listen addresses, the
 /// routes it registered, the servers it spawned, and (late-bound, after
 /// instantiation) the instance the server threads push requests into.
 pub(crate) struct IngressRegistry {

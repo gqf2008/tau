@@ -1,14 +1,14 @@
 //! Bridge components (world "bridge"): external tool protocols (MCP, IM
-//! platforms) behind WIT. The host grants scoped capabilities, and only on
-//! explicit consent: spawn-with-pipes (the caller passes the allowed
-//! command argv), origin-allowlisted HTTP and WebSocket frames (the caller
-//! passes the allowed origins), and session injection via the host channel
-//! (`inject` consent, same gate as extensions). Bridges also export
+//! platforms) behind WIT. The host provides the capabilities the bridge
+//! world declares — spawn-with-pipes (the argv it runs, handed over as
+//! TAU_MCP_COMMAND), HTTP/WebSocket frames, webhook ingress — with no
+//! runtime gate on any of them since 0.8.0 (docs/wit-0.8-draft.md ruling 1).
+//! Session injection rides the host channel. Bridges also export
 //! probes — an IM adapter observes `after_response` to post replies
 //! (docs/im-channels.md); a bridge with nothing to observe returns an
 //! empty points() list. The host knows nothing about MCP or IM protocols;
 //! the bridge component speaks whatever protocol it likes over the pipes.
-//! (Ambient WASI follows the host's WasiPolicy — allow-all by default.)
+//! (Ambient WASI is what `ambient_wasi_ctx` builds.)
 
 use std::io::{Read, Write};
 use std::path::Path;
@@ -40,7 +40,7 @@ struct BridgeState {
     /// What the guest's resources are made of. Since 0.7.0 the children,
     /// connections, responses, routes and subscriptions themselves live in
     /// `table` (they are the guest's to own); what is left here are the
-    /// consent registries, behind std mutexes so a blocking call can be
+    /// capability registries, behind std mutexes so a blocking call can be
     /// handed to `spawn_blocking` and awaited (the lock is taken and
     /// dropped inside the blocking body, never held across an await).
     http: std::sync::Arc<std::sync::Mutex<HttpRegistry>>,
@@ -48,7 +48,7 @@ struct BridgeState {
     /// Host channel sinks (late-bound via wire_host_channel, same as
     /// extensions).
     channel: Arc<HostChannel>,
-    /// Webhook ingress (docs/im-channels.md): consented listen
+    /// Webhook ingress (docs/im-channels.md): the host's listen
     /// addresses + this bridge's routes/servers. Arc-shared with the
     /// factory so a trap rebuild keeps the listener (and its routes)
     /// alive — the server threads dispatch into the SharedBridge, which
@@ -200,10 +200,10 @@ fn wake(slot: &std::sync::Mutex<Option<std::task::Waker>>) {
     }
 }
 
-/// Spawn a child with piped stdio. `argv` is taken verbatim: the load-time
-/// consent (and the `TAU_MCP_COMMAND` env the host hands the component) is
-/// what makes a spawn legitimate -- the host does not second-guess which
-/// program a consented bridge starts.
+/// Spawn a child with piped stdio. `argv` is taken verbatim: the argv the
+/// host handed over (TAU_MCP_COMMAND) is what the bridge runs, and since
+/// 0.8.0 there is no separate approval step — the host does not second-guess
+/// which program an installed bridge starts.
 fn spawn_child(argv: &[String]) -> Result<HostChild, String> {
     let (program, args) = argv.split_first().ok_or("spawn: empty argv")?;
     let mut child = Command::new(program)
@@ -518,8 +518,8 @@ pub struct BridgeConfig {
     pub listen: Vec<String>,
 }
 
-/// Extract the consent origin ("scheme://host[:port]") from an http(s) URL.
-/// Public so the CLI can build a consent allowlist from --mcp-url.
+/// Extract the origin ("scheme://host[:port]") from an http(s) URL.
+/// Public so the CLI can sanity-check --mcp-url before handing it over.
 pub fn origin_of(url: &str) -> Option<String> {
     crate::http::HttpRegistry::origin_of(url)
 }
@@ -634,7 +634,7 @@ fn channel_error(error: tau_core::error::HostError) -> bridge_types::Error {
 }
 
 /// `http.request` is an `async func` in the contract, so it takes the
-/// store through an accessor: consent is checked synchronously (the
+/// store through an accessor: the call is checked synchronously (the
 /// registry lock is scoped to the gate, never held across the await), the
 /// request is awaited on the runtime, and the response goes into the
 /// guest-owned resource table.
@@ -1248,7 +1248,7 @@ impl bridge_process::Host for BridgeState {}
 
 // ---- ingress --------------------------------------------------------------
 
-/// Consent is the listen ADDRESS (CLI --ingress), checked by the registry;
+/// The listen ADDRESS is host configuration (CLI --ingress), checked by the registry;
 /// first use binds the socket, so the call goes to the blocking pool like
 /// the other network imports.
 impl bridge_ingress::Host for BridgeState {

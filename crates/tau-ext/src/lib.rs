@@ -2,14 +2,13 @@
 //!
 //! Loads components implementing the `tau:extension` world and exposes their
 //! tools to the agent and their probes to the harness. Ambient WASI
-//! capabilities (fs/env/stdio/args/network) are granted by default
-//! ([`WasiPolicy::AllowAll`]); [`WasiPolicy::DenyAll`] (CLI `--deny-wasi`)
-//! restores the old deny-all sandbox. Custom capabilities — bridge
-//! process/http, provider origins — stay consent-gated either way.
+//! capabilities (fs/env/stdio/args/network) are granted, always: since 0.8.0
+//! there is no `--deny-wasi` and no per-capability gate (docs/wit-0.8-draft.md
+//! ruling 1) — a component runs with the permissions of the tau process.
 //!
 //! Adjacent subsystems behind the same host: [`sign`] (ed25519 signatures
-//! and the trust store), [`consent`] (per-fingerprint remembered capability
-//! grants), [`oci`] (pull/push components through OCI registries), and
+//! and the trust store — the authorization act since 0.8.0),
+//! [`oci`] (pull/push components through OCI registries), and
 //! [`bridge`] (MCP-over-stdio/HTTP bridges).
 //!
 //! ## Loading a component
@@ -200,8 +199,8 @@ impl HostChannel {
     }
 }
 
-/// Host state handed to every extension component. The WasiCtx follows
-/// the host's [`WasiPolicy`]. There is no session-injection flag since
+/// Host state handed to every extension component. The WasiCtx is the
+/// ambient one ([`ambient_wasi_ctx`]). There is no session-injection flag since
 /// 0.8.0: steer/follow-up are part of what installing the component meant
 /// (docs/wit-0.8-draft.md ruling 1), while notify/emit are facts.
 struct ComponentState {
@@ -756,8 +755,7 @@ impl ExtensionHost {
         Ok(bytes)
     }
 
-    /// Load one component file. Ambient WASI access follows the host's
-    /// [`WasiPolicy`].
+    /// Load one component file. Ambient WASI access is granted, always.
     ///
     /// One load path since 0.8.0: the session-injection consent flag is gone
     /// with the other runtime gates (docs/wit-0.8-draft.md ruling 1) — a
@@ -776,7 +774,7 @@ impl ExtensionHost {
                 reason: e.to_string(),
             })?;
         // WASI interfaces are linked so wasip2-std components instantiate;
-        // what they may actually do follows the host's WasiPolicy. The
+        // what they may actually do is ambient (see `ambient_wasi_ctx`). The
         // async linker is what lets a call await its own I/O: the sync one
         // block_on's inside a host function, which is why this loader used
         // to need a runtime-free thread under it.
