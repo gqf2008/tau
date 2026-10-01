@@ -50,10 +50,10 @@ pub use find::FindTool;
 pub use grep::GrepTool;
 pub use ls::LsTool;
 pub use read::ReadTool;
-pub use skills::LoadSkillTool;
 pub use shell::{
     BASH_PATH_VAR, POWERSHELL_PATH_VAR, Shell, ShellKind, ShellTool, find_bash, find_powershell,
 };
+pub use skills::LoadSkillTool;
 pub use write::WriteTool;
 
 /// Every built-in this build implements, on this platform. The single source
@@ -359,8 +359,15 @@ mod tests {
         assert_eq!(tier("load_skill", false), None);
         let (_dir, skills) = skill_index();
         let mut default = ToolRegistry::new();
-        register(&mut default, &BuiltinTools::all(".").with_skills(skills.clone()));
-        assert_eq!(default.demo_pick(), None, "a default run must not script a skill load");
+        register(
+            &mut default,
+            &BuiltinTools::all(".").with_skills(skills.clone()),
+        );
+        assert_eq!(
+            default.demo_pick(),
+            None,
+            "a default run must not script a skill load"
+        );
 
         let mut named = ToolRegistry::new();
         let only = BuiltinTools::selecting(".", &["load_skill".to_string()]).with_skills(skills);

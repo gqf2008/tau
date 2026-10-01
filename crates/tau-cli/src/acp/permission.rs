@@ -204,7 +204,11 @@ impl ProbeHandler for PermissionGate {
         }
 
         let id = call.id.as_str();
-        match self.asker.ask(self.request(name, id, &call.arguments)).await {
+        match self
+            .asker
+            .ask(self.request(name, id, &call.arguments))
+            .await
+        {
             Ok(RequestPermissionOutcome::Selected(selected)) => {
                 match decide(selected.option_id.0.as_ref()) {
                     Some((decision, remember)) => {
@@ -227,13 +231,17 @@ impl ProbeHandler for PermissionGate {
                 reason: format!("the client cancelled the turn while {name} waited for permission"),
             },
             Ok(other) => Verdict::Block {
-                reason: format!("the client answered the permission request for {name} with {other:?}"),
+                reason: format!(
+                    "the client answered the permission request for {name} with {other:?}"
+                ),
             },
             // Fail closed. An unanswered request is not consent, and this
             // is the one place where being wrong the other way would run
             // something the user never saw.
             Err(error) => Verdict::Block {
-                reason: format!("the permission request for {name} did not reach the client: {error}"),
+                reason: format!(
+                    "the permission request for {name} did not reach the client: {error}"
+                ),
             },
         }
     }
@@ -287,7 +295,9 @@ mod tests {
     type Asked = Arc<Mutex<Vec<RequestPermissionRequest>>>;
 
     /// A gate on turn 3 of session `s1`, answering `answers` in order.
-    fn gate_with(answers: Vec<Result<RequestPermissionOutcome, String>>) -> (PermissionGate, Asked) {
+    fn gate_with(
+        answers: Vec<Result<RequestPermissionOutcome, String>>,
+    ) -> (PermissionGate, Asked) {
         let asked: Asked = Arc::new(Mutex::new(Vec::new()));
         let asker = Scripted {
             answers: Mutex::new(answers.into()),
@@ -332,7 +342,10 @@ mod tests {
     async fn a_call_the_gate_does_not_cover_is_never_asked_about() {
         let (gate, asked) = gate_with(vec![]);
         for name in ["read", "ls", "grep", "find", "upper"] {
-            assert!(matches!(fire(&gate, name).await, Verdict::Continue), "{name}");
+            assert!(
+                matches!(fire(&gate, name).await, Verdict::Continue),
+                "{name}"
+            );
         }
         assert!(questions(&asked).is_empty(), "the script answered nothing");
     }
@@ -412,7 +425,11 @@ mod tests {
         // not allowing a file to be overwritten. It is asked — the second
         // scripted answer is what decides it — and refused on its own.
         assert!(matches!(fire(&gate, "write").await, Verdict::Block { .. }));
-        assert_eq!(questions(&asked).len(), 2, "the second tool was asked about");
+        assert_eq!(
+            questions(&asked).len(),
+            2,
+            "the second tool was asked about"
+        );
     }
 
     #[tokio::test]
