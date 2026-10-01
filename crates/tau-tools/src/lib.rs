@@ -9,8 +9,8 @@
 //! too).
 //!
 //! The built-ins are **host code** — they read, write, and spawn processes
-//! with the permissions of the tau process. `--deny-wasi` does not apply to
-//! them (docs/builtin-tools.md, docs/extensions.md §7).
+//! with the permissions of the tau process, exactly as the components loaded
+//! beside them do since 0.8.0 (docs/builtin-tools.md, docs/extensions.md §7).
 //!
 //! ```
 //! use tau_core::ToolRegistry;

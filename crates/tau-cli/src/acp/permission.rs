@@ -2,8 +2,8 @@
 //! client before they run.
 //!
 //! This exists only in ACP mode. Outside it, tau's posture is unchanged —
-//! the built-ins are host code and the consent tau asks for is at load
-//! time (a component's signature, a bridge's argv, `--deny-wasi`). What
+//! the built-ins are host code, and the only authorization tau asks for is
+//! at install time (trusting a component's signing key). What
 //! changes here is that a client — an editor with a user in front of it —
 //! has a protocol for exactly this question, so tau asks it.
 //!

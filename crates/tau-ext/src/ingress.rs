@@ -67,8 +67,8 @@ impl Drop for HostRegistration {
 /// routes it registered, the servers it spawned, and (late-bound, after
 /// instantiation) the instance the server threads push requests into.
 pub(crate) struct IngressRegistry {
-    /// Consented `addr:port` list (BridgeConsent.ingress). Empty = every
-    /// listen() fails naming the missing consent.
+    /// The host's `addr:port` list (BridgeConfig.listen). Empty = every
+    /// listen() fails, saying the host serves no address.
     addrs: Vec<String>,
     routes: Mutex<HashSet<String>>,
     servers: Mutex<HashMap<String, JoinHandle<()>>>,

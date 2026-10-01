@@ -1,7 +1,7 @@
 # WIT 0.8.0：减法草案、裁定记录与 OS 模块设计对账
 
 > **状态：已落地（0.8.0 减法随本轮提交；独立审查与合并见 walgit 协作层 `wit-0.8-subtraction`
-> 线程）。** 契约本体是 `wit/tau.wit` 与 `crates/tau-ext/wit/tau.wit`（均为
+> 线程 `wit-0.8.0-subtraction`）。** 契约本体是 `wit/tau.wit` 与 `crates/tau-ext/wit/tau.wit`（均为
 > `tau:extension@0.8.0`，两份逐字节相同）；中文阅读副本是 `wit/tau.zh.wit`（剥掉注释后
 > 声明行 264 行与英文版逐字节相同）。本文是这一版的裁定与复核记录：三条裁定、Jev 五轮
 > 第二意见、与 OS 模块设计的对账，以及 0.9.0 的候选。0.7.0 的文本在 git 历史里。
