@@ -114,7 +114,7 @@ pub(crate) const STDIN_IDLE_DEFAULT: std::time::Duration = std::time::Duration::
 pub(crate) const PIPE_IDLE_DEFAULT: std::time::Duration = std::time::Duration::from_secs(120);
 
 /// The two knobs, in the house style (`TAU_HTTP_IDLE_TIMEOUT_MS`, ...): a
-/// gate leg or a user with a slower server moves them without a rebuild.
+/// test leg or a user with a slower server moves them without a rebuild.
 pub(crate) fn stdin_idle_timeout() -> std::time::Duration {
     crate::budget("TAU_PROCESS_STDIN_IDLE_TIMEOUT_MS", STDIN_IDLE_DEFAULT)
 }
@@ -633,7 +633,7 @@ fn channel_error(error: tau_core::error::HostError) -> bridge_types::Error {
 
 /// `http.request` is an `async func` in the contract, so it takes the
 /// store through an accessor: the call is checked synchronously (the
-/// registry lock is scoped to the gate, never held across the await), the
+/// registry lock is scoped to the URL check, never held across the await), the
 /// request is awaited on the runtime, and the response goes into the
 /// guest-owned resource table.
 impl<U> bridge_http::HostWithStore<U> for HasSelf<BridgeState> {

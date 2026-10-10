@@ -93,7 +93,7 @@ pub struct HostResponse {
     body: Option<BodyStream>,
 }
 
-// `unwrap_err` on the request gate needs the success side to be printable,
+// `unwrap_err` on the request check needs the success side to be printable,
 // and the body's channel is not: print the metadata.
 impl std::fmt::Debug for HostResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -364,7 +364,7 @@ mod tests {
     use std::io::{Read as _, Write as _};
 
     /// A budget generous enough for a loopback handshake: tests that
-    /// exercise the gate (not the clock) pass this and ignore it.
+    /// exercise the URL check (not the clock) pass this and ignore it.
     const BUDGET: Duration = Duration::from_secs(5);
 
     fn origin(url: &str) -> Option<String> {

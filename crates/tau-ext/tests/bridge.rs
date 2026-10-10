@@ -211,11 +211,12 @@ async fn an_unreachable_mcp_endpoint_fails_the_load() {
         return;
     };
     let host = ExtensionHost::new();
-    // mcp_url points at a port nothing listens on (127.0.0.1:9), so the
-    // bridge's handshake fails and the load errors out. Since 0.8.0 there is
-    // no origins allowlist and no call-time gate: the bridge dials whatever
-    // the host's configuration points it at, and an unreachable peer is what
-    // fails here.
+    // mcp_url points at 127.0.0.1:9, where no MCP handshake can complete:
+    // the port either refuses the connection or accepts it and never answers
+    // (Windows' simple TCP/IP services do listen there). Either way the load
+    // fails — which is all this test pins. Since 0.8.0 there is no origins
+    // allowlist and no call-time gate: the bridge dials whatever the host's
+    // configuration points it at.
     let result = host.load_bridge(
         &path,
         BridgeConfig {
