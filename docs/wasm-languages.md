@@ -139,17 +139,24 @@ Caused by:
   `crates/cpp/src/lib.rs`：13 处 `todo!()` 仍钉在矩阵需要的路径上
   （三个 async `FunctionKind`、三个 async `AbiVariant`、`Future`/`Stream`
   的定义与类型命名、`Handle`、`FixedLengthList`、`ErrorContext`）——
-  不是「新版已发我们没试」，而是**上游工作树里还没有实现**。
+  不是「新版已发我们没试」，而是**上游工作树里还没有实现**。已按
+  wit-redesign.md §9 第 4 项裁定开出 tracking issue：
+  <https://github.com/bytecodealliance/wit-bindgen/issues/1727>。
 - **JavaScript / TypeScript**：npm registry 的 `@bytecodealliance/jco` 最新仍是 **1.35.0**
   （注意：无 scope 的 `jco` 是 2026-01 注册的占位包 1.0.0、带占位 bin——
   构建脚本此前靠 `npm install` 先装好 scoped 包、npx 本地优先解析才没踩到；
   脚本与本文命令已改指名 `@bytecodealliance/jco`，去掉这层隐含依赖），
-  splicer panic（bindgen.rs:506，无 async-lift）原样未动。
+  splicer panic（bindgen.rs:506，无 async-lift）原样未动。tracking issue：
+  <https://github.com/bytecodealliance/jco/issues/2189>。
 - **Go**：TinyGo 最新发布仍是 **v0.42.0**（2026-09-01），
-  `runtime.wasiOnIdle` 仍未实现。
+  `runtime.wasiOnIdle` 仍未实现。tracking issue：
+  <https://github.com/tinygo-org/tinygo/issues/5796>。
 
 矩阵因此不变：✅ 仍只有 C 与 Python 两格，本轮未重建任何产物。下次复查
-触发条件＝上游三者任一发布新版。查询口径备忘（本机实测）：crates.io API
+触发条件＝上游三者（wit-bindgen cpp 生成器 / `@bytecodealliance/jco` /
+TinyGo）任一发布新版，**或**上述三条 tracking issue 任一关闭，即复查
+（措辞与 docs/wit-redesign.md §9 第 1 项一致，新增 issue 关闭这一可观测
+信号）。查询口径备忘（本机实测）：crates.io API
 对本机 403，rsproxy 稀疏索引对 wit-bindgen 系路径 404；可靠来源是 GitHub
 Releases（wit-bindgen、TinyGo）与 npm registry（`@bytecodealliance/jco`）。
 
@@ -210,7 +217,8 @@ src/upper.cpp:71:26: error: out-of-line definition of 'Execute' does not match a
 ```
 
 缺的是**声明**不是标准库，垫片补不了。源码已改到 0.7.0 形状并保留，等生成器
-跟上后重建即可。
+跟上后重建即可。上游 tracking issue：
+<https://github.com/bytecodealliance/wit-bindgen/issues/1727>。
 
 ## Python —— componentize-py 的类命名契约
 
@@ -252,7 +260,8 @@ kebab-case → camelCase（`parametersJson`、`isError`），action enum →
 导出 + 一个 async 导出，其余全砍）二分确认：同步导出能构建、换成 async 就
 panic ⇒ 与 tau 的契约形状无关，是 splicer 的实现缺口。源码已改到 0.7.0 形状
 （`async definitions` / `async execute`、`probe` 返回 `{ tag: "continue" }`）
-并保留。
+并保留。上游 tracking issue：
+<https://github.com/bytecodealliance/jco/issues/2189>。
 
 ## Go —— TinyGo core-module 路线（四处补丁 + reactor 构建模式）
 
@@ -310,7 +319,8 @@ wasm-ld: error: main.lto..o: undefined symbol: runtime.wasiOnIdle
 
 这个钩子的语义是「调度器无事可做时通知宿主交还控制权」，**不是能垫空的 stub**
 （垫成空函数会让 `Run` 永远阻塞在 `<-state.channel` 上）。本格记为 ❌，等 TinyGo
-的 runtime 提供该钩子再重建。两个 `impl.go`（`Points` / `Probe` 的类型化签名）
+的 runtime 提供该钩子再重建。上游 tracking issue：
+<https://github.com/tinygo-org/tinygo/issues/5796>。两个 `impl.go`（`Points` / `Probe` 的类型化签名）
 已改到 0.7.0 形状并编译通过。
 
 ## Java —— 今天无可用路径（权威依据）
