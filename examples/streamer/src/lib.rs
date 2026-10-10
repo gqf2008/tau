@@ -1,5 +1,5 @@
 //! Example tau extension exercising the high-frequency stream
-//! subscription (tau:extension@0.7.0, docs/stream-subscribe.md — F2's
+//! subscription (tau:extension@0.8.0, docs/stream-subscribe.md — F2's
 //! high-frequency observation leg): at `session_start` it subscribes to
 //! `text-delta`; at `before_run_end` it polls the backlog and notifies
 //! what it saw. The guest pulls — the host never calls into the
@@ -40,7 +40,6 @@ thread_local! {
 /// of the variant, which is not a sentence.
 fn host_error(verb: &str, error: HostError) -> String {
     match error {
-        HostError::Refused(detail) => format!("{verb} refused: {detail}"),
         HostError::Failed(detail) => format!("{verb} failed: {detail}"),
         HostError::Invalid(detail) => format!("{verb} invalid: {detail}"),
     }
@@ -82,9 +81,8 @@ impl Probes for Streamer {
                 }
             },
             Payload::BeforeRunEnd(_) => {
-                let events = SUBSCRIPTION.with(|cell| {
-                    cell.borrow().as_ref().map(Subscription::poll)
-                });
+                let events =
+                    SUBSCRIPTION.with(|cell| cell.borrow().as_ref().map(Subscription::poll));
                 if let Some(events) = events {
                     let mut deltas = 0u64;
                     let mut chars = 0usize;

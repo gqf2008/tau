@@ -138,8 +138,8 @@ impl SkillIndex {
                 dir.join(rel)
             }
         };
-        let resolved = std::fs::canonicalize(&target)
-            .map_err(|e| format!("{}: {e}", target.display()))?;
+        let resolved =
+            std::fs::canonicalize(&target).map_err(|e| format!("{}: {e}", target.display()))?;
         if !resolved.starts_with(&dir) {
             return Err(format!(
                 "`{}` resolves outside the skill directory",
@@ -322,8 +322,15 @@ mod tests {
         );
         let index = SkillIndex::discover(dir.path());
         let names: Vec<&str> = index.skills().iter().map(|s| s.name.as_str()).collect();
-        assert_eq!(names, ["foo", "bar", "zed"], "discovery order is the root order");
-        assert_eq!(index.get("bar").expect("bar").description, "quoted: description");
+        assert_eq!(
+            names,
+            ["foo", "bar", "zed"],
+            "discovery order is the root order"
+        );
+        assert_eq!(
+            index.get("bar").expect("bar").description,
+            "quoted: description"
+        );
         assert_eq!(
             index.get("zed").expect("zed").name,
             "zed",
@@ -357,7 +364,10 @@ mod tests {
         );
         let index = SkillIndex::discover(dir.path());
         assert_eq!(index.skills().len(), 1);
-        assert_eq!(index.get("foo").expect("foo").description, "foo does foo things");
+        assert_eq!(
+            index.get("foo").expect("foo").description,
+            "foo does foo things"
+        );
     }
 
     #[test]
@@ -369,7 +379,9 @@ mod tests {
         let body = index.load("foo", None).expect("body");
         assert!(body.contains("# Foo"), "{body}");
         assert_eq!(
-            index.load("foo", Some("scripts/run.sh")).expect("supporting"),
+            index
+                .load("foo", Some("scripts/run.sh"))
+                .expect("supporting"),
             "echo hi\n"
         );
     }
@@ -417,7 +429,10 @@ mod tests {
         let root = context.find("root instructions").expect("root present");
         let middle = context.find("middle instructions").expect("middle present");
         let inner = context.find("inner instructions").expect("inner present");
-        assert!(root < middle && middle < inner, "root-first order: {context}");
+        assert!(
+            root < middle && middle < inner,
+            "root-first order: {context}"
+        );
     }
 
     #[test]

@@ -91,7 +91,6 @@ impl Sessions {
             probes,
             model,
             model_label,
-            mic_consent: _,
             system,
         } = harness;
         Self {
@@ -186,7 +185,10 @@ impl Sessions {
             model: self.model_label.to_string(),
         };
         agent
-            .observe(ProbePoint::SessionStart, ProbePayload::SessionStart(facts.clone()))
+            .observe(
+                ProbePoint::SessionStart,
+                ProbePayload::SessionStart(facts.clone()),
+            )
             .await;
 
         let mut sessions = self

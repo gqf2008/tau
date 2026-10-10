@@ -1,14 +1,15 @@
-//! The host's three-way error, the projection of `types.error` in the
-//! 0.7.0 contract (`wit/tau.wit`, `interface types`).
+//! The host's two-way error, the projection of `types.error` in the 0.8.0
+//! contract (`wit/tau.wit`, `interface types`).
 //!
-//! Three arms, because that is the split a guest actually branches on:
-//! nobody agreed to this call (`Refused`), they agreed and it broke
-//! (`Failed`), or the call was never valid here (`Invalid`). The contract
-//! carries the arm since 0.7.0 (`crates/tau-ext/src/lib.rs` projects it
-//! into the generated type); the detail string stays for the human reading
-//! the log, and [`From<HostError> for String`] is what the paths that
-//! predate the arm still use — a guest matching on English prose is not an
-//! interface, and the arm is what it should match on.
+//! Two arms, because that is the split a guest actually branches on: the call
+//! failed (`Failed`), or it was never valid here (`Invalid`). 0.7.0 carried a
+//! third arm — `Refused`, "nobody agreed to this call" — and 0.8.0 deleted it
+//! along with the runtime consent gates that were its only producers
+//! (docs/wit-0.8-draft.md ruling 1): a variant with no producer is not a
+//! contract, and that applies to the host's twin of the arm as much as to the
+//! contract's. The detail string stays for the human reading the log, and
+//! [`From<HostError> for String`] is what the paths that predate the arms still
+//! use — a guest matching on English prose is not an interface.
 
 use std::fmt;
 
@@ -18,13 +19,9 @@ use std::fmt;
 /// log and is never meant to be matched on.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostError {
-    /// No consent covers this call: the origin is not in the allowlist,
-    /// the listen address was never approved, the argv was never
-    /// granted. The detail names what to grant.
-    Refused(String),
-    /// Consent covers it and the call itself failed: network error,
-    /// peer gone, child exited, signature check failed. The detail is
-    /// the host's or the OS's own message.
+    /// The call itself failed: network error, peer gone, child exited,
+    /// permission denied, signature check failed. The detail is the
+    /// host's or the OS's own message.
     Failed(String),
     /// The call is not valid here: unknown topic, size limit, wrong
     /// state, already closed. A guest bug or a contract misuse — the
@@ -33,12 +30,7 @@ pub enum HostError {
 }
 
 impl HostError {
-    /// Refuse: nobody granted this.
-    pub fn refused(detail: impl Into<String>) -> Self {
-        Self::Refused(detail.into())
-    }
-
-    /// Fail: granted, and it broke.
+    /// Fail: the call was allowed and it broke.
     pub fn failed(detail: impl Into<String>) -> Self {
         Self::Failed(detail.into())
     }
@@ -48,10 +40,9 @@ impl HostError {
         Self::Invalid(detail.into())
     }
 
-    /// The arm's wire name (`"refused"`, `"failed"`, `"invalid"`).
+    /// The arm's wire name (`"failed"`, `"invalid"`).
     pub fn kind(&self) -> &'static str {
         match self {
-            Self::Refused(_) => "refused",
             Self::Failed(_) => "failed",
             Self::Invalid(_) => "invalid",
         }
@@ -60,7 +51,7 @@ impl HostError {
     /// The detail string, arm-independent.
     pub fn detail(&self) -> &str {
         match self {
-            Self::Refused(detail) | Self::Failed(detail) | Self::Invalid(detail) => detail,
+            Self::Failed(detail) | Self::Invalid(detail) => detail,
         }
     }
 }
@@ -73,11 +64,10 @@ impl fmt::Display for HostError {
 
 impl std::error::Error for HostError {}
 
-/// The 0.6.0 ABI edge: every host call still answers `result<_, string>`,
-/// so this is what the wasm boundary hands the guest until the contract
-/// carries the arm itself. One-way on purpose — a string does not say
-/// which arm it was, and guessing would be exactly the prose-matching
-/// this type exists to remove.
+/// The string edge: every host call that still answers `result<_, string>`
+/// hands the guest this. One-way on purpose — a string does not say which arm
+/// it was, and guessing would be exactly the prose-matching this type exists
+/// to remove.
 impl From<HostError> for String {
     fn from(error: HostError) -> Self {
         error.to_string()
@@ -89,40 +79,34 @@ mod tests {
     use super::*;
 
     #[test]
-    fn the_three_arms_do_not_collapse_into_one_string() {
+    fn the_arms_do_not_collapse_into_one_string() {
         // Same detail, different arm: still different values. This is the
         // whole point of the type — 0.6.0 could not tell these apart.
-        assert_ne!(
-            HostError::refused("example.com"),
-            HostError::failed("example.com")
-        );
         assert_ne!(
             HostError::failed("example.com"),
             HostError::invalid("example.com")
         );
-        assert_eq!(HostError::kind(&HostError::refused("x")), "refused");
         assert_eq!(HostError::kind(&HostError::failed("x")), "failed");
         assert_eq!(HostError::kind(&HostError::invalid("x")), "invalid");
     }
 
     #[test]
     fn the_edge_string_carries_arm_and_detail() {
-        let text: String = HostError::refused("origin not in allowlist").into();
-        assert_eq!(text, "refused: origin not in allowlist");
+        let text: String = HostError::failed("peer gone").into();
+        assert_eq!(text, "failed: peer gone");
         // The arm is readable back out of the edge form, which is what a
         // log or a stderr line needs — not what a guest should match on.
-        assert!(text.starts_with("refused: "));
+        assert!(text.starts_with("failed: "));
     }
 
     #[test]
     fn the_detail_is_reachable_without_knowing_the_arm() {
-        for error in [
-            HostError::refused("r"),
-            HostError::failed("f"),
-            HostError::invalid("i"),
-        ] {
+        for error in [HostError::failed("f"), HostError::invalid("i")] {
             assert_eq!(error.detail(), error.detail());
-            assert_eq!(error.to_string(), format!("{}: {}", error.kind(), error.detail()));
+            assert_eq!(
+                error.to_string(),
+                format!("{}: {}", error.kind(), error.detail())
+            );
         }
     }
 }

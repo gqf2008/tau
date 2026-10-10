@@ -112,18 +112,20 @@ tau-core 不知道 wasm 的存在；tau-ext 不知道 CLI 的存在；
 
 ## 4. 可插拔模块设计
 
-### 4.1 契约：四个 world，四种能力，资源与流
+### 4.1 契约：两个 world，四种能力，资源与流
 
 契约是 `wit/tau.wit`（版本化——那里的 `package` 行即权威，当前
-`tau:extension@0.7.0`）。它按「组件扮演什么角色」切成四个 world，
+`tau:extension@0.8.0`）。它按「组件扮演什么角色」切成两个 world，
 而不是一个大接口：
 
 | world | export | import | 角色 |
 |-------|--------|--------|------|
-| `extension` | `tools`（definitions/execute）、`probes`（points/probe） | `host`（notify/emit/steer/follow-up/subscribe；注入类过 consent） | 通用扩展：给 agent 加工具、在生命周期点上观察与影响、经宿主通道回传 |
-| `provider` | `models`（list-models/run） | `http` | 模型 provider：`run` 返回事件流（guest 写 `stream<event>`），网络走授权出口 |
-| `realtime` | `models`、`session` | `http` | 全双工实时 provider：上下行皆为流（§4.7、`docs/realtime-av.md`） |
+| `extension` | `tools`（definitions/execute）、`probes`（points/probe） | `host`（notify/emit/steer/follow-up/subscribe） | 通用扩展：给 agent 加工具、在生命周期点上观察与影响、经宿主通道回传 |
 | `bridge` | `tools`、`probes`、`bridge-io`、`ingress-handler` | `process`、`http`、`ws`、`host`、`ingress` | 桥：把外部协议（MCP、IM 长连/webhook）翻译成 tau 工具与入站消息 |
+
+0.8.0 删掉了 `world provider`、`world realtime`、`interface models`
+与 `interface session`：模型不是扩展点，模型集合由宿主内置并随发布
+节奏演进（迁移说明见 `docs/extensions.md` §5）。
 
 四个 **capability interface**（`process`、`http`、`ws`、`ingress`）
 只表达宿主能力，不表达协议知识（无 wasi:http、无 MCP/IM 形状）。
@@ -131,20 +133,23 @@ tau-core 不知道 wasm 的存在；tau-ext 不知道 CLI 的存在；
 `registration`，drop 即释放），等待全部换成 stream/future——「还没
 好」由 guest 自己的 await 表达，`timeout-ms` 参数随之全部下线，
 预算收进宿主旋钮（`TAU_*_TIMEOUT_MS`，每条拒绝自报预算名与时长）。
-0.6.0 的 `events` 推送通道随之取消：provider 直接往 `run` 返回的
-`stream<event>` 里写，事件本身也已类型化。
+0.8.0 之后 stream/future 只活在 `bridge` world：没有模型侧组件，
+async ABI 从「写扩展」的属性变成「跟外部世界说话」的属性。
+（`host.subscribe` 与 `ws.poll` 的拉形态本身留到 0.9.0 的调用约定
+统一，见 `docs/extensions.md` §4/§6 的「0.9.0 待改」。）
 
 设计要点：**普通扩展链接不到 `process`/`http`**。world 的划分就是
 能力的第一道边界——一个只做工具的组件在链接层面就拿不到 spawn。
+0.8.0 把这句话变成了全部：门撤了，world 本身就是声明（§4.5）。
 
 ### 4.2 加载管线
 
-三个 world 共用同一条管线（`tau-ext/src/lib.rs`、`bridge.rs`）：
+两个 world 共用同一条管线（`tau-ext/src/lib.rs`、`bridge.rs`）：
 
 ```
 path/oci:// → read_verified（签名+信任策略，先于编译）
            → Component::from_binary（wasmtime，带编译缓存）
-           → Linker：wasi p2（按 WasiPolicy）+ tau 接口
+           → Linker：wasi p2（ambient 全开；0.8.0 起无策略开关）+ tau 接口
            → instantiate
            → 加载期契约调用（见下）
            → 注册进 tau-core 注册表
@@ -154,10 +159,10 @@ path/oci:// → read_verified（签名+信任策略，先于编译）
   签名/未信任的字节在编译前就被拒绝；`--allow-unsigned` 只豁免
   *缺失*的签名——签名节存在但验不过，任何策略都拒（缺失是开发者
   选择，腐坏是篡改证据，逃生舱不得洗白它）。
-- **加载期契约调用**：`definitions()`、`points()`、`list-models()`
-  在加载时各调一次。这有两个作用：一是注册表需要它们；二是**契约
-  在加载点被强制**——`--model` 给了一个组件没广告的 id，加载即拒
-  并列出可用 id（曾经不查，拼错的 id 静默照跑）。
+- **加载期契约调用**：`definitions()`、`points()` 在加载时各调一次。
+  这有两个作用：一是注册表需要它们；二是**契约在加载点被强制**——
+  `definitions()` 里解析不了的 `parameters-json` 让整个加载失败并点名
+  工具，绝不静默放宽成开放 schema（wit-review F5）。
 - **注册进核心**：`LoadedExtension` 拆出 `Vec<Box<dyn Tool>>` 与
   `Vec<Box<dyn ProbeHandler>>`，wasm 组件从此在 core 眼里与任何
   原生工具/探针无异。core 不知道 wasm——适配层在 tau-ext。
@@ -169,8 +174,8 @@ path/oci:// → read_verified（签名+信任策略，先于编译）
 线程，事件经 channel 流回异步侧。三条规则：
 
 1. **trap 只杀死当前调用**：工具 trap → 这次调用变成 `is_error` 的
-   工具结果；探针 trap → 降级为 `continue`；provider trap → error
-   事件 + `done{stop:"error"}`。run 永不被楔死。
+   工具结果；探针 trap → 降级为 `continue`（0.8.0 删掉 world
+   provider 后，组件侧不再有第三种调用形态）。run 永不被楔死。
 2. **trap 后实例重建**（`revive()`）：trap 会污染 store，用工厂重新
    实例化，后续调用落到全新实例上——一次崩溃不影响会话的其余部分，
    也不静默死掉。
@@ -180,52 +185,49 @@ path/oci:// → read_verified（签名+信任策略，先于编译）
 编译缓存（`~/.tau/cache/wasmtime`）让组件加载从冷 ~200ms 降到热
 ~10ms；缓存初始化失败只是变慢，不会失败。
 
-### 4.4 信任与授权：两个正交的问题
+### 4.4 信任：签名只回答「这是哪个组件」
 
-签名与沙箱回答的是不同问题，文档与实现都保持它们正交：
+签名回答的是「这是谁的、被改过没有」：
 
-- **签名回答「这是谁的、被改过没有」**：ed25519 签名以
-  `tau-signature` 自定义节内嵌在 .wasm 里（签的是剥掉签名节后的
-  SHA-256，重签名良定义）。指纹（公钥 SHA-256 前 16 hex）就是作者
-  id。`tau trust --from-component` 从验证过的字节里 onboarding 公钥
-  ——但指纹必须带外核实。
-- **沙箱回答「它能做什么」**：见 §4.5。信任的组件也不会多得任何
-  能力。
+- ed25519 签名以 `tau-signature` 自定义节内嵌在 .wasm 里（签的是
+  剥掉签名节后的 SHA-256，重签名良定义）。指纹（公钥 SHA-256 前
+  16 hex）就是作者 id。`tau trust --from-component` 从验证过的字节里
+  onboarding 公钥——但指纹必须带外核实。
+- **它不回答「它能做什么」**：0.8.0 起组件恒得 ambient WASI（§4.5），
+  以 tau 进程的权限运行；唯一与组件一一对应的授权动作是**安装/信任
+  签名**那一次，安装界面展示的声明读自组件类型（imports/exports），
+  不是手写清单。
 
-签名同时还**承载授权记忆**：capability grants 按指纹记在
-`~/.tau/consent/<fingerprint>.json`（origin 并集、布尔粘滞、
-`--remember` 只增、`--revoke` 才减）。同一 key 签名的后续版本继承
-用户授权；未签名组件没有指纹，永远没有记忆。同意文件的 key 在存储
-层校验形状（16 小写 hex），`../escape` 式输入在任何调用点都过不了；
-腐坏文件读作缺席——门关上，不是放行。
+0.8.0 删掉了整套授权记忆：`~/.tau/consent/*`、`--remember`、
+`tau consent --list/--revoke` 都不在了。指纹本身留下——它是作者
+id，也是「这是哪个组件」的答案，只是不再承载任何 capability
+grant。
 
-### 4.5 能力模型：ambient 与 scoped 两层
+### 4.5 能力模型：ambient 是唯一的 posture
 
 | 层 | 内容 | 默认 | 收紧方式 |
 |----|------|------|----------|
-| **ambient WASI** | fs/env/stdio/args/network | AllowAll（继承宿主环境） | `--deny-wasi`（可按指纹记忆） |
-| **scoped 能力** | `process`（按 argv）、`http`（按 origin）、凭证投递 | 空 | 只有显式同意才授予 |
+| **ambient WASI** | fs/env/stdio/args/network | 恒开（继承宿主环境） | 无——0.8.0 删了 `--deny-wasi` 与 `WasiPolicy`；要边界就在 OS 层围住 tau 进程 |
+| **world 划分** | `process`/`http`/`ws`/`ingress` 只出现在 `bridge` world | 由组件类型决定 | 不是门：链接得到即用得到，调用时不再检查 |
 
-这张表说的是机制，不是边界：scoped 的门只对愿意走门的组件成立，ambient
-层的实际可达面是整个宿主进程级的东西（全宿主 FS 读写 + 网络 + env/argv），
-且可被 guest 绕开。诚实表述与收紧开关见 `docs/extensions.md` §7。
+这张表说的是机制，不是边界：ambient 层的实际可达面是整个宿主进程级的
+东西（全宿主 FS 读写 + 网络 + env/argv），且可被 guest 直接 import
+`wasi:sockets` / `wasi:filesystem` 绕开。诚实表述见
+`docs/extensions.md` §7（wit-review F1）。
 
-scoped 能力的一组共同语义，是整套安全设计的骨架：
+0.8.0 之后剩下的一组语义，是整套设计的骨架：
 
-- **「给即同意」（giving IS the consent）**：`--mcp-command` 的 argv、
-  `--provider-origin` 的 origin、`--provider-auth` 的 token——传给
-  宿主这个动作本身就是授权，不存在第二份配置漂移的可能。桥只经
-  `TAU_MCP_COMMAND`/`TAU_MCP_URL` 两个环境变量得知自己被允许做什么。
-- **调用时失败，而非实例化时失败**：能力永远链接、默认授予为空。
-  没授权的组件照样加载，到真正调用那一刻才 permission-denied——
-  错误发生在离用户决定最近的地方。
-- **秘密投递不落盘**：bearer token 由用户显式交给宿主，注入每个
-  request 的 `auth.bearer`；宿主从不持久化秘密本身，可以记忆的只有
-  *投递授权*（记忆后 `TAU_PROVIDER_AUTH` 才流得动）。
-- **出口检查器与客户端同语义**：`http` 能力的 origin 检查与 reqwest
-  解析 URL 的方式一致（authority 止于 `/ ? # \`，userinfo、尾点、
-  端口规范化全部对齐并已做差分对账），且**重定向永不跟随**——
-  跟随就等于把请求搬到用户没同意的 origin。
+- **world 即声明**：一个只做工具的组件拿不到 spawn——不是因为在调用
+  时被拒，而是因为 `extension` world 根本不 import `process`。
+- **安装即授权**：唯一一次授权动作是安装/信任签名。`--mcp-command`
+  的 argv、`--mcp-url`、`--ingress` 的监听地址都是宿主配置，不是
+  运行时许可；桥只经 `TAU_MCP_COMMAND`/`TAU_MCP_URL` 两个环境变量
+  得知自己被配置成了什么。
+- **重定向永不跟随**：`http` 不设 origin 白名单（0.8.0 删了），但
+  **重定向永不跟随**——跟随就等于把请求搬到组件没点名的 endpoint。
+- **不做秘密保管**：宿主从不持久化任何秘密；0.8.0 随 world provider
+  一起删掉了凭证投递（`--provider-auth`/`TAU_PROVIDER_AUTH`），内置
+  provider 的凭据直接读环境变量。
 
 ### 4.6 探针：影响执行的唯一通道
 
@@ -247,19 +249,14 @@ before_tool → after_tool → before_run_end`，外加 `before_compaction`
    harness，也不得静默变瞎——非平凡 verdict 同时发布到事件总线，
    决策轨迹不丢。
 
-### 4.7 Provider 组件
+### 4.7 Provider 组件（0.8.0 删除）
 
-- **流式输出**：`run(request)` 是 async（0.7.0 起），返回
-  `tuple<stream<event>, future<…>>`——组件把 text-delta /
-  audio-delta / tool-call-delta / done / error 顺序写进流（事件已
-  类型化，镜像 `ModelEvent`），宿主按自己的节奏 drain，future 报
-  宿主对这条流的判决（早关为 err）。组件在 core 眼里仍是一个普通
-  `Model`。
-- **模型清单强制**：`--model` 必须命中 `list-models()`（§4.2）。
-- **永不 trap 契约**：请求/传输失败走 error 事件 + `done{stop:
-  "error"}`；trap 是组件违约，宿主按 §4.3 兜底但不鼓励。
-- **网络出口**走 §4.5 的 `http` 能力：与桥同一条 consent-gated 通道、
-  同一个宿主实现（`http.rs`）、同一套 origin 语义。
+模型不是扩展点：`world provider` / `world realtime` /
+`interface models` / `interface session`，连同 `--provider-wasm` /
+`--provider-origin` / `--provider-auth`，一起删除。模型集合封闭、
+由本仓库内置并随发布节奏演进，逃生舱是 OpenAI 兼容的 base URL；
+媒体面全程宿主内部（§4.5、`docs/realtime-av.md`）。0.7.0 的本节
+内容见 `CHANGELOG.md` 历史与仓库历史。
 
 ### 4.8 Bridge 组件：核心不知道 MCP 存在
 
@@ -269,7 +266,8 @@ before_tool → after_tool → before_run_end`，外加 `before_compaction`
 工具暴露给 agent）。参考实现 `examples/mcp-bridge`：stdio + streamable
 HTTP 双传输、协议版本协商（不会说的版本大声拒绝，不糊弄分歧语义）、
 单条消息 16 MiB 上限（防内存淹没）、服务器中途死亡后 respawn +
-重握手。宿主对协议零感知——它只授予 spawn/http 能力。
+重握手。宿主对协议零感知——它只提供 world 声明的那几个能力
+（spawn/http/ws/ingress）。
 
 ### 4.9 分发：OCI 与「一个文件」哲学
 
@@ -279,7 +277,7 @@ dance、wasm layer mediaType 约定），`oci://` 引用可用于一切接受组
 路径的 CLI 参数。拉取侧：manifest 每次新取（可变 tag 才能看到新
 digest）、blob 先验 sha256 再落盘、内容寻址缓存命中校验、腐坏缓存
 重拉而不是喂坏字节。**拉回来的字节走与本地文件完全相同的加载路径**
-——签名、信任、按指纹的授权记忆原样生效。OCI 解决「从哪来」，
+——签名与信任原样生效。OCI 解决「从哪来」，
 签名解决「是谁的」，两者正交。
 
 ## 5. 横切设计不变量
@@ -288,21 +286,21 @@ digest）、blob 先验 sha256 再落盘、内容寻址缓存命中校验、腐�
 新代码必须维持：
 
 1. **fail-closed 方向**：安全检查的两个失败方向里，「误判拒绝」是
-   安全的（误伤），「误判放行」是漏洞。所有 gate 的规范化歧义
-   （尾点、空端口、IDN、大小写）一律向拒绝侧倒。
+   安全的（误伤），「误判放行」是漏洞。0.8.0 撤掉调用时门之后，
+   每一次剩下的判断（签名节腐坏、存储键形状）仍然一律向拒绝侧倒。
 2. **检查器与执行路径同语义**：安全检查的解析器必须和它守护的执行
-   者解析同一份输入的方式一致（origin 检查 vs reqwest 是最痛的一
-   课）；最强的钉是差分一致测试——gate 接受的每个 URL，客户端必须
-   解析出同一个 origin。
+   者解析同一份输入的方式一致（origin 检查 vs reqwest 是 0.7.0 最
+   痛的一课，那道门本身已于 0.8.0 删除）；这条不变量在客户端语义上
+   的现代表达是 `http` 永不跟随重定向——判定「请求去哪」和执行
+   「请求去哪」必须是同一个答案。
 3. **宽松旗标只豁免它点名的状态**：`--allow-unsigned` 豁免缺失，
    永不豁免腐坏。每个 escape hatch 都要回答「它洗白什么、不洗白
    什么」。
-4. **契约必须在选择点强制**：广告-选择分离的接口（list-models vs
-   --model），不强制等于没有契约——而强制之日先违规的往往是自己
-   的测试套件。
-5. **存储层自己校验键形状**：键拼文件名的存储（consent/trust/
-   keys），形状校验落在副作用发生的那一层，不信生产者的
-   不变量。
+4. **契约必须在选择点强制**：能宣传什么就必须能兑现什么——桥的
+   `definitions()` 里解析不了的 `parameters-json` 让加载当场失败
+   （F5），因为静默放宽就是一张假账单。
+5. **存储层自己校验键形状**：键拼文件名的存储（trust/keys），
+   形状校验落在副作用发生的那一层，不信生产者的不变量。
 6. **降级必须带恢复力**：单点降级（trap→continue/error）不等于
    容错，每个降级声称都要钉「之后还能正常干活」。
 
@@ -310,13 +308,14 @@ digest）、blob 先验 sha256 再落盘、内容寻址缓存命中校验、腐�
 
 - **核心无 MCP**（§4.8）、核心无 wasm（tau-ext 才碰 wasmtime）、
   核心无网络。
-- **不做 secret 保管**：宿主只按用户当次的显式交付转发秘密，记忆
-  的永远只是授权。
-- **不发明沙箱**：能力边界就是 wasm 运行时 + world 划分 + scoped
-  能力的宿主实现，没有额外的进程隔离层（被 spawn 的 MCP server 是
-  用户自己选的风险，与原生 MCP 客户端相同）。
+- **不做 secret 保管**：宿主从不持久化任何秘密；内置 provider 的
+  凭据直接读环境变量，不落 tau 的盘。
+- **不发明沙箱**：能力边界只有 wasm 运行时 + world 划分——0.8.0
+  撤掉 scoped 门之后没有第二层，被 spawn 的 MCP server 是用户自己
+  选的风险，与原生 MCP 客户端相同。
 - **内置工具在沙箱之外**：`read/write/edit/ls/grep/find/bash/
-  powershell` 是宿主代码，`--deny-wasi` 只管 wasm 组件、管不到它们；
+  powershell` 是宿主代码，wasm 侧从来管不到它们（0.8.0 起连
+  `--deny-wasi` 这个开关也不存在了）；
   唯一的关断是启动时的 `--tools` / `--no-builtin-tools`
   （`docs/builtin-tools.md`）。**唯一例外是 ACP 模式**：编辑器在连接
   的另一端，四个 mutating 内置工具经 `session/request_permission` 先
@@ -332,16 +331,16 @@ digest）、blob 先验 sha256 再落盘、内容寻址缓存命中校验、腐�
 | 文档 | 内容 |
 |------|------|
 | `wit/tau.wit` | 扩展契约（先读这个） |
-| `docs/extensions.md` | 扩展作者指南：scaffold → 三 world → 签名 → OCI |
+| `docs/extensions.md` | 扩展作者指南：scaffold → 两个 world → 签名 → OCI |
 | `docs/builtin-tools.md` | 内置工具：八个原生工具、两个旗标、沙箱诚实性 |
 | `docs/acp.md` | ACP 模式：编辑器接入、会话映射、事件表、权限门 |
 | `docs/probes.md` | 九个探针点的载荷与 verdict 语义 |
 | `docs/events.md` | 事件总线 / 探针 / 控制通道的三通道模型 |
 | `docs/bridges.md` | 桥的能力模型与 MCP 参考实现 |
-| `docs/signing.md` | 签名格式、信任存储、授权记忆 |
+| `docs/signing.md` | 签名格式与信任存储（授权记忆 0.8.0 已删） |
 | `docs/oci.md` | OCI 分发链路 |
 | `docs/media.md` | 多模态与 blob 存储 |
-| `docs/realtime-av.md` | 实时音视频：RealtimeSession、WIT world realtime、设备 consent 门类 |
+| `docs/realtime-av.md` | 实时音视频：RealtimeSession（媒体面全在宿主内）；world realtime 与设备门类 0.8.0 已删，文内标注 |
 | `docs/repl.md` | REPL 与 pi 的命令面对齐：对照表、口径、分层挂账 |
 | `docs/wasip3-streams.md` | wasip3 stream 迁移的工具链现状与解锁条件 |
 | `docs/release.md` / `docs/perf.md` | 发布流程 / 性能基线 |

@@ -98,7 +98,8 @@ impl Tool for LoadSkillTool {
                     Some(path) => format!("{name}/{path}"),
                     None => format!("{name}/SKILL.md"),
                 };
-                let limit = if truncation.truncated_by == Some(crate::truncate::TruncatedBy::Bytes) {
+                let limit = if truncation.truncated_by == Some(crate::truncate::TruncatedBy::Bytes)
+                {
                     format_size(DEFAULT_MAX_BYTES)
                 } else {
                     format!("{DEFAULT_MAX_LINES} lines")
@@ -142,7 +143,11 @@ mod tests {
     async fn loads_the_body_and_names_the_available_skills() {
         let (_dir, index) = index();
         let tool = LoadSkillTool::new(index, None);
-        assert!(tool.def().description.contains("foo"), "{}", tool.def().description);
+        assert!(
+            tool.def().description.contains("foo"),
+            "{}",
+            tool.def().description
+        );
         let out = tool.execute(serde_json::json!({"name": "foo"})).await;
         assert!(!out.is_error);
         let text = serde_json::to_value(&out.content).expect("json");
@@ -161,7 +166,9 @@ mod tests {
             .execute(serde_json::json!({"name": "foo", "path": "../secret.txt"}))
             .await;
         assert!(escape.is_error);
-        let text = serde_json::to_value(&escape.content).expect("json").to_string();
+        let text = serde_json::to_value(&escape.content)
+            .expect("json")
+            .to_string();
         assert!(text.contains("climbs out of the skill directory"), "{text}");
     }
 
@@ -196,8 +203,16 @@ mod tests {
         let tool = LoadSkillTool::new(SkillIndex::discover(dir.path()), None);
         let out = tool.execute(serde_json::json!({"name": "big"})).await;
         assert!(!out.is_error);
-        let text = serde_json::to_value(&out.content).expect("json").to_string();
-        assert!(text.contains("big/SKILL.md is"), "the notice names the file: {text}");
-        assert!(text.contains("showing the first"), "…and says how much it showed: {text}");
+        let text = serde_json::to_value(&out.content)
+            .expect("json")
+            .to_string();
+        assert!(
+            text.contains("big/SKILL.md is"),
+            "the notice names the file: {text}"
+        );
+        assert!(
+            text.contains("showing the first"),
+            "…and says how much it showed: {text}"
+        );
     }
 }

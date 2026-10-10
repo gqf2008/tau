@@ -17,8 +17,8 @@
 
 use serde_json::Value as Json;
 
-use crate::bindings::tau::extension::types as wit;
 use crate::bindings::exports::tau::extension::{probes as wit_probes, tools as wit_tools};
+use crate::bindings::tau::extension::types as wit;
 use tau_core::model::StopReason;
 use tau_core::probe::ProbePoint;
 use tau_core::probe_payload::{
@@ -47,7 +47,9 @@ pub enum ConvertError {
     #[error("probe tool '{0}': parameters-json is not valid JSON")]
     BadToolSchema(String),
     /// The message exceeds [`MAX_HOST_MESSAGE_BYTES`].
-    #[error("message payload {0} bytes exceeds the {MAX_HOST_MESSAGE_BYTES}-byte host-channel limit")]
+    #[error(
+        "message payload {0} bytes exceeds the {MAX_HOST_MESSAGE_BYTES}-byte host-channel limit"
+    )]
     TooLarge(usize),
     /// A probe answered with a payload belonging to another point. The
     /// contract makes the pairing the host's to validate (`invalid`); the
@@ -182,7 +184,9 @@ pub fn result_block_to_wit(block: &ResultBlock) -> wit::ResultBlock {
 /// Convert a guest tool result's blocks (0.3.0 multi-block contract,
 /// docs/tool-media.md), enforcing the same total size cap as the host
 /// channel: oversize fails closed, it never silently truncates.
-pub fn result_blocks_to_core(blocks: Vec<wit::ResultBlock>) -> Result<Vec<ResultBlock>, ConvertError> {
+pub fn result_blocks_to_core(
+    blocks: Vec<wit::ResultBlock>,
+) -> Result<Vec<ResultBlock>, ConvertError> {
     let mut total = 0usize;
     for block in &blocks {
         total += result_block_bytes(block);
@@ -326,20 +330,20 @@ pub fn point_to_wit(point: ProbePoint) -> wit_probes::Point {
 /// arm the point carries.
 pub fn payload_to_wit(payload: &ProbePayload) -> wit_probes::Payload {
     match payload {
-        ProbePayload::BeforeRun(p) => {
-            wit_probes::Payload::BeforeRun(message_to_wit(&p.prompt))
-        }
+        ProbePayload::BeforeRun(p) => wit_probes::Payload::BeforeRun(message_to_wit(&p.prompt)),
         ProbePayload::TransformContext(p) => {
             wit_probes::Payload::TransformContext(wit_probes::AssembledContext {
                 system: p.system.clone(),
                 messages: p.messages.iter().map(message_to_wit).collect(),
             })
         }
-        ProbePayload::BeforeRequest(p) => wit_probes::Payload::BeforeRequest(wit_probes::FinalRequest {
-            system: p.system.clone(),
-            messages: p.messages.iter().map(message_to_wit).collect(),
-            tools: p.tools.iter().map(definition_to_wit).collect(),
-        }),
+        ProbePayload::BeforeRequest(p) => {
+            wit_probes::Payload::BeforeRequest(wit_probes::FinalRequest {
+                system: p.system.clone(),
+                messages: p.messages.iter().map(message_to_wit).collect(),
+                tools: p.tools.iter().map(definition_to_wit).collect(),
+            })
+        }
         ProbePayload::AfterResponse(p) => {
             wit_probes::Payload::AfterResponse(wit_probes::AssembledResponse {
                 message: message_to_wit(&p.message),
@@ -368,9 +372,7 @@ pub fn payload_to_wit(payload: &ProbePayload) -> wit_probes::Payload {
                 summary: p.summary.clone(),
             })
         }
-        ProbePayload::SessionStart(p) => {
-            wit_probes::Payload::SessionStart(session_facts_to_wit(p))
-        }
+        ProbePayload::SessionStart(p) => wit_probes::Payload::SessionStart(session_facts_to_wit(p)),
         ProbePayload::Branch(p) => wit_probes::Payload::Branch(wit_probes::Branch {
             previous: p.previous.clone(),
             to: p.to.clone(),
@@ -400,14 +402,16 @@ pub fn payload_from_point(
         wit_probes::Payload::BeforeRequest(p) => ProbePayload::BeforeRequest(FinalRequest {
             system: p.system,
             messages: messages_to_core(p.messages)?,
-            tools: p.tools.into_iter().map(definition_to_core).collect::<Result<Vec<_>, _>>()?,
+            tools: p
+                .tools
+                .into_iter()
+                .map(definition_to_core)
+                .collect::<Result<Vec<_>, _>>()?,
         }),
-        wit_probes::Payload::AfterResponse(p) => {
-            ProbePayload::AfterResponse(AssembledResponse {
-                message: message_to_core(p.message)?,
-                stop: stop_to_core(p.stop),
-            })
-        }
+        wit_probes::Payload::AfterResponse(p) => ProbePayload::AfterResponse(AssembledResponse {
+            message: message_to_core(p.message)?,
+            stop: stop_to_core(p.stop),
+        }),
         wit_probes::Payload::BeforeTool(call) => ProbePayload::BeforeTool(tool_call_to_core(call)?),
         wit_probes::Payload::AfterTool(p) => ProbePayload::AfterTool(ToolOutcome {
             call: tool_call_to_core(p.call)?,
@@ -418,19 +422,17 @@ pub fn payload_from_point(
             messages: messages_to_core(p.messages)?,
             stop: stop_to_core(p.stop),
         }),
-        wit_probes::Payload::BeforeCompaction(p) => {
-            ProbePayload::BeforeCompaction(Compaction {
-                reason: p.reason,
-                messages: messages_to_core(p.messages)?,
-            })
+        wit_probes::Payload::BeforeCompaction(p) => ProbePayload::BeforeCompaction(Compaction {
+            reason: p.reason,
+            messages: messages_to_core(p.messages)?,
+        }),
+        wit_probes::Payload::BeforeNavigation(p) => ProbePayload::BeforeNavigation(Navigation {
+            target: p.target,
+            summary: p.summary,
+        }),
+        wit_probes::Payload::SessionStart(p) => {
+            ProbePayload::SessionStart(session_facts_to_core(p))
         }
-        wit_probes::Payload::BeforeNavigation(p) => {
-            ProbePayload::BeforeNavigation(Navigation {
-                target: p.target,
-                summary: p.summary,
-            })
-        }
-        wit_probes::Payload::SessionStart(p) => ProbePayload::SessionStart(session_facts_to_core(p)),
         wit_probes::Payload::Branch(p) => ProbePayload::Branch(Branch {
             previous: p.previous,
             to: p.to,
@@ -553,9 +555,9 @@ fn media_bytes(media: &wit::Media) -> usize {
 fn block_bytes(content: &wit::Content) -> usize {
     match content {
         wit::Content::Text(text) => text.len(),
-        wit::Content::Image(media)
-        | wit::Content::Audio(media)
-        | wit::Content::Video(media) => media_bytes(media),
+        wit::Content::Image(media) | wit::Content::Audio(media) | wit::Content::Video(media) => {
+            media_bytes(media)
+        }
         wit::Content::File(file) => {
             media_bytes(&file.media) + file.name.as_ref().map_or(0, String::len)
         }
@@ -572,7 +574,9 @@ mod tests {
 
     fn corpus() -> Vec<Content> {
         vec![
-            Content::Text { text: String::new() },
+            Content::Text {
+                text: String::new(),
+            },
             Content::Text {
                 text: "héllo 你好 🦀\nwith\nlines".into(),
             },
@@ -622,7 +626,9 @@ mod tests {
             },
             Content::ToolResult {
                 call_id: "call_2".into(),
-                content: vec![tau_core::Content::Text { text: "boom".into() }],
+                content: vec![tau_core::Content::Text {
+                    text: "boom".into(),
+                }],
                 is_error: true,
             },
             // 0.3.0 (docs/tool-media.md): a tool result carrying real
@@ -713,7 +719,9 @@ mod tests {
     fn oversize_tool_result_fails_closed() {
         // The host-channel cap applies to tool-result blocks too: one
         // giant block or a total over the limit both fail closed.
-        let huge = vec![wit::ResultBlock::Text("x".repeat(MAX_HOST_MESSAGE_BYTES + 1))];
+        let huge = vec![wit::ResultBlock::Text(
+            "x".repeat(MAX_HOST_MESSAGE_BYTES + 1),
+        )];
         assert!(matches!(
             result_blocks_to_core(huge),
             Err(ConvertError::TooLarge(_))

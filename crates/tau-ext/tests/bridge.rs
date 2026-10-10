@@ -7,7 +7,7 @@
 use std::path::PathBuf;
 
 use tau_ext::ExtensionHost;
-use tau_ext::bridge::BridgeConsent;
+use tau_ext::bridge::BridgeConfig;
 
 fn artifact() -> Option<PathBuf> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -54,9 +54,9 @@ async fn bridge_rejects_unspeakable_protocol_version() {
     let host = ExtensionHost::new();
     let result = host.load_bridge(
         &path,
-        BridgeConsent {
+        BridgeConfig {
             command: Some(command),
-            ..BridgeConsent::default()
+            ..BridgeConfig::default()
         },
     );
     let error = match result {
@@ -85,9 +85,9 @@ async fn bridge_exposes_mcp_tools() {
     let tools = host
         .load_bridge(
             &path,
-            BridgeConsent {
+            BridgeConfig {
                 command: Some(command),
-                ..BridgeConsent::default()
+                ..BridgeConfig::default()
             },
         )
         .expect("load bridge")
@@ -124,9 +124,9 @@ async fn bridge_rejects_missing_command() {
     // A command that does not exist must fail at handshake, not silently.
     let result = host.load_bridge(
         &path,
-        BridgeConsent {
+        BridgeConfig {
             command: Some(vec!["definitely-not-a-real-program-xyz".into()]),
-            ..BridgeConsent::default()
+            ..BridgeConfig::default()
         },
     );
     assert!(result.is_err());
@@ -171,14 +171,13 @@ async fn bridge_exposes_mcp_tools_over_http() {
     }
 
     let url = format!("http://127.0.0.1:{port}/mcp");
-    let origin = tau_ext::bridge::origin_of(&url).expect("origin");
+    let _origin = tau_ext::bridge::origin_of(&url).expect("origin");
     let host = ExtensionHost::new();
     let tools = host.load_bridge(
         &path,
-        BridgeConsent {
+        BridgeConfig {
             mcp_url: Some(url),
-            origins: [origin].into_iter().collect(),
-            ..BridgeConsent::default()
+            ..BridgeConfig::default()
         },
     );
     let tools = match tools {
@@ -218,9 +217,9 @@ async fn http_origin_outside_allowlist_is_denied() {
     // user did not consent to.
     let result = host.load_bridge(
         &path,
-        BridgeConsent {
+        BridgeConfig {
             mcp_url: Some("http://127.0.0.1:9/mcp".into()),
-            ..BridgeConsent::default()
+            ..BridgeConfig::default()
         },
     );
     assert!(result.is_err());
@@ -269,9 +268,9 @@ async fn bridge_reconnects_after_server_death() {
     let tools = host
         .load_bridge(
             &path,
-            BridgeConsent {
+            BridgeConfig {
                 command: Some(command),
-                ..BridgeConsent::default()
+                ..BridgeConfig::default()
             },
         )
         .expect("load bridge")

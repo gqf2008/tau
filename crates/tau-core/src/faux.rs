@@ -311,10 +311,16 @@ fn demo_round(req: &Request, pick: Option<&str>) -> Vec<ModelEvent> {
         });
     let middle = match outcome {
         Some((content, false)) => {
-            format!("The tool answered: {}. ", crate::types::tool_result_text(&content))
+            format!(
+                "The tool answered: {}. ",
+                crate::types::tool_result_text(&content)
+            )
         }
         Some((content, true)) => {
-            format!("The tool failed: {}. ", crate::types::tool_result_text(&content))
+            format!(
+                "The tool failed: {}. ",
+                crate::types::tool_result_text(&content)
+            )
         }
         None => String::new(),
     };
@@ -411,7 +417,9 @@ mod realtime_tests {
             kinds,
             vec![
                 ModelEvent::SpeechStarted,
-                ModelEvent::TextDelta { text: "live echo active. ".into() },
+                ModelEvent::TextDelta {
+                    text: "live echo active. ".into()
+                },
                 ModelEvent::InputAudioChunk {
                     data: vec![1, 2, 3, 4],
                     media_type: "audio/pcm;rate=16000".into()
@@ -430,7 +438,9 @@ mod realtime_tests {
                 },
                 ModelEvent::Interrupted,
                 ModelEvent::SpeechStopped,
-                ModelEvent::Done { stop: StopReason::Stop },
+                ModelEvent::Done {
+                    stop: StopReason::Stop
+                },
             ]
         );
     }
@@ -443,11 +453,22 @@ mod realtime_tests {
         // open a new block (what played is what the user heard — no
         // silent concatenation across the truncation).
         let model = FauxModel::scripted(vec![vec![
-            ModelEvent::AudioDelta { data: vec![1, 2], media_type: "audio/pcm".into() },
+            ModelEvent::AudioDelta {
+                data: vec![1, 2],
+                media_type: "audio/pcm".into(),
+            },
             ModelEvent::Interrupted,
-            ModelEvent::AudioDelta { data: vec![3], media_type: "audio/pcm".into() },
-            ModelEvent::AudioDelta { data: vec![4], media_type: "audio/pcm".into() },
-            ModelEvent::Done { stop: StopReason::Stop },
+            ModelEvent::AudioDelta {
+                data: vec![3],
+                media_type: "audio/pcm".into(),
+            },
+            ModelEvent::AudioDelta {
+                data: vec![4],
+                media_type: "audio/pcm".into(),
+            },
+            ModelEvent::Done {
+                stop: StopReason::Stop,
+            },
         ]]);
         let agent = crate::Agent::new(Box::new(model), crate::ToolRegistry::new());
         let produced = agent.run(&[], crate::Message::user("talk")).await.unwrap();
@@ -475,11 +496,18 @@ mod realtime_tests {
         // Uplink kinds flowing through the loop (a realtime driver
         // shape) must not pollute the assistant message.
         let model = FauxModel::scripted(vec![vec![
-            ModelEvent::InputAudioChunk { data: vec![9; 8], media_type: "audio/pcm".into() },
+            ModelEvent::InputAudioChunk {
+                data: vec![9; 8],
+                media_type: "audio/pcm".into(),
+            },
             ModelEvent::SpeechStarted,
             ModelEvent::SpeechStopped,
-            ModelEvent::TextDelta { text: "heard you. ".into() },
-            ModelEvent::Done { stop: StopReason::Stop },
+            ModelEvent::TextDelta {
+                text: "heard you. ".into(),
+            },
+            ModelEvent::Done {
+                stop: StopReason::Stop,
+            },
         ]]);
         let agent = crate::Agent::new(Box::new(model), crate::ToolRegistry::new());
         let produced = agent.run(&[], crate::Message::user("talk")).await.unwrap();
@@ -489,7 +517,9 @@ mod realtime_tests {
             .expect("assistant message");
         assert_eq!(
             assistant.content,
-            vec![Content::Text { text: "heard you. ".into() }]
+            vec![Content::Text {
+                text: "heard you. ".into()
+            }]
         );
     }
 
@@ -619,7 +649,9 @@ mod tests {
             role: crate::types::Role::Assistant,
             content: vec![crate::types::Content::ToolResult {
                 call_id: "demo-call-1".into(),
-                content: vec![crate::types::Content::Text { text: "SAY HI".into() }],
+                content: vec![crate::types::Content::Text {
+                    text: "SAY HI".into(),
+                }],
                 is_error: false,
             }],
         });
@@ -860,7 +892,9 @@ mod tests {
             produced[2].content[0],
             Content::ToolResult {
                 call_id: "call-1".into(),
-                content: vec![crate::types::Content::Text { text: "unknown tool: reverse".into() }],
+                content: vec![crate::types::Content::Text {
+                    text: "unknown tool: reverse".into()
+                }],
                 is_error: true,
             }
         );
@@ -940,7 +974,9 @@ mod tests {
             produced[2].content[0],
             Content::ToolResult {
                 call_id: "call-1".into(),
-                content: vec![crate::types::Content::Text { text: "blocked: policy: 'abc' is on the deny list".into() }],
+                content: vec![crate::types::Content::Text {
+                    text: "blocked: policy: 'abc' is on the deny list".into()
+                }],
                 is_error: true,
             }
         );
@@ -1122,7 +1158,9 @@ mod control_tests {
 
         async fn execute(&self, _arguments: serde_json::Value) -> ToolOutput {
             ToolOutput {
-                content: vec![crate::types::Content::Text { text: "done".into() }],
+                content: vec![crate::types::Content::Text {
+                    text: "done".into(),
+                }],
                 is_error: false,
             }
         }

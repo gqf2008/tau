@@ -30,14 +30,17 @@ extensible — but extensions are **wasm components**, not in-process scripts.
 - **Extensions**: drop a `.wasm` in. Components implement the
   `tau:extension` WIT world (`wit/tau.wit`): `tools` (contribute agent
   tools), `probes` (observe and influence the run), and the `host`
-  channel back into the harness (notifications/facts always; session
-  injection behind `--allow-inject`).
-  Ambient WASI (fs/env/stdio/network) is granted by default;
-  `--deny-wasi` restores the deny-all sandbox (remembered per fingerprint
-  with `--remember`, sticky until `tau consent --revoke`). Scoped capabilities
-  (bridge process/http, provider origins) stay consent-gated.
+  channel back into the harness (notifications and facts always; session
+  injection needs no flag — installing the component is the
+  authorization).
+  Ambient WASI (fs/env/stdio/args/network) is granted, always, and a
+  component runs with the permissions of the tau process: 0.8.0 deleted
+  `--deny-wasi` and every per-capability gate. Signing answers *which*
+  component this is, never *what it may do* — a real boundary is an
+  OS-level one around the tau process. The `bridge` world is the only
+  world that imports `process`/`http`/`ws`/`ingress`.
   **Writing one? `docs/extensions.md` is the author guide (the API surface,
-  the three worlds); `docs/tutorial.md` walks the same path hands-on —
+  the two worlds); `docs/tutorial.md` walks the same path hands-on —
   scaffold → sign → OCI, every command with its output.**
 - **Signing**: components must carry an embedded ed25519 signature from a
   trusted key (`tau keygen` / `tau sign` / `tau trust`); `--allow-unsigned`
@@ -48,31 +51,32 @@ extensible — but extensions are **wasm components**, not in-process scripts.
   unreferenced blobs (dry-run by default). See `docs/media.md`.
 - **Distribution**: components push to and pull from any OCI registry
   (`tau push ext.wasm oci://ghcr.io/org/ext:tag`, then `-e oci://…` to
-  load), content-addressed cache, digest-verified; signature/trust/consent
+  load), content-addressed cache, digest-verified; signature/trust
   apply to pulled bytes unchanged. See `docs/oci.md`.
 - **Bridges**: no MCP in core. External tool protocols (MCP) are translated
-  by bridge components over a consent-gated spawn-with-pipes capability
-  (`--mcp-bridge b.wasm --mcp-command '["python","server.py"]'`).
-  See `docs/bridges.md`.
-- **Models**: three built-in APIs — OpenAI chat completions (`--provider openai`),
-  OpenAI Responses (`--provider responses`), Anthropic Messages
-  (`--provider anthropic`); plus wasm provider components
-  (`--provider-wasm x.wasm --model id`) pushing stream events through the
-  `events.emit` host channel, with consent-gated HTTP egress
-  (`--provider-origin`, remembered with `--remember`) and bearer
-  credential delivery (`--provider-auth`; the token is never persisted,
-  the delivery grant can be — then `TAU_PROVIDER_AUTH` flows without the
-  flag). Messages are
+  by bridge components — the only world that imports spawn-with-pipes,
+  http/ws and ingress. The host configures those
+  (`--mcp-bridge b.wasm --mcp-command '["python","server.py"]'`); since
+  0.8.0 it does not gate them at call time. See `docs/bridges.md`.
+- **Models**: the model set is closed and host-owned — three built-in
+  APIs, OpenAI chat completions (`--provider openai`), OpenAI Responses
+  (`--provider responses`) and Anthropic Messages (`--provider anthropic`),
+  each pointed at a configurable base URL through the environment
+  (`OPENAI_BASE_URL` takes any OpenAI-compatible gateway;
+  `ANTHROPIC_BASE_URL` for Messages). Since 0.8.0 no
+  component is a model: `world provider` and `world realtime` are gone,
+  and a vendor tau does not ship has no component path — coverage is
+  release cadence. Messages are
   multimodal: text, image, audio, video, and file blocks, mapped per API
   (or degraded to placeholders where the API has no equivalent block).
-- **Realtime voice**: providers can additionally export the `realtime`
-  world (full-duplex sessions: streamed audio in/out, VAD, barge-in) —
-  try the REPL's `/live N [sine]` against `examples/realtime-echo` or the
-  built-in demo provider. Downlink audio plays live through a lazy
-  playback sink (text-only sessions never touch the audio device); a
-  real microphone uplink behind a wasm provider requires the
-  `--microphone` consent (remembered with `--remember`), the synthetic
-  `sine` uplink needs no grant. See `docs/realtime-av.md`.
+- **Realtime voice**: the media plane is host-internal end to end (0.8.0):
+  device I/O, the clock, the jitter buffer and playback belong to the
+  host, and no component sits on the audio path — the `realtime` world
+  and the `--microphone` consent went with it. Try the REPL's
+  `/live N [sine]` against the built-in demo; downlink audio plays live
+  through a lazy playback sink (text-only sessions never touch the audio
+  device), a real microphone needs only the user typing the command, and
+  the synthetic `sine` uplink needs no grant. See `docs/realtime-av.md`.
 - **Editor-attached mode**: `tau --acp` speaks the Agent Client Protocol
   (JSON-RPC over stdin/stdout) to Zed and anything else that hosts ACP
   agents — native, no adapter and no second binary. One process serves
@@ -129,8 +133,8 @@ tau is alive. The tool answered: SHOUT HELLO TAU. (faux model — …)
 See `CHANGELOG.md` for what's in each version. `scripts/validate.sh`
 proves the release candidate the way a first user meets it (demo,
 built-in tools, skills discovery, an ACP client over real pipes,
-signing/trust chain, built-in provider against a loopback mock,
-wasm-provider consent gate)
+signing/trust chain, the built-in providers against a loopback mock,
+the wasm host channel)
 and restores the environment afterwards. `scripts/release.sh` runs the full suite, rebuilds the wasm
 examples, builds the release binary (lto + strip), and assembles
 `dist/tau-<version>-<target>.zip` with the binary, README, LICENSE, docs/,
@@ -143,14 +147,12 @@ and prebuilt (unsigned) example components.
 | `crates/tau-core` | domain model, session tree, agent loop, probe registry, faux model |
 | `crates/tau-openai` | OpenAI chat completions + Responses API providers |
 | `crates/tau-anthropic` | Anthropic Messages API provider |
-| `crates/tau-ext` | wasmtime component host (WASI open by default) |
+| `crates/tau-ext` | wasmtime component host (ambient WASI, two worlds) |
 | `crates/tau-tools` | built-in native tools (read/write/edit/ls/grep/find/bash/powershell) |
 | `crates/tau-cli` | `tau` binary (print, interactive, and `--acp` modes) |
 | `wit/tau.wit` | the extension contract, versioned |
 | `docs/` | architecture (the design doc), extensions (author guide), tutorial (hands-on walkthrough), builtin-tools, skills, acp, probes, events, bridges, signing, oci, media, wasip3-streams, release, perf |
 | `examples/upper` | example wasm extension (tool) |
-| `examples/echo-provider` | example wasm provider (push-mode streaming) |
-| `examples/http-provider` | example wasm provider (consent-gated http) |
 | `examples/mcp-bridge` | example MCP bridge (stdio + streamable HTTP) |
 | `examples/guard` | example probe extension (`before_tool` block verdicts) |
 
@@ -163,7 +165,8 @@ follow-up, `!text` steers after the current turn, Ctrl-C aborts, `/quit`
 exits. Idle commands: `/compact` (summarize history into a compaction
 entry), `/fork [id|#index]` (rewind to an earlier entry and branch from
 there), `/live N [sine]` (N-second full-duplex voice session against a
-realtime-capable provider; Ctrl-C during it is a barge-in interrupt, not
+realtime-capable model — the built-in demo today; Ctrl-C during it is a
+barge-in interrupt, not
 an abort), `/help`. `tau -p "..."` stays one-shot print mode.
 
 ## Testing

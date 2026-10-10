@@ -194,8 +194,14 @@ mod tests {
         // "aaa" sorts first but is user-named (tier 1); "zzz" is a plain
         // user-loaded tool (tier 0) and must win the demo slot.
         let r = registry(vec![
-            Stub { name: "aaa", tier: Some(DEMO_USER_NAMED) },
-            Stub { name: "zzz", tier: Some(DEMO_USER_LOADED) },
+            Stub {
+                name: "aaa",
+                tier: Some(DEMO_USER_NAMED),
+            },
+            Stub {
+                name: "zzz",
+                tier: Some(DEMO_USER_LOADED),
+            },
         ]);
         assert_eq!(r.demo_pick().as_deref(), Some("zzz"));
     }
@@ -203,8 +209,14 @@ mod tests {
     #[test]
     fn demo_pick_breaks_ties_by_name() {
         let r = registry(vec![
-            Stub { name: "bbb", tier: Some(DEMO_USER_LOADED) },
-            Stub { name: "aaa", tier: Some(DEMO_USER_LOADED) },
+            Stub {
+                name: "bbb",
+                tier: Some(DEMO_USER_LOADED),
+            },
+            Stub {
+                name: "aaa",
+                tier: Some(DEMO_USER_LOADED),
+            },
         ]);
         assert_eq!(r.demo_pick().as_deref(), Some("aaa"));
     }
@@ -214,12 +226,21 @@ mod tests {
         // A bash-shaped built-in must never be scripted, even as the only
         // tool in the registry.
         let r = registry(vec![
-            Stub { name: "bash", tier: None },
-            Stub { name: "read", tier: Some(DEMO_USER_NAMED) },
+            Stub {
+                name: "bash",
+                tier: None,
+            },
+            Stub {
+                name: "read",
+                tier: Some(DEMO_USER_NAMED),
+            },
         ]);
         assert_eq!(r.demo_pick().as_deref(), Some("read"));
 
-        let only_mutating = registry(vec![Stub { name: "bash", tier: None }]);
+        let only_mutating = registry(vec![Stub {
+            name: "bash",
+            tier: None,
+        }]);
         assert_eq!(only_mutating.demo_pick(), None);
     }
 

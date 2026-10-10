@@ -1,7 +1,8 @@
 //! Example tau bridge exercising the `ws` capability
-//! (tau:extension@0.7.0, docs/im-channels.md): the `ws_echo` tool
-//! connects to the consented endpoint (TAU_MCP_URL, a ws(s) URL), sends
-//! the argument as one text frame and returns the first frame back.
+//! (tau:extension@0.8.0, docs/im-channels.md): the `ws_echo` tool
+//! connects to the endpoint TAU_MCP_URL names (host config via
+//! --mcp-url, a ws(s) URL), sends the argument as one text frame and
+//! returns the first frame back.
 //!
 //! Waiting is host policy since 0.7.0 — the guest passes no timeout: the
 //! connect budget is the host's (`TAU_WS_CONNECT_TIMEOUT_MS` in tests,
@@ -54,7 +55,7 @@ impl Tools for WsEchoBridge {
     async fn definitions() -> Vec<Definition> {
         vec![Definition {
             name: "ws_echo".into(),
-            description: "Send text over the consented WebSocket and return the echo".into(),
+            description: "Send text over the WebSocket at TAU_MCP_URL and return the echo".into(),
             parameters_json:
                 r#"{ "type": "object", "properties": { "text": { "type": "string" } }, "required": ["text"] }"#
                     .into(),
@@ -114,7 +115,6 @@ async fn echo(
 /// The contract's three-way error, spelled the way the host spells it.
 fn describe(error: ws::Error) -> String {
     match error {
-        ws::Error::Refused(detail) => format!("refused: {detail}"),
         ws::Error::Failed(detail) => format!("failed: {detail}"),
         ws::Error::Invalid(detail) => format!("invalid: {detail}"),
     }

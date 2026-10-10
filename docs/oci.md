@@ -12,7 +12,7 @@ oci://ghcr.io/org/upper@sha256:…     # 不可变 digest（可复现加载的�
 oci://127.0.0.1:5000/test/comp       # 省略 tag = :latest（loopback 走 http）
 ```
 
-任何接受组件路径的 CLI 参数（`-e/--extension`、`--provider-wasm`、`--mcp-bridge`）
+任何接受组件路径的 CLI 参数（`-e/--extension`、`--mcp-bridge`）
 都接受 `oci://` 引用；其余参数一律按本地路径处理。
 
 ## 拉取链路（pull）
@@ -46,7 +46,7 @@ loopback registry（127.0.0.1 / localhost / [::1]）允许明文 http，其余�
 ## 与签名/信任/授权的关系
 
 拉回来的字节走的是**和本地文件完全相同**的加载路径：签名校验、信任策略
-（默认 RequireTrusted，`--allow-unsigned` 逃逸）、按指纹的记忆授权全部原样生效。
+（默认 RequireTrusted，`--allow-unsigned` 逃逸）全部原样生效。
 OCI 解决「组件从哪来」，签名解决「组件是谁的」，两者正交。
 
 tag 是可变的：用 tag 引用时 CLI 会打印解析出的 digest，并提示用

@@ -54,7 +54,8 @@ record tool-result {
 `tools` 接口：`use types.{result-block}`；`execute` 的返回改为同一
 形状（`tool-result{content: list<result-block>, is-error}`，无
 call-id——call-id 由宿主侧配对，访客不需要知道）。bridge world
-export 同一 `tools` 接口，自动跟随。provider world 不动。
+export 同一 `tools` 接口，自动跟随。（0.8.0：provider world 已随
+裁定 2 删除。）
 `content` 变体的 tool-result 分支同样收 `list<result-block>`；
 核心侧 `Content::ToolResult.content: Vec<Content>` 不受此约束
 （嵌套块在写回 WIT 时降级为文本投影）。

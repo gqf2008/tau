@@ -333,12 +333,17 @@ Promise/AsyncIterable）。**这也没证明什么**：`wit-bindgen-cpp` 缺的�
   就要求重建），但要写进契约文档。
 
 **不做的事（本次明确排除）**
+（**0.8.0 注**：本节是 0.7.0 的账。0.8.0 的减法有独立记录——
+`docs/wit-0.8-draft.md`：全部运行时能力门与 `--deny-wasi` 删除、
+`world provider` / `world realtime` 删除、consent 体系与指纹授权记忆
+删除。本节与 §5/§6 里出现的 provider/realtime world、同意门、
+`--deny-wasi`，都是 0.7.0 当时的形状。）
 - `media-source.stream`：大载荷已有 blob 臂（内容寻址、已在盘上），加流臂会让
   `content` 的每一个载体都变成流的所有者；
 - 流式请求体（`http.request` 的 body 仍是值：MCP JSON-RPC 与 OAuth 调用都不大）；
-- `process` 的 env/cwd（宿主自己的过滤与 cwd 是同意故事，argv 才是同意界面展示的东西）；
+- `process` 的 env/cwd（宿主自己的过滤与 cwd 是同意故事，argv 才是同意界面展示的东西；**0.8.0 注**：同意界面整个撤了——world 即声明，argv 与 cwd 都只是宿主配置）；
 - 探针异步化；
-- `host.subscribe` 换流（理由见 §4）。
+- `host.subscribe` 换流（理由见 §4；**0.8.0 注**：拉形态保留到 0.9.0，调用约定统一时再换，见 `docs/extensions.md` §4 的「0.9.0 待改」）。
 
 ## 8. 定夺（2026-09-29）
 
@@ -383,8 +388,16 @@ Promise/AsyncIterable）。**这也没证明什么**：`wit-bindgen-cpp` 缺的�
 2. **浸泡期：固定 4 周（B1）。** 自 0.7.0 发布日（2026-09-30）起满 4 周（至
    2026-10-28）且无契约破坏级缺陷，方可议 1.0.0。
 3. **契约冻结：采纳。** 浸泡期内不做 ABI 破坏 bump；若被迫出 0.8.0，则 1.0.0 时钟
-   归零重计（浸泡期自 0.8.0 发布日重新起算）。
+   归零重计（浸泡期自 0.8.0 发布日重新起算）。**0.8.0 已按此执行**
+   （2026-10-01 发布；裁定与账目见 `docs/wit-0.8-draft.md`）：0.7.0 起的
+   4 周浸泡期作废，1.0.0 的时钟自 0.8.0 发布日重新起算。
 4. **上游跟踪：授权一次。** 向 bytecodealliance/wit-bindgen（cpp 生成器 async 路径的
    `todo!()`）、bytecodealliance/jco（splicer panic，无 async-lift）、tinygo-org/tinygo
    （`runtime.wasiOnIdle` 未实现）各开一条 tracking issue。按惯例外联动作逐次授权，
    本次授权仅覆盖这三条。
+
+**0.8.0 补记（2026-10-01）**：本节四项条件不改口径，两处记账跟着走——
+①**语言矩阵**：0.8.0 之后 `stream`/`future` 只出现在 `bridge` world
+（`world provider` / `world realtime` 已删），异步 ABI 的阻塞面收窄到桥组件；
+复查触发条件不变（`docs/wasm-languages.md` 的 2026-09-30 复查段）。
+②**浸泡期**：按第 3 项，1.0.0 时钟自 0.8.0 发布日重新起算。

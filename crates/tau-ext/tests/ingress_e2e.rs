@@ -9,8 +9,8 @@ use std::path::PathBuf;
 
 use tau_core::probe::{ProbePoint, Verdict};
 use tau_core::probe_payload::{ProbePayload, SessionFacts};
-use tau_ext::bridge::BridgeConsent;
 use tau_ext::ExtensionHost;
+use tau_ext::bridge::BridgeConfig;
 
 fn artifact() -> Option<PathBuf> {
     let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -25,10 +25,9 @@ async fn whatsapp_ingress_end_to_end() {
         return;
     };
     let host = ExtensionHost::new();
-    let consent = BridgeConsent {
-        ingress: vec!["127.0.0.1:53913".into()],
-        inject: true,
-        ..BridgeConsent::default()
+    let consent = BridgeConfig {
+        listen: vec!["127.0.0.1:53913".into()],
+        ..BridgeConfig::default()
     };
     let loaded = host.load_bridge(&path, consent).expect("load bridge");
     let (_tools, probes) = loaded.into_parts();
@@ -66,7 +65,8 @@ async fn whatsapp_ingress_end_to_end() {
     // the ACK SHAPE is what we assert: not an error status line).
     let mut stream = std::net::TcpStream::connect("127.0.0.1:53913").unwrap();
     use std::io::{Read, Write};
-    let body = br#"{"type":"message","chat_id":"loopback-c1","user":"loopback-user","text":"ping"}"#;
+    let body =
+        br#"{"type":"message","chat_id":"loopback-c1","user":"loopback-user","text":"ping"}"#;
     write!(
         stream,
         "POST /im/whatsapp HTTP/1.1\r\nHost: 127.0.0.1\r\ncontent-type: application/json\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",

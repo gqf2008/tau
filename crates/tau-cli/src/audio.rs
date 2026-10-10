@@ -57,8 +57,7 @@ pub fn record_wav(seconds: u32, sine: bool) -> Result<Vec<u8>> {
             device.build_input_stream(
                 &config,
                 move |data: &[i16], _| {
-                    let _ = tx
-                        .send(data.iter().map(|s| *s as f32 / 32768.0).collect());
+                    let _ = tx.send(data.iter().map(|s| *s as f32 / 32768.0).collect());
                 },
                 err,
                 None,
@@ -93,11 +92,15 @@ pub fn record_wav(seconds: u32, sine: bool) -> Result<Vec<u8>> {
 /// played. A missing output device or unsupported config is an Err the
 /// caller reports as a NOTICE — headless machines must not go red.
 pub fn play_wav(wav: &[u8]) -> Result<u64> {
-    let mut reader = hound::WavReader::new(std::io::Cursor::new(wav))
-        .context("not a readable WAV")?;
+    let mut reader =
+        hound::WavReader::new(std::io::Cursor::new(wav)).context("not a readable WAV")?;
     let spec = reader.spec();
     if spec.sample_format != hound::SampleFormat::Int || spec.bits_per_sample != 16 {
-        bail!("unsupported WAV shape ({} bit {:?})", spec.bits_per_sample, spec.sample_format);
+        bail!(
+            "unsupported WAV shape ({} bit {:?})",
+            spec.bits_per_sample,
+            spec.sample_format
+        );
     }
     let mut samples: Vec<f32> = Vec::new();
     for ch in reader.samples::<i16>().step_by(1) {
@@ -152,9 +155,7 @@ pub fn play_wav(wav: &[u8]) -> Result<u64> {
         write_pos.store(at, std::sync::atomic::Ordering::Relaxed);
     };
     let stream = match out_format {
-        cpal::SampleFormat::F32 => {
-            device.build_output_stream(&config, make_cb, err, None)?
-        }
+        cpal::SampleFormat::F32 => device.build_output_stream(&config, make_cb, err, None)?,
         cpal::SampleFormat::I16 => {
             device.build_output_stream(
                 &config,
@@ -179,9 +180,7 @@ pub fn play_wav(wav: &[u8]) -> Result<u64> {
     let deadline = Instant::now()
         + Duration::from_secs_f32(play_len as f32 / out_rate as f32)
         + Duration::from_secs(2);
-    while pos.load(std::sync::atomic::Ordering::Relaxed) < play_len
-        && Instant::now() < deadline
-    {
+    while pos.load(std::sync::atomic::Ordering::Relaxed) < play_len && Instant::now() < deadline {
         std::thread::sleep(Duration::from_millis(20));
     }
     Ok(total)
@@ -239,12 +238,9 @@ pub fn stream_mic(seconds: u32) -> Result<tokio::sync::mpsc::UnboundedReceiver<V
 
     let err = |e| eprintln!("[tau] mic stream: {e}");
     let stream = match sample_format {
-        cpal::SampleFormat::F32 => device.build_input_stream(
-            &config,
-            move |data: &[f32], _| push(data),
-            err,
-            None,
-        )?,
+        cpal::SampleFormat::F32 => {
+            device.build_input_stream(&config, move |data: &[f32], _| push(data), err, None)?
+        }
         cpal::SampleFormat::I16 => device.build_input_stream(
             &config,
             move |data: &[i16], _| {
@@ -360,7 +356,11 @@ impl PlaybackSink {
     /// Feed one AudioDelta chunk. Returns true when a NEW segment just
     /// started (the renderer announces it with `desc()`).
     pub fn push(&mut self, data: &[u8], media_type: &str) -> bool {
-        if self.decoder.as_ref().is_some_and(|d| d.media_type != media_type) {
+        if self
+            .decoder
+            .as_ref()
+            .is_some_and(|d| d.media_type != media_type)
+        {
             // Segment switch: stale sound must not leak into the next
             // segment — same rule as an interrupt.
             self.clear();
@@ -377,7 +377,8 @@ impl PlaybackSink {
         if samples.is_empty() {
             return started;
         }
-        self.streamed.fetch_add(samples.len() as u64, Ordering::Relaxed);
+        self.streamed
+            .fetch_add(samples.len() as u64, Ordering::Relaxed);
         self.ensure_output();
         if let Some(out) = &self.output {
             // Chunk-wise naive resample (boundary clicks are accepted —
@@ -408,10 +409,7 @@ impl PlaybackSink {
     /// Silence NOW beats the tail of a canceled answer.
     pub fn clear(&mut self) {
         if let Some(out) = &self.output {
-            out.ring
-                .lock()
-                .unwrap_or_else(|p| p.into_inner())
-                .clear();
+            out.ring.lock().unwrap_or_else(|p| p.into_inner()).clear();
         }
         self.decoder = None;
         self.streamed.store(0, Ordering::Relaxed);
@@ -488,7 +486,11 @@ impl Output {
             other => bail!("unsupported output sample format: {other}"),
         };
         stream.play()?;
-        Ok(Self { _stream: stream, ring, rate })
+        Ok(Self {
+            _stream: stream,
+            ring,
+            rate,
+        })
     }
 }
 
@@ -499,7 +501,11 @@ impl Decoder {
         // (default 24000 — the OpenAI realtime convention), 16-bit LE
         // mono, no container.
         let bare = lower.starts_with("audio/pcm") || lower.starts_with("audio/l16");
-        let rate = if bare { mime_rate(&lower).unwrap_or(24_000) } else { 0 };
+        let rate = if bare {
+            mime_rate(&lower).unwrap_or(24_000)
+        } else {
+            0
+        };
         Self {
             media_type: media_type.to_string(),
             rate,
@@ -639,12 +645,16 @@ fn wav_encode(samples: &[i16], sample_rate: u32) -> Vec<u8> {
             bits_per_sample: 16,
             sample_format: hound::SampleFormat::Int,
         };
-        let mut writer = hound::WavWriter::new(&mut cursor, spec)
-            .expect("wav writer over a Vec cannot fail");
+        let mut writer =
+            hound::WavWriter::new(&mut cursor, spec).expect("wav writer over a Vec cannot fail");
         for &sample in samples {
-            writer.write_sample(sample).expect("wav write to a Vec cannot fail");
+            writer
+                .write_sample(sample)
+                .expect("wav write to a Vec cannot fail");
         }
-        writer.finalize().expect("wav finalize to a Vec cannot fail");
+        writer
+            .finalize()
+            .expect("wav finalize to a Vec cannot fail");
     }
     cursor.into_inner()
 }
@@ -702,7 +712,10 @@ mod tests {
         assert_eq!(sink.streamed(), 32_000);
         assert_eq!(sink.desc(), "audio/wav @ 16kHz");
         let summary = sink.end_run().unwrap();
-        assert!(summary.contains("streamed 32000 samples (audio/wav @ 16kHz)"), "{summary}");
+        assert!(
+            summary.contains("streamed 32000 samples (audio/wav @ 16kHz)"),
+            "{summary}"
+        );
     }
 
     #[test]

@@ -548,7 +548,9 @@ mod tests {
         assert_eq!(fp, "0000000000000000");
         assert_eq!(
             key.verifying_key().to_bytes(),
-            SigningKey::from_bytes(&[7u8; 32]).verifying_key().to_bytes()
+            SigningKey::from_bytes(&[7u8; 32])
+                .verifying_key()
+                .to_bytes()
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

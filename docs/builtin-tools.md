@@ -58,7 +58,7 @@ tau --no-builtin-tools -p "…"     # no native tools at all
 
 - Every run that starts an agent prints which built-ins it registered —
   including `none`. The administrative subcommands (`tau tree`,
-  `tau consent`, …) never reach the agent and say nothing.
+  `tau trust`, …) never reach the agent and say nothing.
 
   ```
   [tau] built-in tools: bash, edit, find, grep, ls, powershell, read, write
@@ -136,12 +136,14 @@ batches, not inside a running tool, so a long command is bounded by its
 These tools are host code, and nothing about the wasm sandbox applies to
 them:
 
-- They are **not** affected by `--deny-wasi`. That flag governs what
-  wasm components may do; the built-ins run in the tau process itself
-  (`docs/extensions.md` §7).
-- They do **not** ask for approval in print or REPL mode.
-  `--allow-inject`, `--remember`, the consent store — none of it gates
-  them. A tool call runs. The one exception is `--acp`, where the four
+- They are **not** wasm components: the built-ins run in the tau process
+  itself, with its permissions — which is also the only posture a
+  component has since 0.8.0, when `--deny-wasi` and the capability gates
+  were deleted (`docs/extensions.md` §7).
+- They do **not** ask for approval in print or REPL mode. Nothing gates
+  them — there is no consent store left to consult (0.8.0), and
+  `--allow-inject` is gone. A tool call runs. The one exception is
+  `--acp`, where the four
   mutating tools ask the client first (`docs/acp.md`): that is a
   permission prompt for a human on the other end of the connection, not
   a sandbox.

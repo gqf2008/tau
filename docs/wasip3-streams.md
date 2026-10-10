@@ -65,7 +65,9 @@ concurrent API 驱动器，当前死于 guest 链接/宿主校验两道上游错
 2. **没有输入侧负载在等**：tau-cli 是终端应用，无 mic/camera 采集；
    实时提供者的真实形态（duplex 走自己的网络连接 + SSE 增量 +
    audio-delta 推送）在现有边界上已成立。缺的不是能力，是一个更
-   省拷贝的 ABI。
+   省拷贝的 ABI。（0.8.0 注：当时说的「实时提供者」指 wasm realtime
+   组件，`world realtime` 已随裁定 2/3 删除——媒体面全程宿主内部，
+   采集/播放从来只在宿主侧。见 `docs/realtime-av.md`。）
 3. 解锁是**时间确定**的：Rust 六周一列，1.100 ≈ 2026-11 中旬，
    等两个月换「作者工具链不变」，值。
 
@@ -109,6 +111,10 @@ wasm32-wasip2; cargo build` 的分发故事直接破产」。**该理由不再�
 | host 侧（wasmtime 49.0.1）绑定 | ✅ 编译并运行 | 四个 world 全部 `bindgen!` 通过；async 按界面开——`imports: { default: async }` + `exports: { default: async }`（**没有** `async: true` 这个键） |
 | host 侧驱动一条 guest→host 流 | ✅ 既有 spike | 本目录的 host 驱动器：4×4096 字节逐字节校验 |
 | 非 Rust 生成器 | ✅ C / Go / JS，❌ C++ | `wit-bindgen c`：`…_execute_callback` / `…_execute_return` + `stream`/`future` 句柄 typedef；`wit-bindgen go`：`[async-lift]` + `StreamReader/StreamWriter/FutureReader` + `StreamVtable`；`jco types`：`Promise<[AsyncIterable<Event>, …]>`。**`wit-bindgen-cpp 0.62` 对 `future`/`stream` 是 `todo!()`**（`src/lib.rs:1750-1751`），C++ 访客暂时只能留在 `extension` world |
+
+（0.8.0 注：上表是 2026-09-28 的 spike 证据，其中 `world realtime` /
+`models` 的绑定行随裁定 2 删除；async 流 ABI 的证据本身仍然成立，
+只是今天只有 `bridge` world 用它。）
 
 **结论更新**：wasip3 的 *std* 仍等 1.100（本文原判断没错），但 **Component Model 的异步
 ABI 今天就能在 stable + `wasm32-wasip2` 上用**。于是「等」的理由只剩一条：等一个更省拷贝

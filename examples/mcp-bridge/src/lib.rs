@@ -2,10 +2,12 @@
 //! core knows nothing about MCP — this component translates MCP's JSON-RPC
 //! into the `tau:extension/tools` interface, over either transport:
 //!
-//! - stdio: spawns the server via the consent-gated `process` capability
-//!   (TAU_MCP_COMMAND, a JSON argv array)
-//! - streamable HTTP: POSTs to the server via the origin-allowlisted `http`
-//!   capability (TAU_MCP_URL; the host scoped the network to that origin)
+//! - stdio: spawns the server via the `process` capability
+//!   (TAU_MCP_COMMAND, a JSON argv array) — no argv approval at call time
+//!   since 0.8.0: the world a component is installed as is the declaration
+//! - streamable HTTP: POSTs to the server via the `http` capability
+//!   (TAU_MCP_URL) — no origin allowlist since 0.8.0: the request goes
+//!   where the component says
 //!
 //! 0.7.0 shape, and the two things that changed are the two things this
 //! bridge is made of:
@@ -226,8 +228,8 @@ fn restore(conn: Connection) {
     CONNECTION.with(|cell| *cell.borrow_mut() = Some(conn));
 }
 
-/// Pick the transport from the consent env vars and run the MCP initialize
-/// handshake.
+/// Pick the transport from the host-provided env vars and run the MCP
+/// initialize handshake.
 async fn connect() -> Result<Connection, Failure> {
     let transport = match (
         std::env::var("TAU_MCP_URL").ok(),
@@ -273,7 +275,9 @@ async fn connect() -> Result<Connection, Failure> {
             SUPPORTED_VERSIONS.join(", ")
         )));
     }
-    let _ = conn.notify("notifications/initialized", serde_json::json!({})).await;
+    let _ = conn
+        .notify("notifications/initialized", serde_json::json!({}))
+        .await;
     Ok(conn)
 }
 
@@ -358,8 +362,10 @@ impl Connection {
 
 impl StdioConnection {
     async fn spawn(argv: &[String]) -> Result<Self, Failure> {
-        let child = Child::spawn(&Options { argv: argv.to_vec() })
-            .map_err(|e| Failure::Transport(format!("spawn {argv:?}: {}", describe(&e))))?;
+        let child = Child::spawn(&Options {
+            argv: argv.to_vec(),
+        })
+        .map_err(|e| Failure::Transport(format!("spawn {argv:?}: {}", describe(&e))))?;
         // The stdin stream: the guest holds the writer for the life of the
         // connection, and dropping it (with the connection) closes the pipe
         // — that is the EOF the child sees, the same signal 0.6.0's explicit
@@ -493,10 +499,7 @@ impl HttpConnection {
         }
         if status != 200 {
             let body = read_all(response).await.unwrap_or_default();
-            return Err(format!(
-                "http {status}: {}",
-                String::from_utf8_lossy(&body)
-            ));
+            return Err(format!("http {status}: {}", String::from_utf8_lossy(&body)));
         }
         if let Some(session) = response.header("mcp-session-id") {
             self.session_id = Some(session);
@@ -540,8 +543,8 @@ impl HttpConnection {
         }
         let body = read_all(response).await?;
         let text = String::from_utf8_lossy(&body);
-        let message: serde_json::Value = serde_json::from_str(text.trim())
-            .map_err(|e| format!("bad json from server: {e}"))?;
+        let message: serde_json::Value =
+            serde_json::from_str(text.trim()).map_err(|e| format!("bad json from server: {e}"))?;
         if message["id"].as_u64() == Some(id) || message.get("id").is_none() {
             return Ok(message);
         }
@@ -563,12 +566,11 @@ async fn read_all(response: &HttpResponse) -> Result<Vec<u8>, String> {
     }
 }
 
-/// A host error, spelled for the log. The variant is the part a guest could
-/// branch on (a missing grant is a different situation from a dead peer) and
-/// the string is the host's detail — never a thing to match on.
+/// A host error, spelled for the log. The typed variant is what a guest
+/// branches on (never the string); the string is the host's detail, meant
+/// for the human reading the log.
 fn describe(error: &HostError) -> String {
     match error {
-        HostError::Refused(why) => format!("refused: {why}"),
         HostError::Failed(why) => format!("failed: {why}"),
         HostError::Invalid(why) => format!("invalid: {why}"),
     }

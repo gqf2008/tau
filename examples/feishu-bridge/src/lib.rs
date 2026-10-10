@@ -3,18 +3,19 @@
 //!
 //! - inbound: `session_start` opens the ws long connection (TAU_MCP_URL,
 //!   a ws(s) URL); later calls drain the frames the platform sent and
-//!   `host::steer` the IM message into the session (consent:
-//!   --allow-inject). Components only run when called — the pump rides
-//!   existing call points, and the host's ws actor keeps the connection
-//!   alive between them.
+//!   `host::steer` the IM message into the session (no call-time gate
+//!   since 0.8.0: the install record authorizes steering). Components
+//!   only run when called — the pump rides existing call points, and the
+//!   host's ws actor keeps the connection alive between them.
 //! - outbound: `after_response` posts the assembled assistant message
-//!   back over the origin-allowlisted `http` capability (the reply API,
-//!   derived from the ws URL: same origin, `/reply`).
+//!   back over the `http` capability (the reply API, derived from the ws
+//!   URL: same authority, `/reply`) — no origin allowlist since 0.8.0:
+//!   the request goes where the component says.
 //! - session/identity mapping: the channel config file
 //!   (docs/im-channels.md 会话/身份映射配置文件格式) read from
-//!   TAU_IM_CONFIG via ambient WASI — endpoint cross-checked against the
-//!   consented TAU_MCP_URL, unknown chats ignored, users.allow is
-//!   fail-closed (identity is a consent question).
+//!   TAU_IM_CONFIG via ambient WASI — endpoint cross-checked against
+//!   TAU_MCP_URL, unknown chats ignored, users.allow is fail-closed
+//!   (identity is the component's own allowlist decision).
 //!
 //! 0.7.0 shape, and the shape this adapter is made of is now split in two
 //! on purpose: both of its obligations WAIT (`ws.connect` and
@@ -40,7 +41,7 @@
 //!       --target wasm32-wasip2 --release
 //! Use (loopback mock on :PORT):
 //!   tau --allow-unsigned --mcp-bridge .../feishu_bridge.wasm \
-//!       --mcp-url ws://127.0.0.1:PORT/im --allow-inject --demo -p "hi"
+//!       --mcp-url ws://127.0.0.1:PORT/im --demo -p "hi"
 
 wit_bindgen::generate!({
     path: "../../wit/tau.wit",
@@ -58,7 +59,7 @@ use tau::extension::types::{Content, Error as HostError, Message, Role};
 use tau::extension::{http, ws};
 
 /// The channel's slice of the mapping config (the channel whose
-/// `endpoint` equals the consented TAU_MCP_URL governs this run).
+/// `endpoint` equals TAU_MCP_URL governs this run).
 struct ChannelConfig {
     /// chat_id → session file path (echoed in notices; a single-session
     /// run never switches sessions — the path serves supervisors and
@@ -105,13 +106,11 @@ fn say(level: Level, text: String) {
     let _ = host::notify(level, &[Content::Text(text)]);
 }
 
-/// A host error as one notice line. The typed kind picks the wording — a
-/// missing consent grant is a different situation from a dead peer — and
-/// the detail is the host's own sentence, handed through verbatim (the
-/// contract says never to match on it, so this never does).
+/// A host error as one notice line. The typed variant is what a guest
+/// branches on (never the string); the detail is the host's own sentence,
+/// handed through verbatim.
 fn host_error(verb: &str, error: HostError) -> String {
     match error {
-        HostError::Refused(detail) => format!("{verb} refused: {detail}"),
         HostError::Failed(detail) => format!("{verb} failed: {detail}"),
         HostError::Invalid(detail) => format!("{verb} invalid: {detail}"),
     }
@@ -124,13 +123,15 @@ fn json_get<'a>(json: &'a str, key: &str) -> Option<&'a str> {
     // defaults to it); skip it rather than demand compact encoding.
     let pat = format!("\"{key}\":");
     let start = json.find(&pat)? + pat.len();
-    let rest = json[start..].trim_start_matches(|c: char| c.is_whitespace()).strip_prefix('"')?;
+    let rest = json[start..]
+        .trim_start_matches(|c: char| c.is_whitespace())
+        .strip_prefix('"')?;
     let end = rest.find('"')?;
     Some(&rest[..end])
 }
 
-/// ws(s) URL → the reply API URL: same origin (so the ws consent origin
-/// covers it), path replaced with /reply.
+/// ws(s) URL → the reply API URL: same authority (the reply API sits
+/// next to the ws endpoint), path replaced with /reply.
 fn reply_url(ws_url: &str) -> Option<String> {
     let (scheme, rest) = ws_url.split_once("://")?;
     let httpish = match scheme {
@@ -150,10 +151,16 @@ fn load_config(adapter: &mut Adapter) {
     }
     let fail = |adapter: &mut Adapter, reason: String| {
         adapter.config_error = true;
-        let _ = host::notify(Level::Error, &[Content::Text(format!("feishu: config: {reason}"))]);
+        let _ = host::notify(
+            Level::Error,
+            &[Content::Text(format!("feishu: config: {reason}"))],
+        );
     };
     let Ok(path) = std::env::var("TAU_IM_CONFIG") else {
-        return fail(adapter, "TAU_IM_CONFIG not set — identity is fail-closed".into());
+        return fail(
+            adapter,
+            "TAU_IM_CONFIG not set — identity is fail-closed".into(),
+        );
     };
     // The host preopens each drive as /<letter> (Windows) / `/`
     // (elsewhere), but the env var arrives in the host's own spelling
@@ -178,17 +185,24 @@ fn load_config(adapter: &mut Adapter) {
         Err(e) => return fail(adapter, format!("{path} is not valid JSON: {e}")),
     };
     if parsed["version"] != 1 {
-        return fail(adapter, format!("unsupported config version: {}", parsed["version"]));
+        return fail(
+            adapter,
+            format!("unsupported config version: {}", parsed["version"]),
+        );
     }
     let endpoint = std::env::var("TAU_MCP_URL").unwrap_or_default();
     let channels = parsed["channels"].as_array().cloned().unwrap_or_default();
-    // The channel whose endpoint equals the consented one governs — a
-    // config can never smuggle in an endpoint the user did not consent.
+    // The channel whose endpoint equals TAU_MCP_URL governs — the run's
+    // endpoint is host config (--mcp-url), never a value the config file
+    // gets to pick.
     let channel = channels
         .iter()
         .find(|c| c["endpoint"].as_str() == Some(endpoint.as_str()));
     let Some(channel) = channel else {
-        return fail(adapter, format!("no channel matches consented endpoint {endpoint}"));
+        return fail(
+            adapter,
+            format!("no channel matches the configured endpoint {endpoint}"),
+        );
     };
     let mut chats = std::collections::HashMap::new();
     if let Some(map) = channel["chats"].as_object() {
@@ -216,7 +230,9 @@ async fn connect() {
     if ADAPTER.with(|cell| cell.borrow().connection.is_some()) {
         return;
     }
-    let Ok(url) = std::env::var("TAU_MCP_URL") else { return };
+    let Ok(url) = std::env::var("TAU_MCP_URL") else {
+        return;
+    };
     match ws::Connection::connect(url).await {
         Ok(connection) => ADAPTER.with(|cell| cell.borrow_mut().connection = Some(connection)),
         Err(error) => say(Level::Error, host_error("feishu: ws connect", error)),
@@ -232,8 +248,7 @@ fn pump_inbound() {
         return;
     }
     ADAPTER.with(|cell| load_config(&mut cell.borrow_mut()));
-    let drained =
-        ADAPTER.with(|cell| cell.borrow().connection.as_ref().map(ws::Connection::poll));
+    let drained = ADAPTER.with(|cell| cell.borrow().connection.as_ref().map(ws::Connection::poll));
     let frames = match drained {
         // An error here is the connection's end (reported once by the
         // actor and repeated by `poll` until the resource is dropped), or
@@ -255,7 +270,9 @@ fn pump_inbound() {
 /// a platform that sends anything else (a pong the actor already answered,
 /// a binary frame, an unknown event) simply gets drained past.
 fn handle_frame(frame: ws::Frame) -> bool {
-    let ws::Frame::Text(text) = frame else { return false };
+    let ws::Frame::Text(text) = frame else {
+        return false;
+    };
     if json_get(&text, "type") != Some("message") {
         return false;
     }
@@ -306,8 +323,8 @@ fn handle_frame(frame: ws::Frame) -> bool {
                     ),
                 )
             }
-            // A refused steer leaves `awaiting_reply` false, so no reply
-            // can leave over a channel the user did not consent to.
+            // A failed steer leaves `awaiting_reply` false, so no reply
+            // leaves for a message that never entered the session.
             Err(error) => (Level::Error, host_error("feishu: steer", error)),
         }
     });
@@ -322,20 +339,30 @@ fn handle_frame(frame: ws::Frame) -> bool {
 async fn post_reply(payload: &Payload) {
     let pending = ADAPTER.with(|cell| {
         let adapter = cell.borrow();
-        adapter.awaiting_reply.then(|| adapter.chat_id.clone()).flatten()
+        adapter
+            .awaiting_reply
+            .then(|| adapter.chat_id.clone())
+            .flatten()
     });
     let Some(chat_id) = pending else { return };
     let text = match payload {
         Payload::AfterResponse(response) => {
-            response.message.content.iter().find_map(|block| match block {
-                Content::Text(text) => Some(text.clone()),
-                _ => None,
-            })
+            response
+                .message
+                .content
+                .iter()
+                .find_map(|block| match block {
+                    Content::Text(text) => Some(text.clone()),
+                    _ => None,
+                })
         }
         _ => None,
     };
     let Some(text) = text else { return };
-    let Some(url) = std::env::var("TAU_MCP_URL").ok().and_then(|url| reply_url(&url)) else {
+    let Some(url) = std::env::var("TAU_MCP_URL")
+        .ok()
+        .and_then(|url| reply_url(&url))
+    else {
         return;
     };
     // The body is built as JSON rather than interpolated: assistant text

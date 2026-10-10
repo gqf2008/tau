@@ -2,7 +2,7 @@
 # JavaScript upper extension: jco componentize (StarlingMonkey backend).
 # --disable http fetch-event: the StarlingMonkey runtime links wasi:http
 # by default, which tau's ambient-WASI linker does not provide (extensions
-# needing network go through tau's consent-gated http capability instead).
+# needing network go through tau's `http` capability instead).
 set -euo pipefail
 cd "$(dirname "$0")"
 mkdir -p target

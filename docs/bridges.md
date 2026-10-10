@@ -12,21 +12,22 @@ MCP server process  ← JSON-RPC over stdio →  mcp-bridge.wasm  ← tools ifac
 (any language)                               (sandboxed)                     (zero MCP knowledge)
 ```
 
-## The consent model
+## The capability model
 
 Bridge components need a capability ordinary extensions never get: spawning a
-process. tau grants it exactly one way:
+process. The contract gives it exactly one way:
 
 - The WIT `bridge` world imports `tau:extension/process`: `spawn` returns a
   `child` **resource** (since 0.7.0) — `stdin(stream<u8>)` with a future
   that resolves when the host has passed everything on, `stdout()` /
   `stderr()` as streams, `wait()` as a future, `kill()`. The interface is
   a generic spawn-with-pipes; it does not know MCP exists, and nothing in
-  it is protocol-shaped.
-- The host links this interface **only** for components loaded via
-  `load_bridge`, and only when the caller passes the allowed command argv.
-  Passing the argv **is** the consent. The bridge receives it through the
-  single env var `TAU_MCP_COMMAND` (a JSON argv array) — the only env it gets.
+  it is protocol-shaped. The `extension` world does not import it at all.
+- **Since 0.8.0 there is no per-command gate behind it.** The world a
+  component was installed as IS the declaration, and the argv the host is
+  configured with is host configuration, not a runtime consent. The bridge
+  receives it through the single tau-supplied env var `TAU_MCP_COMMAND`
+  (a JSON argv array).
 - The wasm sandbox contains the bridge itself. The spawned server process is
   the user's own choice of risk, exactly as with a native MCP client.
 
@@ -98,47 +99,13 @@ that takes nothing for `TAU_PROCESS_STDIN_IDLE_TIMEOUT_MS` (30s) gets its
 write dropped with a line that names the budget and asks whether the
 child is reading at all.
 
-The host enforces the consent: an origin allowlist (`scheme://host[:port]`).
-Every request's origin is checked before sending; **redirects are never
-followed** — a redirect would silently move the request to an origin the user
-did not consent to. Both capabilities are always linked but granted empty by
-default, so an unconsented bridge loads fine and fails at call time, not
-instantiation time. (This is about the custom `process`/`http` capabilities;
-ambient WASI — fs/env/stdio/network — is granted by default and can be
-withdrawn with `--deny-wasi`. Which also means this allowlist is a
-declaration of intent rather than a boundary: `docs/extensions.md` §7
-says exactly what ambient WASI hands a component and how one routes
-around the gates.)
-
-## Provider credential delivery
-
-A wasm provider calling a real LLM gateway needs an API credential. The
-host does not keep secrets for the guest — the user hands a bearer token
-to the host explicitly (`--provider-auth <token>`), and the host injects
-it into every `run`'s request-json as `"auth": {"bearer": "<token>"}`.
-**Giving it IS the consent** to place the token in guest memory. The
-token is never written to the consent file; the *delivery grant* can be
-(`--provider-auth ... --remember` once). A remembered grant lets the
-`TAU_PROVIDER_AUTH` environment variable flow on later runs without the
-flag — the secret is re-given every run, only the grant is remembered.
-Without flag or remembered grant, `TAU_PROVIDER_AUTH` alone does **not**
-reach the component (a note on stderr says so).
-
-Guest side: read `parsed["auth"]["bearer"]`; no field means none was
-given. See `examples/http-provider` (forwards it as the Authorization
-header and marks the output `[auth]`).
-
-## Provider network egress
-
-The **provider world imports the same `http` interface**: a wasm provider
-reaches its model API over exactly this consent-gated channel (same origin
-allowlist, same no-redirects rule, same shared host implementation in
-`tau-ext/src/http.rs`). Grant origins with `--provider-origin
-https://api.openai.com` (repeatable); like bridge consent, grants are
-remembered per signing fingerprint with `--remember` and recalled on later
-runs. Without consent the provider loads but every http call fails at call
-time — a well-behaved provider reports that as an error event, never a trap
-(see `examples/http-provider`).
+Requests go where the component says: since 0.8.0 there is no origin
+allowlist, no consent to record and no call-time gate — the world a
+component was installed as is its whole declaration (`docs/extensions.md`
+§7). **Redirects are never followed**: a redirect is a different endpoint
+than the one the component named, and the protocols here name their
+endpoint explicitly, so following one would silently move the request
+somewhere nobody asked for.
 
 CLI:
 
@@ -148,16 +115,24 @@ tau --mcp-bridge mcp_bridge.wasm \
     -p "use the echo tool"
 ```
 
-The URL's origin becomes the allowlist; the bridge learns the endpoint via
-`TAU_MCP_URL`. Stdio and HTTP consents are independent — pass either or both;
-the bridge prefers `TAU_MCP_URL` when both are present.
+The bridge learns the endpoint via `TAU_MCP_URL`. Stdio and HTTP are
+independent — pass either or both; the bridge prefers `TAU_MCP_URL` when
+both are present.
+
+The 0.7.0 version of this file had two more sections here — provider
+credential delivery and provider network egress. Both described a wasm
+provider, and 0.8.0 deleted that world: `world provider`, `world
+realtime`, `--provider-wasm`, `--provider-origin`, `--provider-auth`
+and the delivery grant are all gone, and models are host code
+(`docs/extensions.md` §5).
 
 ## Worked example: walgit
 
 `walgit mcp` (the walgit git server's client-side adapter) is a stdio MCP server whose tools are
 the walgit CLI itself (read-only by default; the one writing tool needs
 `--allow-write`). tau spawns it through the bridge like any other stdio
-server — the `--mcp-command` flag is the consent:
+server — the `--mcp-command` flag is the host configuration (0.8.0: no
+call-time gate behind it):
 
 ```
 tau --allow-unsigned \

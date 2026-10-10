@@ -63,8 +63,9 @@ stdio，方法名即 `initialize` / `session/new` / `session/prompt` /
 
 **结论先行（本文采用）：** ACP 的 sandbox tier **只对 agent 原生工具与宿主
 驱动的会话做保证**，**不**对 wasm guest 的 ambient WASI 做任何声称——那是 F1
-（owner 2026-09-28 裁定 A）的既有权衡，要改就单独立项。想约束 guest，现有
-唯一硬手段仍是 per-fingerprint 的 `--deny-wasi`（all-or-nothing）。
+（owner 2026-09-28 裁定 A）的既有权衡，要改就单独立项。想约束 guest，
+0.8.0 之后唯一的答案在 OS 层（账号/容器/VM）：`--deny-wasi` 已随全部
+运行时门删除，组件恒得 ambient WASI、以 tau 进程的权限运行。
 
 ## 3. 传输与帧
 
@@ -112,9 +113,11 @@ stdio，方法名即 `initialize` / `session/new` / `session/prompt` /
 
 ## 6. consent 与授权：谁在授权
 
-今天 consent 是**按组件签名指纹**（bridge argv / origins、provider auth、WASI
-deny），由**人类在 CLI 上**用 flag 授予并可用 `--remember` 固化
-（`main.rs` 的 `recall_consent` / `maybe_remember`）。
+**0.8.0 已删掉整套 consent**：没有按指纹记的 grant、没有 `--remember`、
+没有 consent store（`main.rs` 的 `recall_consent` / `maybe_remember`
+也不在了）。今天剩下的授权动作是**安装/信任签名**这一次——它只回答
+「这是哪个组件」，组件以 tau 进程的权限运行。下面几段是本文写作时的
+形态，保留作设计记录。
 
 宿主经协议驱动时，是**宿主替用户**授权。协议里必须写清三件事：
 
