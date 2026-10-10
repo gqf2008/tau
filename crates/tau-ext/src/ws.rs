@@ -524,7 +524,7 @@ mod tests {
         assert_eq!(WsRegistry::origin_of("garbage"), None);
         // Same parser as http: userinfo cannot smuggle the authority.
         assert_eq!(
-            WsRegistry::origin_of("ws://consented.test@evil.test/"),
+            WsRegistry::origin_of("ws://trusted.test@evil.test/"),
             Some("http://evil.test".to_string())
         );
     }

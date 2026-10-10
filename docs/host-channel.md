@@ -127,8 +127,9 @@ breaking 批次，见 wit-review.md 修订记录。
   英文字符串；detail 字符串留给人看日志。注意 wit-bindgen 0.62 里
   类型化错误的 `Display` 印的是 Debug 形——别解析字符串，匹配变体。
 - **0.8.0：三臂已成两臂。** `refused` 随运行时能力门一起离开契约
-  （见 `docs/wit-0.8-draft.md` 裁定 1），上面这条「别解析字符串、
-  匹配变体」的纪律不变；0.7.0 段落里的 `Refused("…")` 只是历史示例。
+  （见 `docs/wit-0.8-draft.md` 裁定 1），0.8.0 起只剩 `failed` /
+  `invalid`；上面那条「别解析字符串、匹配变体」的纪律不变，上面
+  小节的 arm 列表是 0.7.0 当时的状态。
 - `level` 与 `topic` 从注释里的字符串约定变成真枚举——未知
   level/topic 从「调用时拒」变成「不可表示」。
 - `subscribe` 返回 `subscription` **资源**：0.3.0 的

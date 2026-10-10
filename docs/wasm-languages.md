@@ -5,6 +5,11 @@
 ——工具名 `upper`，把入参 `text` 转大写——用七种主流语言各写一个最小
 扩展，并用同一条验收命令**真加载**验证。
 
+> **2026-10-10 记（口径）**：现行契约已是 `tau:extension@0.8.0`，而本矩阵的
+> ✅ 两格与全部结论都是按 0.7.0 契约测出来的产物；0.8.0 是减法（删
+> `provider` / `realtime` 两个 world 与全部运行时门），装载时要求组件带 0.8.0
+> 绑定，所以下面的 ✅ 不能读成「对现行契约有效」——下次复查要连契约口径一起重建。
+
 契约版本 `tau:extension@0.7.0`（0.6.0 → 0.7.0：`tools.definitions` /
 `tools.execute` 与四个 world 的桥接口改为
 `async func`，`probes` 的 `point` / `payload` / `verdict` 从 JSON 字符串改为类型化
@@ -154,9 +159,11 @@ Caused by:
 
 矩阵因此不变：✅ 仍只有 C 与 Python 两格，本轮未重建任何产物。下次复查
 触发条件＝上游三者（wit-bindgen cpp 生成器 / `@bytecodealliance/jco` /
-TinyGo）任一发布新版，**或**上述三条 tracking issue 任一关闭，即复查
-（措辞与 docs/wit-redesign.md §9 第 1 项一致，新增 issue 关闭这一可观测
-信号）。查询口径备忘（本机实测）：crates.io API
+TinyGo）任一发布新版——这是 `docs/wit-redesign.md` §9 第 1 项的口径。
+三条 tracking issue 的动态只作辅助信号，而且**「关闭」不等于解阻塞**：
+`jco` #2189 已于 2026-10-01 被 maintainer 以「componentize-js 尚无 async
+支持」为由关闭（不是修复落地），本文件的 splicer panic 因此仍在。查询口径
+备忘（本机实测）：crates.io API
 对本机 403，rsproxy 稀疏索引对 wit-bindgen 系路径 404；可靠来源是 GitHub
 Releases（wit-bindgen、TinyGo）与 npm registry（`@bytecodealliance/jco`）。
 

@@ -52,5 +52,5 @@ binary and assembles `dist/tau-<version>-<target>.zip` — process in `docs/rele
 `crates/tau-core` (session tree, agent loop), `tau-openai` / `tau-anthropic` (the built-in
 providers), `tau-ext` (wasmtime host, two worlds), `tau-tools` (native tools), `tau-cli`
 (the `tau` binary). `wit/tau.wit` is the versioned contract. Contracts worth reading first:
-`tau-core/src/model.rs` (never panic — errors are terminal stream events),
-`tau-core/src/session.rs` (the tree model), `docs/probes.md`, `docs/events.md`.
+`crates/tau-core/src/model.rs` (never panic — errors are terminal stream events),
+`crates/tau-core/src/session.rs` (the tree model), `docs/probes.md`, `docs/events.md`.
