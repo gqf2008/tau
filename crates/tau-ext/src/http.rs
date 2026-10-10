@@ -317,16 +317,16 @@ impl HttpRegistry {
         }
     }
 
-    /// Extract the consent origin ("scheme://host[:port]") from an http(s)
-    /// URL; strips userinfo and any path.
+    /// Extract the origin ("scheme://host[:port]") of an http(s) URL;
+    /// strips userinfo and any path.
     ///
     /// The authority ends at the first `/`, `?`, `#`, OR `\` — reqwest
     /// parses URLs the WHATWG way, where `\` is a path delimiter for
     /// special schemes and `?`/`#` start the query/fragment. Scanning
     /// only for `/` (or stripping userinfo past those delimiters) would
-    /// let `http://evil?@consented/` or `http://evil\\@consented/`
-    /// compute a consented origin while the request goes to evil —
-    /// the check must see the same host the client will dial.
+    /// let `http://evil?@trusted/` or `http://evil\\@trusted/` compute an
+    /// origin other than the one the request dials — the check must see
+    /// the same host the client will dial.
     pub(crate) fn origin_of(url: &str) -> Option<String> {
         let (scheme, rest) = url.split_once("://")?;
         if scheme != "http" && scheme != "https" {
@@ -334,7 +334,7 @@ impl HttpRegistry {
         }
         let authority_end = rest.find(['/', '?', '#', '\\']).unwrap_or(rest.len());
         let authority = &rest[..authority_end];
-        // Strip any userinfo; host[:port] is what consent covers.
+        // Strip any userinfo; host[:port] is the origin.
         let host_port = authority.rsplit('@').next()?;
         if host_port.is_empty() {
             return None;
@@ -372,7 +372,7 @@ mod tests {
     }
 
     /// A loopback server that answers the first request with `headers` and
-    /// then hands the socket to `then`. Returns the origin to consent to.
+    /// then hands the socket to `then`. Returns the origin it serves.
     fn serve<F>(headers: &'static str, then: F) -> String
     where
         F: FnOnce(std::net::TcpStream) + Send + 'static,
@@ -437,10 +437,10 @@ mod tests {
 
     #[tokio::test]
     async fn redirects_are_never_followed() {
-        // A consented origin answering 302 could otherwise move the
-        // request somewhere the user never consented to. The guest must
-        // see the 302 itself — and any follow-up to the Location target
-        // goes through the gate again (covered above).
+        // An origin answering 302 could otherwise move the request to a
+        // host the caller never asked for. The guest must see the 302
+        // itself — and any follow-up to the Location target goes through
+        // the URL-shape check again (covered above).
         let origin = serve(
             "HTTP/1.1 302 Found\r\n\
              location: http://evil.test/loot\r\n\
@@ -450,10 +450,10 @@ mod tests {
         );
         let registry = registry_for(&origin);
         let url = format!("{origin}/give-up-your-secrets");
-        let client = registry.start(&url).expect("consented");
+        let client = registry.start(&url).expect("origin");
         let mut response = send(&client, "GET", &url, &[], &[], BUDGET, BUDGET)
             .await
-            .expect("consented request");
+            .expect("request");
         assert_eq!(response.status(), 302, "redirect was followed");
         assert_eq!(
             response.header("location"),
@@ -475,7 +475,7 @@ mod tests {
         });
         let registry = registry_for(&origin);
         let url = format!("{origin}/silent");
-        let client = registry.start(&url).expect("consented");
+        let client = registry.start(&url).expect("origin");
         let started = std::time::Instant::now();
         let err = send(
             &client,
@@ -508,10 +508,10 @@ mod tests {
             |_| {},
         );
         let registry = registry_for(&origin);
-        let client = registry.start(&origin).expect("consented");
+        let client = registry.start(&origin).expect("origin");
         let mut response = send(&client, "GET", &origin, &[], &[], BUDGET, BUDGET)
             .await
-            .expect("consented request");
+            .expect("request");
         let chunks = drain(&mut response.take_body()).await;
         let bytes: Vec<u8> = chunks
             .into_iter()
@@ -534,7 +534,7 @@ mod tests {
             },
         );
         let registry = registry_for(&origin);
-        let client = registry.start(&origin).expect("consented");
+        let client = registry.start(&origin).expect("origin");
         let mut response = send(
             &client,
             "GET",
@@ -545,7 +545,7 @@ mod tests {
             Duration::from_millis(200),
         )
         .await
-        .expect("consented request");
+        .expect("request");
         let started = std::time::Instant::now();
         let items = drain(&mut response.take_body()).await;
         assert_eq!(items.len(), 1, "a silent body ends with one report");
@@ -584,10 +584,10 @@ mod tests {
             },
         );
         let registry = registry_for(&origin);
-        let client = registry.start(&origin).expect("consented");
+        let client = registry.start(&origin).expect("origin");
         let mut response = send(&client, "GET", &origin, &[], &[], BUDGET, BUDGET)
             .await
-            .expect("consented request");
+            .expect("request");
         let mut body = response.take_body();
         assert!(
             body.rx.recv().await.is_some(),

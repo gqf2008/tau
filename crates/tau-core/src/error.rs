@@ -20,8 +20,8 @@ use std::fmt;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum HostError {
     /// The call itself failed: network error, peer gone, child exited,
-    /// permission denied, signature check failed. The detail is the
-    /// host's or the OS's own message.
+    /// permission denied. The detail is the host's or the OS's own
+    /// message.
     Failed(String),
     /// The call is not valid here: unknown topic, size limit, wrong
     /// state, already closed. A guest bug or a contract misuse — the

@@ -138,8 +138,8 @@ interface types {
     /// reading the log. Never match on the string.
     variant error {
         /// The call itself failed: network error, peer gone, child exited,
-        /// program not found, permission denied by the OS, signature check
-        /// failed. The detail is the host's or the OS's own message.
+        /// program not found, permission denied by the OS. The detail is
+        /// the host's or the OS's own message.
         failed(string),
         /// The call is not valid here: unknown topic, size limit, wrong
         /// state, already closed. A guest bug or a contract misuse.

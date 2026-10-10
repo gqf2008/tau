@@ -106,7 +106,7 @@ impl IngressRegistry {
         self.shutdown.store(true, Ordering::Relaxed);
     }
 
-    /// `ingress.listen`: register `route` on every consented address,
+    /// `ingress.listen`: register `route` on every configured address,
     /// spawning the address's server on first use. The returned handle IS
     /// the registration since 0.7.0: dropping it stops serving the route
     /// (0.6.0's explicit `close`, and its "close a route that was never

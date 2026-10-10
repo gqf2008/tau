@@ -171,7 +171,7 @@ fn b64() -> base64::engine::GeneralPurpose {
 }
 
 /// Short hex fingerprint of a public key (first 16 hex chars of its
-/// sha256) — the trust store's filename and the consent store's key.
+/// sha256) — the trust store's filename.
 pub fn fingerprint(key: &VerifyingKey) -> String {
     hex_prefix(&Sha256::digest(key.as_bytes()), 16)
 }

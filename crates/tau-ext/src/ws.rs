@@ -244,9 +244,8 @@ pub(crate) fn connect_timeout_ms() -> u32 {
     crate::budget("TAU_WS_CONNECT_TIMEOUT_MS", default).as_millis() as u32
 }
 
-/// Consent origin of a ws(s) URL, in the http(s) form the allowlist
-/// holds (ws:->http:, wss:->https:). Public so the CLI can build a
-/// consent allowlist from ws URLs.
+/// The http(s) form of a ws(s) URL (ws:->http:, wss:->https:), userinfo
+/// stripped. Public so the CLI can check the shape of a `--mcp-url`.
 pub fn origin_of(url: &str) -> Option<String> {
     WsRegistry::origin_of(url)
 }
@@ -262,10 +261,10 @@ impl WsRegistry {
         Self
     }
 
-    /// Consent origin of a ws(s) URL, in the http(s) form the allowlist
-    /// holds: ws:->http:, wss:->https:, then the same authority parsing as
-    /// http (userinfo stripped, authority ends at the first delimiter --
-    /// the check must see the same host the client will dial).
+    /// The http(s) form of a ws(s) URL: ws:->http:, wss:->https:, then the
+    /// same authority parsing as http (userinfo stripped, authority ends at
+    /// the first delimiter -- the caller must see the same host the client
+    /// will dial).
     pub fn origin_of(url: &str) -> Option<String> {
         let (scheme, rest) = url.split_once("://")?;
         let httpish = match scheme {
