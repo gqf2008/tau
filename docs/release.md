@@ -142,5 +142,7 @@ do not publish a partial chain.
 - The wasm example components (`examples/*`, separate workspaces) are
   built from source; their distribution channel is OCI (`tau push`,
   see `docs/oci.md`), not crates.io.
-- `repository`/`homepage` metadata is set (github.com/gqf2008/tau,
-  public since 2026-09).
+- `repository`/`homepage` metadata is set (github.com/gqf2008/tau, the
+  public mirror — walgit holds the source of truth: branches and the
+  collaboration ledger under `refs/collab/*`; public on GitHub since
+  2026-09).
