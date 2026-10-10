@@ -1,5 +1,5 @@
 //! In-process ingress end-to-end (docs/im-channels.md): load the
-//! whatsapp bridge with an ingress consent, fire session_start (the
+//! whatsapp bridge with a host-configured listen address, fire session_start (the
 //! guest calls ingress.listen), then POST a webhook event over a real
 //! TCP connection and assert the guest's ingress-handler answered.
 //! The pty-level leg (listener survives into an idle REPL that wakes
@@ -25,11 +25,11 @@ async fn whatsapp_ingress_end_to_end() {
         return;
     };
     let host = ExtensionHost::new();
-    let consent = BridgeConfig {
+    let config = BridgeConfig {
         listen: vec!["127.0.0.1:53913".into()],
         ..BridgeConfig::default()
     };
-    let loaded = host.load_bridge(&path, consent).expect("load bridge");
+    let loaded = host.load_bridge(&path, config).expect("load bridge");
     let (_tools, probes) = loaded.into_parts();
     assert_eq!(probes.len(), 1, "bridge must contribute its probes");
 
@@ -60,7 +60,7 @@ async fn whatsapp_ingress_end_to_end() {
         std::thread::sleep(std::time::Duration::from_millis(50));
     }
 
-    // POST a webhook event: the guest steers (inject consented — the
+    // POST a webhook event: the guest steers (session injection needs no flag — the
     // control channel is late-bound and absent here, so steer may fail;
     // the ACK SHAPE is what we assert: not an error status line).
     let mut stream = std::net::TcpStream::connect("127.0.0.1:53913").unwrap();

@@ -205,16 +205,17 @@ async fn bridge_exposes_mcp_tools_over_http() {
 }
 
 #[tokio::test]
-async fn http_origin_outside_allowlist_is_denied() {
+async fn an_unreachable_mcp_endpoint_fails_the_load() {
     let Some(path) = artifact() else {
         eprintln!("skipping: mcp_bridge.wasm not built");
         return;
     };
     let host = ExtensionHost::new();
-    // mcp_url is granted (so the bridge knows where to POST) but the origins
-    // allowlist is EMPTY: every http request must fail, so the handshake
-    // fails and the load errors out. A bridge can never reach an origin the
-    // user did not consent to.
+    // mcp_url points at a port nothing listens on (127.0.0.1:9), so the
+    // bridge's handshake fails and the load errors out. Since 0.8.0 there is
+    // no origins allowlist and no call-time gate: the bridge dials whatever
+    // the host's configuration points it at, and an unreachable peer is what
+    // fails here.
     let result = host.load_bridge(
         &path,
         BridgeConfig {
